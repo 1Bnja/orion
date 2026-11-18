@@ -37,7 +37,7 @@ use eframe::egui::text::LayoutJob;
 use eframe::egui::text::LayoutSection;
 use eframe::egui::text::TextFormat;
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Medio ciclo de parpadeo (encendido o apagado), el mismo valor que usa Windows por defecto.
 pub(crate) const BLINK: Duration = Duration::from_millis(530);
@@ -50,24 +50,28 @@ const PADDING: f32 = 10.0;
 const SEPARATOR: egui::Color32 = egui::Color32::from_rgb(0x29, 0x2e, 0x42);
 
 /// Borde de arriba de cada fila en pantalla. Antes de cada fila de `gap_rows` (prompts de bloques)
-/// se deja `gap` de aire, salvo en la fila 0. Si con ese aire la fila `keep` (la del cursor) quedaría
-/// debajo de `bottom`, todo sube lo necesario: igual que cuando la salida hace scroll.
+/// se deja `gap` de aire, salvo en la fila 0. Las filas con `hidden[fila]` (salida de un bloque
+/// colapsado) no ocupan lugar. Si con todo eso la fila `keep` (la del cursor) quedaría debajo
+/// de `bottom`, todo sube lo necesario: igual que cuando la salida hace scroll.
 fn row_tops(
-    rows: usize,
     cell_h: f32,
     gap: f32,
     gap_rows: &[usize],
+    hidden: &[bool],
     keep: Option<usize>,
     (top, bottom): (f32, f32),
 ) -> Vec<f32> {
+    let rows = hidden.len();
     let mut y = top;
     let mut tops = Vec::with_capacity(rows);
-    for row in 0..rows {
+    for (row, &is_hidden) in hidden.iter().enumerate() {
         if row > 0 && gap_rows.contains(&row) {
             y += gap;
         }
         tops.push(y);
-        y += cell_h;
+        if !is_hidden {
+            y += cell_h;
+        }
     }
     if let Some(row) = keep.filter(|&r| r < rows) {
         let overflow = tops[row] + cell_h - bottom;
@@ -124,20 +128,99 @@ pub(crate) fn cursor_on(blinking: bool, since: Duration) -> bool {
     !blinking || (since.as_millis() / BLINK.as_millis()).is_multiple_of(2)
 }
 
+/// Un bloque tal como se ve ahora en pantalla.
+#[derive(Clone, Copy)]
+struct BlockView {
+    /// Posición en `Blocks::list`.
+    index: usize,
+    status: Status,
+    /// Primera y última fila visible del bloque (inclusive).
+    first: usize,
+    last: usize,
+    /// ¿Se ve el prompt? (si no, el bloque empezó más arriba de la pantalla).
+    prompt_visible: bool,
+    /// Primera fila visible de la salida, si se ve.
+    output_row: Option<usize>,
+    collapsed: bool,
+    output_lines: usize,
+}
+
+/// Algo que se pidió con el mouse sobre un bloque; se aplica al final del frame.
+enum BlockAction {
+    CopyCommand(usize),
+    CopyOutput(usize),
+    ToggleCollapse(usize),
+}
+
 impl Orion {
-    /// Bloques que se ven ahora: (estado, primera fila, última fila, ¿se ve su prompt?).
+    /// Bloques que se ven ahora, de arriba hacia abajo.
     /// En apps de pantalla completa (vim, less) no hay bloques: la pantalla alternativa no tiene prompts.
-    fn block_spans(&self) -> Vec<(Status, usize, usize, bool)> {
+    fn block_views(&self) -> Vec<BlockView> {
         if self.term.mode().contains(TermMode::ALT_SCREEN) {
             return Vec::new();
         }
         let lines = visible_logical_lines(&self.term);
         let cursor_line = logical_line(&self.term, self.term.grid().cursor.point.line);
-        let spans = self.blocks.list.iter().filter_map(|block| {
-            let (first, last) = visible_rows_of(&lines, block.span(cursor_line))?;
-            Some((block.status(), first, last, lines[first] == block.prompt))
-        });
-        spans.collect()
+        let views = self
+            .blocks
+            .list
+            .iter()
+            .enumerate()
+            .filter_map(|(index, block)| {
+                let span = block.span(cursor_line);
+                let (first, last) = visible_rows_of(&lines, span)?;
+                let output_row = block
+                    .output
+                    .and_then(|out| visible_rows_of(&lines, (out, span.1)))
+                    .map(|(row, _)| row);
+                Some(BlockView {
+                    index,
+                    status: block.status(),
+                    first,
+                    last,
+                    prompt_visible: lines[first] == block.prompt,
+                    output_row,
+                    collapsed: block.collapsed,
+                    output_lines: block.output_lines(),
+                })
+            });
+        views.collect()
+    }
+
+    /// Aplica lo que se pidió sobre un bloque: copiar (con aviso) o colapsar/expandir.
+    fn apply_block_action(&mut self, ctx: &egui::Context, action: BlockAction) {
+        let (text, what) = match action {
+            BlockAction::ToggleCollapse(i) => {
+                if let Some(block) = self.blocks.list.get_mut(i) {
+                    block.collapsed = !block.collapsed;
+                }
+                return;
+            }
+            BlockAction::CopyCommand(i) => {
+                let text = self.blocks.list.get(i).map(|b| b.command.clone());
+                (text, "Comando copiado")
+            }
+            BlockAction::CopyOutput(i) => {
+                let text = self
+                    .blocks
+                    .list
+                    .get(i)
+                    .and_then(|b| b.output_text(&self.term));
+                (text, "Salida copiada")
+            }
+        };
+        match text {
+            Some(text) => {
+                ctx.copy_text(text);
+                self.toast = Some((what.into(), Instant::now()));
+            }
+            None => {
+                self.toast = Some((
+                    "Esa salida ya no está en el historial".into(),
+                    Instant::now(),
+                ))
+            }
+        }
     }
 
     /// Grilla, cursor, selección y menú de clic derecho.
@@ -259,9 +342,78 @@ impl Orion {
                     let _ = self.shell.writer.borrow_mut().write_all(&report);
                 }
 
-                // Clic derecho: menú con copiar, pegar y configuración (si la app no pidió el mouse).
+                // --- Dónde va cada fila: con aire antes de cada bloque, como en Warp ---
+                let views = self.block_views();
+                let gap = (cell.y * 0.6).round();
+                let gap_rows: Vec<usize> = views
+                    .iter()
+                    .filter(|v| v.prompt_visible)
+                    .map(|v| v.first)
+                    .collect();
+                let rows = grid.1 as usize;
+                // La salida de los bloques colapsados no ocupa lugar.
+                let mut hidden = vec![false; rows];
+                for view in views.iter().filter(|v| v.collapsed) {
+                    if let Some(out) = view.output_row {
+                        hidden[out..=view.last].fill(true);
+                    }
+                }
+                let offset = self.term.grid().display_offset();
+                let cursor_row = self.term.grid().cursor.point.line.0 + offset as i32;
+                let keep = usize::try_from(cursor_row).ok();
+                let tops = row_tops(
+                    cell.y,
+                    gap,
+                    &gap_rows,
+                    &hidden,
+                    keep,
+                    (rect.min.y, rect.max.y),
+                );
+                let row_bottom = |row: usize| tops[row] + if hidden[row] { 0.0 } else { cell.y };
+
+                // Bloque bajo el mouse: para sus botones y para el menú de clic derecho.
+                let hovered = hover
+                    .filter(|pos| area.contains(*pos) && !mouse_mode)
+                    .and_then(|pos| {
+                        let row = row_at(&tops, pos.y);
+                        views
+                            .iter()
+                            .find(|v| (v.first..=v.last).contains(&row))
+                            .copied()
+                    });
+                if response.secondary_clicked() {
+                    self.context_block = hovered.map(|v| v.index);
+                }
+                let mut actions = Vec::new();
+
+                // Clic derecho: acciones del bloque (si hay uno ahí), copiar, pegar y configuración.
                 if !mouse_mode {
                     response.context_menu(|ui| {
+                        let block = self
+                            .context_block
+                            .and_then(|i| Some((i, self.blocks.list.get(i)?)));
+                        if let Some((i, block)) =
+                            block.filter(|(_, b)| matches!(b.status(), Status::Done(..)))
+                        {
+                            if ui.button("Copiar comando").clicked() {
+                                actions.push(BlockAction::CopyCommand(i));
+                                ui.close();
+                            }
+                            if ui.button("Copiar salida").clicked() {
+                                actions.push(BlockAction::CopyOutput(i));
+                                ui.close();
+                            }
+                            let toggle = if block.collapsed {
+                                "Expandir bloque"
+                            } else {
+                                "Colapsar bloque"
+                            };
+                            if ui.button(toggle).clicked() {
+                                actions.push(BlockAction::ToggleCollapse(i));
+                                ui.close();
+                            }
+                            ui.separator();
+                        }
                         let has_selection = self.term.selection.is_some();
                         if ui
                             .add_enabled(has_selection, egui::Button::new("Copiar"))
@@ -282,16 +434,6 @@ impl Orion {
                         }
                     });
                 }
-
-                // --- Dónde va cada fila: con aire antes de cada bloque, como en Warp ---
-                let spans = self.block_spans();
-                let gap = (cell.y * 0.6).round();
-                let gap_rows: Vec<usize> = spans.iter().filter(|s| s.3).map(|s| s.1).collect();
-                let offset = self.term.grid().display_offset();
-                let cursor_row = self.term.grid().cursor.point.line.0 + offset as i32;
-                let keep = usize::try_from(cursor_row).ok();
-                let rows = grid.1 as usize;
-                let tops = row_tops(rows, cell.y, gap, &gap_rows, keep, (rect.min.y, rect.max.y));
 
                 // --- Selección con el mouse ---
                 // El mouse está en coordenadas "con aire"; se pasan a una grilla pareja antes de buscar la celda.
@@ -333,11 +475,22 @@ impl Orion {
 
                 // --- Bloques: debajo del texto van el tinte, el separador y la barra de color ---
                 let rows_rect = |first: usize, last: usize| {
-                    let (top, bottom) = (tops[first], tops[last] + cell.y);
-                    egui::Rect::from_x_y_ranges(area.x_range(), top..=bottom)
+                    egui::Rect::from_x_y_ranges(area.x_range(), tops[first]..=row_bottom(last))
                 };
-                for &(status, first, last, prompt_visible) in &spans {
+                for view in &views {
+                    let BlockView {
+                        status,
+                        first,
+                        last,
+                        prompt_visible,
+                        ..
+                    } = *view;
                     let r = rows_rect(first, last);
+                    if hovered.is_some_and(|h| h.index == view.index) {
+                        // El bloque bajo el mouse se ilumina apenas: así se ve a cuál apuntan los botones.
+                        let glow = egui::Color32::from_rgba_unmultiplied(0xc0, 0xca, 0xf5, 6);
+                        painter.rect_filled(r, 0.0, glow);
+                    }
                     if matches!(status, Status::Done(Some(code), _) if code != 0) {
                         // Un tinte rojo muy suave: los comandos que fallaron se encuentran de un vistazo.
                         let tint = egui::Color32::from_rgba_unmultiplied(0xf7, 0x76, 0x8e, 14);
@@ -356,6 +509,9 @@ impl Orion {
                 }
 
                 for (row, cells) in visible_rows(&self.term).iter().enumerate() {
+                    if hidden[row] {
+                        continue; // salida de un bloque colapsado
+                    }
                     // Cada fila se dibuja en su posición: fila * alto de celda + el aire de los bloques de arriba.
                     let origin = egui::pos2(rect.min.x, tops[row]);
                     let mut text = LayoutJob::default();
@@ -410,32 +566,113 @@ impl Orion {
                 // --- Bloques: encima del texto, la etiqueta con el resultado y lo que tardó ---
                 let small = egui::FontId::new(size * 0.8, egui::FontFamily::Monospace);
                 let mut running = false;
-                for &(status, first, _, prompt_visible) in &spans {
-                    let Some(label) = status_label(status).filter(|_| prompt_visible) else {
+                for view in views.iter().filter(|v| v.prompt_visible) {
+                    let Some(mut label) = status_label(view.status) else {
                         continue;
                     };
-                    running |= matches!(status, Status::Running(_));
-                    let color = status_color(status);
+                    running |= matches!(view.status, Status::Running(_));
+                    let done = matches!(view.status, Status::Done(..));
+                    if view.collapsed {
+                        label = format!("▸ {} líneas · {label}", view.output_lines);
+                    }
+                    let color = status_color(view.status);
                     let galley = painter.layout_no_wrap(label, small.clone(), color);
-                    let row_top = tops[first];
+                    let row_top = tops[view.first];
                     let pos = egui::pos2(
                         rect.max.x - 4.0 - galley.size().x,
                         row_top + (cell.y - galley.size().y) / 2.0,
                     );
                     let pill =
                         egui::Rect::from_min_size(pos, galley.size()).expand2(egui::vec2(6.0, 1.0));
+                    // Clic en la etiqueta: colapsar o expandir el bloque.
+                    let id = ui.scope_id().with(("bloque", view.index));
+                    let click = ui.interact(pill, id, egui::Sense::click());
+                    let border = if click.hovered() && done {
+                        color
+                    } else {
+                        SEPARATOR
+                    };
                     painter.rect_filled(pill, 4.0, BG);
                     painter.rect_stroke(
                         pill,
                         4.0,
-                        egui::Stroke::new(1.0, SEPARATOR),
+                        egui::Stroke::new(1.0, border),
                         egui::StrokeKind::Inside,
                     );
                     painter.galley(pos, galley, color);
+                    if done {
+                        let tip = if view.collapsed {
+                            "Clic para expandir"
+                        } else {
+                            "Clic para colapsar"
+                        };
+                        if click
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(tip)
+                            .clicked()
+                        {
+                            actions.push(BlockAction::ToggleCollapse(view.index));
+                        }
+                    }
+
+                    // Al pasar el mouse por un bloque terminado: botones para copiar, a la izquierda de la etiqueta.
+                    if done && hovered.is_some_and(|h| h.index == view.index) {
+                        let mut right = pill.min.x - 6.0;
+                        let buttons = [
+                            (
+                                "⧉ salida",
+                                "Copiar la salida",
+                                BlockAction::CopyOutput(view.index),
+                            ),
+                            (
+                                "⧉ comando",
+                                "Copiar el comando",
+                                BlockAction::CopyCommand(view.index),
+                            ),
+                        ];
+                        for (text, tip, action) in buttons {
+                            let text = egui::RichText::new(text)
+                                .font(small.clone())
+                                .color(PALETTE[7]);
+                            let width = painter
+                                .layout_no_wrap(text.text().into(), small.clone(), FG)
+                                .size()
+                                .x;
+                            let r = egui::Rect::from_min_max(
+                                egui::pos2(right - width - 12.0, pill.min.y),
+                                egui::pos2(right, pill.max.y),
+                            );
+                            let button = egui::Button::new(text)
+                                .fill(BG)
+                                .stroke(egui::Stroke::new(1.0, SEPARATOR))
+                                .corner_radius(4.0);
+                            if ui.put(r, button).on_hover_text(tip).clicked() {
+                                actions.push(action);
+                            }
+                            right = r.min.x - 4.0;
+                        }
+                    }
                 }
                 if running {
                     // El reloj del comando que corre se actualiza solo (egui no repinta si nada cambia).
                     ui.ctx().request_repaint_after(Duration::from_millis(100));
+                }
+
+                // Aviso breve de "copiado", abajo al centro.
+                if let Some((text, since)) = &self.toast {
+                    let left = 1.5 - since.elapsed().as_secs_f32();
+                    if left > 0.0 {
+                        let galley = painter.layout_no_wrap(text.clone(), small.clone(), FG);
+                        let pos = egui::pos2(
+                            area.center().x - galley.size().x / 2.0,
+                            rect.max.y - galley.size().y - 6.0,
+                        );
+                        let r = egui::Rect::from_min_size(pos, galley.size())
+                            .expand2(egui::vec2(10.0, 4.0));
+                        painter.rect_filled(r, 6.0, SELECTION);
+                        painter.galley(pos, galley, FG);
+                        ui.ctx().request_repaint_after(Duration::from_millis(100));
+                    }
                 }
                 // El cursor usa el color "Cursor" del Term (las apps pueden cambiarlo con OSC 12).
                 let color = resolve(Color::Named(NamedColor::Cursor), colors);
@@ -486,6 +723,11 @@ impl Orion {
                         }
                     }
                 }
+
+                // Lo que se pidió sobre los bloques en este frame (botones, etiqueta o menú).
+                for action in actions {
+                    self.apply_block_action(ui.ctx(), action);
+                }
             });
     }
 }
@@ -497,7 +739,8 @@ mod tests {
     #[test]
     fn rows_leave_room_before_blocks() {
         // 4 filas de 10 px; un bloque empieza en la fila 2: ahí se suman 5 px de aire.
-        let tops = row_tops(4, 10.0, 5.0, &[0, 2], None, (0.0, 100.0));
+        let all = [false; 4];
+        let tops = row_tops(10.0, 5.0, &[0, 2], &all, None, (0.0, 100.0));
         assert_eq!(tops, [0.0, 10.0, 25.0, 35.0]); // sin aire en la fila 0
         // El aire entre la fila 1 y la 2 cuenta como fila 1; arriba de todo, fila 0.
         assert_eq!(row_at(&tops, 21.0), 1);
@@ -505,8 +748,19 @@ mod tests {
         assert_eq!(row_at(&tops, 9.9), 0);
         assert_eq!(row_at(&tops, -3.0), 0);
         // Si el cursor (fila 3) no cabe en 40 px, todo sube 5 px.
-        let tops = row_tops(4, 10.0, 5.0, &[2], Some(3), (0.0, 40.0));
+        let tops = row_tops(10.0, 5.0, &[2], &all, Some(3), (0.0, 40.0));
         assert_eq!(tops, [-5.0, 5.0, 20.0, 30.0]);
+        // Filas 1 y 2 ocultas (bloque colapsado): no ocupan lugar, y el mouse cae en la fila de abajo.
+        let tops = row_tops(
+            10.0,
+            0.0,
+            &[],
+            &[false, true, true, false],
+            None,
+            (0.0, 100.0),
+        );
+        assert_eq!(tops, [0.0, 10.0, 10.0, 10.0]);
+        assert_eq!(row_at(&tops, 12.0), 3);
     }
 
     #[test]

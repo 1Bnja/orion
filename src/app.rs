@@ -48,6 +48,10 @@ pub(crate) struct Orion {
     marks: MarkScanner,
     /// Un bloque por comando: lo que escribiste, dónde está su salida, código y duración.
     blocks: Blocks,
+    /// Bloque sobre el que se hizo clic derecho (el menú lo usa mientras está abierto).
+    context_block: Option<usize>,
+    /// Aviso breve ("Salida copiada") y desde cuándo se muestra.
+    toast: Option<(String, Instant)>,
 }
 
 impl Orion {
@@ -86,6 +90,8 @@ impl Orion {
             focused: true,
             marks: MarkScanner::default(),
             blocks: Blocks::default(),
+            context_block: None,
+            toast: None,
         })
     }
 }

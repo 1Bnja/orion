@@ -129,6 +129,8 @@ pub(crate) struct Block {
     started: Option<Instant>,
     /// Dónde empezó el comando (marca B): fila absoluta (contando el historial) y columna.
     command_start: Option<(usize, usize)>,
+    /// Colapsado: se ve solo el prompt con el comando, la salida queda oculta.
+    pub(crate) collapsed: bool,
 }
 
 /// En qué está un bloque.
@@ -156,6 +158,31 @@ impl Block {
     /// Líneas lógicas que ocupa, `[desde, hasta)`. Un bloque abierto llega hasta la línea del cursor.
     pub(crate) fn span(&self, cursor_line: usize) -> (usize, usize) {
         (self.prompt, self.end.unwrap_or(cursor_line + 1))
+    }
+
+    /// Cuántas líneas lógicas tiene la salida (0 si todavía no hay o no terminó).
+    pub(crate) fn output_lines(&self) -> usize {
+        match (self.output, self.end) {
+            (Some(start), Some(end)) => end.saturating_sub(start),
+            _ => 0,
+        }
+    }
+
+    /// El texto de la salida, tal como se ve (sin colores). None si el bloque no terminó
+    /// o si su salida ya no está en el historial.
+    pub(crate) fn output_text<T>(&self, term: &Term<T>) -> Option<String> {
+        let (start, end) = (self.output?, self.end?);
+        if start >= end {
+            return Some(String::new()); // un comando sin salida
+        }
+        let first = grid_line_of(term, start)?;
+        // `end` es la primera línea que NO es salida: la salida termina en la fila de arriba.
+        let last = grid_line_of(term, end)? - 1;
+        let text = term.bounds_to_string(
+            Point::new(first, Column(0)),
+            Point::new(last, term.grid().last_column()),
+        );
+        Some(text.trim_end().to_string())
     }
 }
 
@@ -224,6 +251,7 @@ impl Blocks {
                 duration: None,
                 started: None,
                 command_start: None,
+                collapsed: false,
             }),
             Mark::CommandStart => {
                 if let Some(block) = self.current() {
@@ -285,6 +313,22 @@ pub(crate) fn logical_line<T>(term: &Term<T>, line: Line) -> usize {
     (grid.topmost_line().0..line.0)
         .filter(|&l| !grid[Line(l)][last].flags.contains(Flags::WRAPLINE))
         .count()
+}
+
+/// Lo inverso de `logical_line`: la primera fila de la grilla donde empieza la línea lógica `logical`.
+pub(crate) fn grid_line_of<T>(term: &Term<T>, logical: usize) -> Option<Line> {
+    let grid = term.grid();
+    let last = grid.last_column();
+    let mut current = 0;
+    for l in grid.topmost_line().0..=grid.bottommost_line().0 {
+        if current == logical {
+            return Some(Line(l));
+        }
+        if !grid[Line(l)][last].flags.contains(Flags::WRAPLINE) {
+            current += 1;
+        }
+    }
+    None
 }
 
 /// Fila contando desde la más vieja del historial (no cambia al llegar líneas nuevas, mientras quepan).
@@ -381,6 +425,11 @@ mod tests {
         assert_eq!((echo.prompt, echo.output, echo.end), (0, Some(1), Some(3)));
         assert_eq!(echo.exit_code, Some(0));
         assert!(echo.duration.is_some());
+        // La salida se puede copiar tal cual: dos líneas.
+        assert_eq!(echo.output_text(&term).as_deref(), Some("hola\nmundo"));
+        assert_eq!(echo.output_lines(), 2);
+        // `cmd /c exit 3` no imprimió nada.
+        assert_eq!(done[1].output_text(&term).as_deref(), Some(""));
         assert_eq!(done[1].command, "cmd /c exit 3");
         assert_eq!(done[1].exit_code, Some(3));
         // El último prompt queda abierto, esperando un comando.
