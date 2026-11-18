@@ -11,7 +11,7 @@ fn main() {
     res.set_icon("assets/orion.ico")
         .set("ProductName", "Orion")
         .set("FileDescription", "Orion")
-        .set("LegalCopyright", "© 2026 1Bnja");
+        .set("LegalCopyright", "© 2026 Benjamin Canales · MIT");
     if let Err(e) = res.compile() {
         // Sin el compilador de recursos (rc.exe, del Windows SDK) Orion igual compila, solo que sin ícono.
         println!("cargo:warning=no pude agregar el ícono al .exe: {e}");

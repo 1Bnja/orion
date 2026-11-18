@@ -3,6 +3,7 @@ name = "orion"
 version = "0.1.0"
 edition = "2024"
 description = "Una terminal simple para Windows 11"
+license = "MIT"
 repository = "https://github.com/1Bnja/orion"
 
 [dependencies]
