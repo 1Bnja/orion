@@ -131,6 +131,76 @@ pub(crate) struct Block {
     command_start: Option<(usize, usize)>,
 }
 
+/// En qué está un bloque.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Status {
+    /// Estás escribiendo el comando (todavía no apretaste Enter).
+    Editing,
+    /// El comando está corriendo, hace este tiempo.
+    Running(Duration),
+    /// Terminó, con su código (si la shell lo informó) y lo que tardó.
+    Done(Option<i32>, Duration),
+}
+
+impl Block {
+    pub(crate) fn status(&self) -> Status {
+        match (self.output, self.end) {
+            (None, _) => Status::Editing,
+            (Some(_), None) => {
+                Status::Running(self.started.map_or_else(Duration::default, |t| t.elapsed()))
+            }
+            (Some(_), Some(_)) => Status::Done(self.exit_code, self.duration.unwrap_or_default()),
+        }
+    }
+
+    /// Líneas lógicas que ocupa, `[desde, hasta)`. Un bloque abierto llega hasta la línea del cursor.
+    pub(crate) fn span(&self, cursor_line: usize) -> (usize, usize) {
+        (self.prompt, self.end.unwrap_or(cursor_line + 1))
+    }
+}
+
+/// "120 ms", "2.3 s", "1 min 5 s": corto y fácil de leer de un vistazo.
+pub(crate) fn format_duration(d: Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1000 {
+        format!("{ms} ms")
+    } else if ms < 60_000 {
+        format!("{:.1} s", d.as_secs_f32())
+    } else {
+        format!("{} min {} s", ms / 60_000, ms / 1000 % 60)
+    }
+}
+
+/// Primera y última fila visible (inclusive) cuyas líneas lógicas están en `[start, end)`.
+/// `lines[fila]` = línea lógica de esa fila (ver `visible_logical_lines`).
+pub(crate) fn visible_rows_of(
+    lines: &[usize],
+    (start, end): (usize, usize),
+) -> Option<(usize, usize)> {
+    let inside = |l: &usize| (start..end).contains(l);
+    let first = lines.iter().position(inside)?;
+    let last = lines.iter().rposition(inside)?;
+    Some((first, last))
+}
+
+/// Línea lógica de cada fila visible (fila 0 = arriba de la pantalla, teniendo en cuenta el scroll).
+pub(crate) fn visible_logical_lines<T>(term: &Term<T>) -> Vec<usize> {
+    let grid = term.grid();
+    let last = grid.last_column();
+    let top = Line(-(grid.display_offset() as i32));
+    let mut logical = logical_line(term, top);
+    (0..grid.screen_lines() as i32)
+        .map(|row| {
+            let here = logical;
+            // La línea lógica avanza cuando una fila no sigue en la de abajo.
+            if !grid[top + row][last].flags.contains(Flags::WRAPLINE) {
+                logical += 1;
+            }
+            here
+        })
+        .collect()
+}
+
 /// Los bloques de la sesión, del más viejo al más nuevo.
 #[derive(Default)]
 pub(crate) struct Blocks {
@@ -376,6 +446,44 @@ mod tests {
         assert_eq!(block.command, "echo orion-bloque");
         assert_eq!(block.exit_code, Some(0));
         let _ = shell.child.kill();
+    }
+
+    #[test]
+    fn visible_rows_map_to_logical_lines() {
+        let mut term = Term::new(Config::default(), &term_size((10, 5)), VoidListener);
+        let mut processor: Processor = Processor::new();
+        // "uno", una línea de 15 letras (2 filas), "tres".
+        processor.advance(&mut term, b"uno\r\nabcdefghijklmno\r\ntres");
+        let lines = visible_logical_lines(&term);
+        assert_eq!(lines, [0, 1, 1, 2, 3]); // la fila 2 sigue siendo la línea lógica 1
+        // Un bloque en las líneas lógicas [1, 3) ocupa las filas 1 a 3.
+        assert_eq!(visible_rows_of(&lines, (1, 3)), Some((1, 3)));
+        assert_eq!(visible_rows_of(&lines, (7, 9)), None); // fuera de la vista
+    }
+
+    #[test]
+    fn durations_read_well() {
+        let ms = Duration::from_millis;
+        assert_eq!(format_duration(ms(120)), "120 ms");
+        assert_eq!(format_duration(ms(2340)), "2.3 s");
+        assert_eq!(format_duration(ms(65_000)), "1 min 5 s");
+    }
+
+    #[test]
+    fn status_follows_the_block_lifecycle() {
+        let mut term = Term::new(Config::default(), &term_size((40, 10)), VoidListener);
+        let mut blocks = Blocks::default();
+        let status = |b: &Blocks| b.list.last().unwrap().status();
+        run(
+            &mut term,
+            &mut blocks,
+            &[b"\x1b]133;A\x07$ \x1b]133;B\x07ls"],
+        );
+        assert_eq!(status(&blocks), Status::Editing);
+        run(&mut term, &mut blocks, &[b"\r\n\x1b]133;C\x07"]);
+        assert!(matches!(status(&blocks), Status::Running(_)));
+        run(&mut term, &mut blocks, &[b"\x1b]133;D;1\x07"]);
+        assert!(matches!(status(&blocks), Status::Done(Some(1), _)));
     }
 
     #[test]

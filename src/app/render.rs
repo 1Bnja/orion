@@ -1,8 +1,12 @@
 //! Dibujar la terminal: celdas con sus colores y estilos, cursor, selección y mouse.
 
 use crate::app::Orion;
+use crate::blocks::{
+    Status, format_duration, logical_line, visible_logical_lines, visible_rows_of,
+};
 use crate::colors::BG;
 use crate::colors::FG;
+use crate::colors::PALETTE;
 use crate::colors::SELECTION;
 use crate::colors::cell_colors;
 use crate::colors::readable;
@@ -38,6 +42,31 @@ use std::time::Duration;
 /// Medio ciclo de parpadeo (encendido o apagado), el mismo valor que usa Windows por defecto.
 pub(crate) const BLINK: Duration = Duration::from_millis(530);
 
+/// Margen a la izquierda del texto: ahí va la barra de color de cada bloque.
+const GUTTER: f32 = 10.0;
+/// Línea que separa un bloque del anterior (el "bg_highlight" de Tokyo Night).
+const SEPARATOR: egui::Color32 = egui::Color32::from_rgb(0x29, 0x2e, 0x42);
+
+/// Color de un bloque según su estado: verde bien, rojo error, amarillo corriendo, gris escribiendo.
+fn status_color(status: Status) -> egui::Color32 {
+    match status {
+        Status::Editing => PALETTE[8],
+        Status::Running(_) => PALETTE[3],
+        Status::Done(Some(0), _) | Status::Done(None, _) => PALETTE[2],
+        Status::Done(Some(_), _) => PALETTE[1],
+    }
+}
+
+/// Texto de la etiqueta de la derecha: "✓ 120 ms", "✗ 3 · 1.2 s", "● 4.0 s" mientras corre.
+fn status_label(status: Status) -> Option<String> {
+    Some(match status {
+        Status::Editing => return None,
+        Status::Running(t) => format!("● {}", format_duration(t)),
+        Status::Done(Some(0) | None, t) => format!("✓ {}", format_duration(t)),
+        Status::Done(Some(code), t) => format!("✗ {code} · {}", format_duration(t)),
+    })
+}
+
 /// Agrega un carácter al LayoutJob. Si tiene el mismo estilo que el anterior, extiende esa sección:
 /// así egui maneja unos pocos tramos por fila en vez de una sección por letra.
 pub(crate) fn push_char(job: &mut LayoutJob, c: char, format: TextFormat) {
@@ -60,6 +89,21 @@ pub(crate) fn cursor_on(blinking: bool, since: Duration) -> bool {
 }
 
 impl Orion {
+    /// Bloques que se ven ahora: (estado, primera fila, última fila, ¿se ve su prompt?).
+    /// En apps de pantalla completa (vim, less) no hay bloques: la pantalla alternativa no tiene prompts.
+    fn block_spans(&self) -> Vec<(Status, usize, usize, bool)> {
+        if self.term.mode().contains(TermMode::ALT_SCREEN) {
+            return Vec::new();
+        }
+        let lines = visible_logical_lines(&self.term);
+        let cursor_line = logical_line(&self.term, self.term.grid().cursor.point.line);
+        let spans = self.blocks.list.iter().filter_map(|block| {
+            let (first, last) = visible_rows_of(&lines, block.span(cursor_line))?;
+            Some((block.status(), first, last, lines[first] == block.prompt))
+        });
+        spans.collect()
+    }
+
     /// Grilla, cursor, selección y menú de clic derecho.
     pub(crate) fn draw_terminal(&mut self, ui: &mut egui::Ui) {
         egui::Frame::central_panel(ui.style())
@@ -72,7 +116,7 @@ impl Orion {
                 let cell = ui
                     .ctx()
                     .fonts_mut(|f| egui::vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
-                let grid = grid_size(ui.available_size(), cell);
+                let grid = grid_size(ui.available_size() - egui::vec2(GUTTER, 0.0), cell);
                 if grid != self.grid {
                     self.grid = grid;
                     // La grilla y la shell tienen que coincidir: si no, la shell corta líneas donde no debe.
@@ -80,8 +124,10 @@ impl Orion {
                     let _ = self.shell.master.resize(pty_size(grid));
                 }
 
-                let (rect, response) =
+                // `area` = toda la superficie (para el mouse); `rect` = donde va el texto, después del margen.
+                let (area, response) =
                     ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let rect = area.with_min_x(area.min.x + GUTTER);
 
                 // ¿La app pidió el mouse? (vim, btop, lazygit…) Shift+mouse sigue seleccionando, como en otras terminales.
                 let mode = *self.term.mode();
@@ -132,7 +178,7 @@ impl Orion {
                                 button,
                                 pressed,
                                 ..
-                            } if rect.contains(pos) || !pressed => {
+                            } if area.contains(pos) || !pressed => {
                                 let code = match button {
                                     egui::PointerButton::Primary => 0,
                                     egui::PointerButton::Middle => 1,
@@ -143,7 +189,7 @@ impl Orion {
                                 let (col, row) = cell_at(pos);
                                 report.extend(mouse_report(code + extra, col, row, pressed, sgr));
                             }
-                            egui::Event::PointerMoved(pos) if rect.contains(pos) => {
+                            egui::Event::PointerMoved(pos) if area.contains(pos) => {
                                 let at = cell_at(pos);
                                 // Solo al cambiar de celda: moverse dentro de la misma no le dice nada nuevo a la app.
                                 if self.mouse_cell == Some(at) {
@@ -220,6 +266,31 @@ impl Orion {
                 let painter = ui.painter();
                 let colors = self.term.colors();
                 let selected = self.term.renderable_content().selection;
+
+                // --- Bloques: debajo del texto van el tinte, el separador y la barra de color ---
+                let spans = self.block_spans();
+                let rows_rect = |first: usize, last: usize| {
+                    let top = area.min.y + first as f32 * cell.y;
+                    let bottom = area.min.y + (last + 1) as f32 * cell.y;
+                    egui::Rect::from_x_y_ranges(area.x_range(), top..=bottom)
+                };
+                for &(status, first, last, prompt_visible) in &spans {
+                    let r = rows_rect(first, last);
+                    if matches!(status, Status::Done(Some(code), _) if code != 0) {
+                        // Un tinte rojo muy suave: los comandos que fallaron se encuentran de un vistazo.
+                        let tint = egui::Color32::from_rgba_unmultiplied(0xf7, 0x76, 0x8e, 14);
+                        painter.rect_filled(r, 0.0, tint);
+                    }
+                    if prompt_visible && first > 0 {
+                        painter.hline(area.x_range(), r.min.y, egui::Stroke::new(1.0, SEPARATOR));
+                    }
+                    let bar = egui::Rect::from_x_y_ranges(
+                        area.min.x + 3.0..=area.min.x + 6.0,
+                        r.min.y + 3.0..=r.max.y - 3.0,
+                    );
+                    painter.rect_filled(bar, 1.5, status_color(status));
+                }
+
                 for (row, cells) in visible_rows(&self.term).iter().enumerate() {
                     // Cada fila se dibuja en una posición exacta: fila * alto de celda.
                     let origin = rect.min + egui::vec2(0.0, row as f32 * cell.y);
@@ -269,6 +340,37 @@ impl Orion {
                     }
 
                     painter.galley(origin, painter.layout_job(text), FG);
+                }
+
+                // --- Bloques: encima del texto, la etiqueta con el resultado y lo que tardó ---
+                let small = egui::FontId::new(size * 0.8, egui::FontFamily::Monospace);
+                let mut running = false;
+                for &(status, first, _, prompt_visible) in &spans {
+                    let Some(label) = status_label(status).filter(|_| prompt_visible) else {
+                        continue;
+                    };
+                    running |= matches!(status, Status::Running(_));
+                    let color = status_color(status);
+                    let galley = painter.layout_no_wrap(label, small.clone(), color);
+                    let row_top = area.min.y + first as f32 * cell.y;
+                    let pos = egui::pos2(
+                        area.max.x - 10.0 - galley.size().x,
+                        row_top + (cell.y - galley.size().y) / 2.0,
+                    );
+                    let pill =
+                        egui::Rect::from_min_size(pos, galley.size()).expand2(egui::vec2(6.0, 1.0));
+                    painter.rect_filled(pill, 4.0, BG);
+                    painter.rect_stroke(
+                        pill,
+                        4.0,
+                        egui::Stroke::new(1.0, SEPARATOR),
+                        egui::StrokeKind::Inside,
+                    );
+                    painter.galley(pos, galley, color);
+                }
+                if running {
+                    // El reloj del comando que corre se actualiza solo (egui no repinta si nada cambia).
+                    ui.ctx().request_repaint_after(Duration::from_millis(100));
                 }
                 // El cursor usa el color "Cursor" del Term (las apps pueden cambiarlo con OSC 12).
                 let color = resolve(Color::Named(NamedColor::Cursor), colors);
