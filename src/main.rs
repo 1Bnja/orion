@@ -2,6 +2,8 @@ use alacritty_terminal::{
     Term,
     event::{Event as TermEvent, EventListener},
     grid::{Dimensions, Scroll},
+    index::{Column, Line, Point, Side},
+    selection::{Selection, SelectionType},
     term::{
         Config, TermMode,
         cell::{Cell, Flags},
@@ -288,6 +290,44 @@ fn cursor_on(blinking: bool, since: Duration) -> bool {
     !blinking || (since.as_millis() / BLINK.as_millis()) % 2 == 0
 }
 
+/// Fondo del texto seleccionado (selección de Tokyo Night).
+const SELECTION: Color32 = Color32::from_rgb(0x33, 0x46, 0x7c);
+
+/// Píxel → celda de la grilla, más la mitad de la celda (izq./der.) donde cayó el mouse.
+/// `display_offset` traduce la fila en pantalla a la línea real cuando miras el historial.
+fn pixel_to_point(
+    pos: egui::Pos2,
+    origin: egui::Pos2,
+    cell: egui::Vec2,
+    (cols, rows): (u16, u16),
+    display_offset: usize,
+) -> (Point, Side) {
+    let x = ((pos.x - origin.x) / cell.x).max(0.0);
+    let col = (x as usize).min(cols as usize - 1);
+    let row = (((pos.y - origin.y) / cell.y).max(0.0) as usize).min(rows as usize - 1);
+    // La mitad importa: arrastrar desde la mitad derecha de una letra no la incluye.
+    let side = if x.fract() < 0.5 {
+        Side::Left
+    } else {
+        Side::Right
+    };
+    let line = Line(row as i32 - display_offset as i32);
+    (Point::new(line, Column(col)), side)
+}
+
+/// Bytes a enviar al pegar. Si la app activó "bracketed paste" (ESC[?2004h), el texto va entre
+/// marcadores: así la shell sabe que es un pegado y no ejecuta cada línea como si apretaras Enter.
+fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        // Sin ESC dentro: un texto pegado con "ESC[201~" podría cerrar el pegado antes de tiempo.
+        let clean = text.replace('\x1b', "");
+        format!("\x1b[200~{clean}\x1b[201~").into_bytes()
+    } else {
+        // Sin bracketed paste, cada salto de línea es un Enter (CR).
+        text.replace('\n', "\r").into_bytes()
+    }
+}
+
 /// Convierte píxeles de rueda en líneas enteras. Lo que sobra queda en `acc` para el próximo frame:
 /// un touchpad manda deltas chicos que por sí solos no llegan a una línea.
 fn scroll_lines(acc: &mut f32, delta_px: f32, line_height: f32) -> i32 {
@@ -360,6 +400,21 @@ struct Orion {
     scroll_acc: f32,
 }
 
+impl Orion {
+    /// Copia la selección al portapapeles y la quita (señal visual de que se copió).
+    /// Devuelve false si no había nada seleccionado.
+    fn copy_selection(&mut self, ctx: &egui::Context) -> bool {
+        match self.term.selection_to_string() {
+            Some(text) if !text.is_empty() => {
+                ctx.copy_text(text);
+                self.term.selection = None;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 impl eframe::App for Orion {
     // logic corre antes de cada ui y también con la ventana oculta: así el canal nunca se acumula.
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -370,15 +425,42 @@ impl eframe::App for Orion {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let bracketed = self.term.mode().contains(TermMode::BRACKETED_PASTE);
         // El teclado va en ui y no en logic: con la ventana oculta, logic vería otra vez los eventos del último frame.
         for event in ui.input(|i| i.events.clone()) {
             let bytes = match event {
                 egui::Event::Text(t) => t.into_bytes(),
-                // ponytail: sin bracketed paste hasta la issue #13.
-                egui::Event::Paste(t) => t.replace('\n', "\r").into_bytes(),
-                // egui convierte Ctrl+C/Ctrl+X en Copy/Cut. Sin selección (#13), son señales para la shell.
-                egui::Event::Copy => vec![0x03],
+                egui::Event::Paste(t) => paste_bytes(&t, bracketed),
+                // egui convierte Ctrl+C en Copy. Como en Windows Terminal: si hay selección copia,
+                // si no, es la interrupción de siempre (ETX).
+                egui::Event::Copy => {
+                    if self.copy_selection(ui.ctx()) {
+                        continue;
+                    }
+                    vec![0x03]
+                }
                 egui::Event::Cut => vec![0x18],
+                // Ctrl+Shift+C / Ctrl+Shift+V: los atajos de Ghostty/Warp/Linux.
+                egui::Event::Key {
+                    key: egui::Key::C,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.ctrl && modifiers.shift => {
+                    self.copy_selection(ui.ctx());
+                    continue;
+                }
+                egui::Event::Key {
+                    key: egui::Key::V,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.ctrl && modifiers.shift => {
+                    // egui lee el portapapeles y nos lo devuelve como Event::Paste en un próximo frame.
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                    continue;
+                }
                 egui::Event::Key {
                     key,
                     pressed: true,
@@ -395,6 +477,7 @@ impl eframe::App for Orion {
             self.blink_epoch = Instant::now();
             // Si estabas mirando el historial, escribir te devuelve abajo, a donde está el prompt.
             self.term.scroll_display(Scroll::Bottom);
+            self.term.selection = None;
         }
 
         egui::Frame::central_panel(ui.style())
@@ -429,9 +512,39 @@ impl eframe::App for Orion {
                     }
                 }
 
-                let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+                let (rect, response) =
+                    ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+
+                // --- Selección con el mouse ---
+                let offset = self.term.grid().display_offset();
+                let to_point = |pos| pixel_to_point(pos, rect.min, cell, grid, offset);
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let (point, side) = to_point(pos);
+                    let start = |ty| Some(Selection::new(ty, point, side));
+                    if response.triple_clicked() {
+                        self.term.selection = start(SelectionType::Lines); // línea completa
+                    } else if response.double_clicked() {
+                        self.term.selection = start(SelectionType::Semantic); // palabra
+                    } else if response.drag_started() {
+                        // egui detecta el arrastre tras unos píxeles: la selección empieza donde apretaste.
+                        let pressed = ui.input(|i| i.pointer.press_origin()).unwrap_or(pos);
+                        let (origin, origin_side) = to_point(pressed);
+                        let mut selection =
+                            Selection::new(SelectionType::Simple, origin, origin_side);
+                        selection.update(point, side);
+                        self.term.selection = Some(selection);
+                    } else if response.dragged() {
+                        if let Some(selection) = &mut self.term.selection {
+                            selection.update(point, side);
+                        }
+                    } else if response.clicked() {
+                        self.term.selection = None; // clic simple: deseleccionar
+                    }
+                }
+
                 let painter = ui.painter();
                 let colors = self.term.colors();
+                let selected = self.term.renderable_content().selection;
                 for (row, cells) in visible_rows(&self.term).iter().enumerate() {
                     // Cada fila se dibuja en una posición exacta: fila * alto de celda.
                     let origin = rect.min + egui::vec2(0.0, row as f32 * cell.y);
@@ -441,7 +554,12 @@ impl eframe::App for Orion {
                     let mut any_bold = false;
 
                     for (col, c) in cells.iter().enumerate() {
-                        let (fg, bg) = cell_colors(c, colors);
+                        let (mut fg, mut bg) = cell_colors(c, colors);
+                        let point = Point::new(Line(row as i32 - offset as i32), Column(col));
+                        if selected.is_some_and(|s| s.contains(point)) {
+                            bg = SELECTION;
+                            fg = readable(fg, bg);
+                        }
                         if bg != BG {
                             let width = if c.flags.contains(Flags::WIDE_CHAR) {
                                 2.0
@@ -658,6 +776,43 @@ mod tests {
         assert_eq!(cell_colors(rows[0][0], colors), (BG, PALETTE[4])); // texto oscuro sobre azul claro
         assert_eq!(cell_colors(rows[0][1], colors).0, PALETTE[8]); // se respeta el gris tenue
         assert_eq!(readable(PALETTE[1], BG), PALETTE[1]); // rojo sobre fondo oscuro ya contrasta
+    }
+
+    #[test]
+    fn pixels_map_to_cells_and_sides() {
+        let (o, cell, grid) = (egui::pos2(0.0, 0.0), egui::vec2(10.0, 20.0), (80, 24));
+        let at = |x, y, offset| pixel_to_point(egui::pos2(x, y), o, cell, grid, offset);
+        assert_eq!(
+            at(22.0, 45.0, 0),
+            (Point::new(Line(2), Column(2)), Side::Left)
+        );
+        assert_eq!(at(27.0, 45.0, 0).1, Side::Right); // mitad derecha de la celda
+        assert_eq!(at(22.0, 45.0, 3).0.line, Line(-1)); // con scroll: línea del historial
+        // Fuera de la grilla se recorta al borde.
+        assert_eq!(at(5000.0, -9.0, 0).0, Point::new(Line(0), Column(79)));
+    }
+
+    #[test]
+    fn selection_copies_text() {
+        let mut term = Term::new(Config::default(), &term_size((20, 2)), VoidListener);
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, b"hola mundo\r\nchao");
+        let (p, side) = (Point::new(Line(0), Column(6)), Side::Left);
+        term.selection = Some(Selection::new(SelectionType::Semantic, p, side));
+        assert_eq!(term.selection_to_string().as_deref(), Some("mundo")); // doble clic
+        term.selection = Some(Selection::new(SelectionType::Lines, p, side));
+        assert_eq!(term.selection_to_string().as_deref(), Some("hola mundo\n")); // triple clic
+    }
+
+    #[test]
+    fn paste_respects_bracketed_mode() {
+        assert_eq!(paste_bytes("a\nb", false), b"a\rb");
+        assert_eq!(paste_bytes("a\nb", true), b"\x1b[200~a\nb\x1b[201~");
+        // Un ESC pegado no puede cerrar el bracket antes de tiempo.
+        assert_eq!(
+            paste_bytes("x\x1b[201~y", true),
+            b"\x1b[200~x[201~y\x1b[201~"
+        );
     }
 
     #[test]
