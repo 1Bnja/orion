@@ -1,0 +1,46 @@
+# Integración de Orion con PowerShell.
+#
+# Marca dónde empieza y termina cada comando con secuencias OSC 133 (el estándar "FinalTerm"
+# que usan VS Code, Windows Terminal, WezTerm, Ghostty y Warp). Orion las lee para armar los bloques:
+#
+#   ESC]133;A BEL   empieza el prompt
+#   ESC]133;B BEL   termina el prompt: lo que sigue es el comando que escribes
+#   ESC]133;C BEL   apretaste Enter: lo que sigue es la salida del comando
+#   ESC]133;D;n BEL terminó el comando, con código de salida n
+#
+# Se carga después de tu perfil, así que envuelve el prompt que ya tengas (oh-my-posh, Starship, etc.).
+
+$Global:__OrionPrompt = $function:prompt
+$Global:__OrionLastId = -1  # -1 = todavía no se mostró ningún prompt
+
+function Global:prompt {
+    # $? tiene que ser lo primero que se lee: cualquier otra línea lo sobrescribe.
+    $ok = $?
+    $code = if ($ok) { 0 } elseif ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }
+    $e = [char]27
+    $bel = [char]7
+    $marks = ''
+
+    $last = Get-History -Count 1
+    $lastId = if ($last) { $last.Id } else { 0 }
+    if ($Global:__OrionLastId -ne -1) {
+        # Si el historial no avanzó, apretaste Enter sin escribir nada: el bloque termina sin código.
+        if ($lastId -ne $Global:__OrionLastId) { $marks += "$e]133;D;$code$bel" }
+        else { $marks += "$e]133;D$bel" }
+    }
+    $Global:__OrionLastId = $lastId
+
+    $marks += "$e]133;A$bel"
+    $marks += & $Global:__OrionPrompt
+    $marks + "$e]133;B$bel"
+}
+
+# PSReadLine lee lo que escribes con esta función. La envolvemos para marcar el momento del Enter.
+if (Test-Path Function:\PSConsoleHostReadLine) {
+    $Global:__OrionReadLine = $function:PSConsoleHostReadLine
+    function Global:PSConsoleHostReadLine {
+        $line = & $Global:__OrionReadLine
+        [Console]::Write("$([char]27)]133;C$([char]7)")
+        $line
+    }
+}

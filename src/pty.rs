@@ -8,6 +8,7 @@ use portable_pty::MasterPty;
 use portable_pty::PtySize;
 use portable_pty::native_pty_system;
 use std::cell::RefCell;
+use std::ffi::OsStr;
 use std::io::Read;
 use std::io::Write;
 use std::rc::Rc;
@@ -29,11 +30,28 @@ pub(crate) struct Shell {
     pub(crate) child: Box<dyn Child + Send + Sync>,
 }
 
+/// Script que marca prompts y comandos con OSC 133 (ver el archivo). Queda dentro del .exe.
+const SHELL_INTEGRATION: &str = include_str!("shell_integration.ps1");
+
+/// Argumentos para PowerShell: los de `extra`, más cargar la integración y quedarse abierta.
+/// `-EncodedCommand` recibe el script en base64 de UTF-16: así no hay que escapar comillas ni saltos de línea.
+pub(crate) fn shell_args(extra: &[&str]) -> Vec<String> {
+    use base64::Engine;
+    let utf16: Vec<u8> = SHELL_INTEGRATION
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let script = base64::engine::general_purpose::STANDARD.encode(utf16);
+    let mut args: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+    args.extend(["-NoExit".into(), "-EncodedCommand".into(), script]);
+    args
+}
+
 /// Lanza pwsh (o powershell.exe si no está) con `args` extra.
 ///
 /// Ojo: ConPTY arranca preguntando la posición del cursor (ESC[6n) y no lanza la shell
 /// hasta recibir respuesta. En la app la responde el Term; quien use esto sin Term debe responderla.
-pub(crate) fn spawn_shell(size: PtySize, args: &[&str]) -> Result<Shell, Error> {
+pub(crate) fn spawn_shell(size: PtySize, args: &[impl AsRef<OsStr>]) -> Result<Shell, Error> {
     let pair = native_pty_system().openpty(size)?;
     let mut last_err = None;
     for program in ["pwsh.exe", "powershell.exe"] {
@@ -104,24 +122,49 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    #[test]
-    fn shell_output_reaches_reader() {
-        let mut shell = spawn_shell(
-            pty_size((80, 24)),
-            &["-NoProfile", "-Command", "Write-Output orion-ok"],
-        )
-        .unwrap();
-        // Sin Term, respondemos nosotros la pregunta inicial de ConPTY (ESC[6n).
+    /// Lee la salida de la shell hasta que aparezca `needle` (o falla a los 15 s mostrando lo que llegó).
+    fn wait_for(rx: &Receiver<Vec<u8>>, out: &mut String, needle: &str) {
+        while !out.contains(needle) {
+            match rx.recv_timeout(Duration::from_secs(15)) {
+                Ok(chunk) => out.push_str(&String::from_utf8_lossy(&chunk)),
+                Err(_) => panic!("no llegó {needle:?}; llegó: {out:?}"),
+            }
+        }
+    }
+
+    /// Lanza la shell sin Term: respondemos nosotros la pregunta inicial de ConPTY (ESC[6n).
+    fn start(args: &[impl AsRef<OsStr>]) -> (Shell, Receiver<Vec<u8>>) {
+        let shell = spawn_shell(pty_size((80, 24)), args).unwrap();
         shell.writer.borrow_mut().write_all(b"\x1b[1;1R").unwrap();
         let rx = spawn_reader(&*shell.master, || {}).unwrap();
+        (shell, rx)
+    }
 
+    #[test]
+    fn shell_output_reaches_reader() {
+        let (mut shell, rx) = start(&["-NoProfile", "-Command", "Write-Output orion-ok"]);
+        wait_for(&rx, &mut String::new(), "orion-ok");
+        let _ = shell.child.kill();
+    }
+
+    #[test]
+    fn shell_integration_marks_prompt_and_commands() {
+        let (mut shell, rx) = start(&shell_args(&["-NoProfile", "-NoLogo"]));
         let mut out = String::new();
-        while !out.contains("orion-ok") {
-            let chunk = rx
-                .recv_timeout(Duration::from_secs(15))
-                .expect("la shell no imprimió 'orion-ok'");
-            out.push_str(&String::from_utf8_lossy(&chunk));
-        }
+        // Primer prompt: A (empieza) y B (termina, empieza lo que escribes).
+        wait_for(&rx, &mut out, "\x1b]133;B\x07");
+        assert!(out.contains("\x1b]133;A\x07"), "falta A: {out:?}");
+
+        // Un comando que falla con código 3: después del Enter llegan C (salida) y D;3 (terminó).
+        out.clear();
+        let command = b"cmd /c exit 3\r";
+        shell.writer.borrow_mut().write_all(command).unwrap();
+        wait_for(&rx, &mut out, "\x1b]133;D;3\x07");
+        let c = out.find("\x1b]133;C\x07").expect("falta C");
+        assert!(
+            c < out.find("\x1b]133;D;3").unwrap(),
+            "C debe llegar antes que D"
+        );
         let _ = shell.child.kill();
     }
 }

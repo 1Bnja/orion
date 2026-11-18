@@ -15,7 +15,8 @@ mod pty;
 fn main() -> Result<(), pty::Error> {
     // Tamaño inicial; se corrige en el primer frame, cuando ya sabemos cuánto mide la ventana.
     let grid = (80, 24);
-    let shell = pty::spawn_shell(pty::pty_size(grid), &["-NoLogo"])?;
+    // La shell arranca con la integración de Orion: marca cada prompt y comando con OSC 133.
+    let shell = pty::spawn_shell(pty::pty_size(grid), &pty::shell_args(&["-NoLogo"]))?;
 
     let settings = config::load_settings();
     // Para saber qué se aplicó: útil al probar fuentes nuevas.
