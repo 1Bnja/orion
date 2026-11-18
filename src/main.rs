@@ -519,6 +519,16 @@ fn main() -> Result<(), Error> {
         eprintln!("orion: no encontré la fuente \"{family}\"; uso Cascadia Mono");
         find_font("Cascadia Mono")
     });
+    // Para saber qué se aplicó: útil al probar fuentes nuevas.
+    if let Some(path) = config_path() {
+        eprintln!("orion: config {}", path.display());
+    }
+    match &font_files {
+        Some((regular, bold)) => {
+            eprintln!("orion: fuente {} (negrita: {bold:?})", regular.display())
+        }
+        None => eprintln!("orion: sin fuente propia, uso la de egui"),
+    }
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
