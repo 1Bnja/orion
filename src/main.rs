@@ -338,7 +338,7 @@ fn term_size((cols, rows): (u16, u16)) -> TermSize {
 
 /// ¿El cursor está en su fase "encendida"? Alterna cada BLINK desde `since` (el último input).
 fn cursor_on(blinking: bool, since: Duration) -> bool {
-    !blinking || (since.as_millis() / BLINK.as_millis()) % 2 == 0
+    !blinking || (since.as_millis() / BLINK.as_millis()).is_multiple_of(2)
 }
 
 // --- Configuración ---
@@ -504,7 +504,8 @@ fn is_monospace(path: &Path) -> bool {
         let mut directory = vec![0u8; tables * 16];
         file.read_exact(&mut directory)?;
         // Cada entrada: tag (4) + checksum (4) + offset (4) + largo (4).
-        for entry in directory.chunks_exact(16) {
+        // as_chunks da arreglos de tamaño fijo ([u8; 16]): el compilador sabe que los índices son válidos.
+        for entry in directory.as_chunks::<16>().0 {
             if &entry[..4] == b"post" {
                 let offset = u32::from_be_bytes([entry[8], entry[9], entry[10], entry[11]]);
                 // isFixedPitch es un u32 en el byte 12 de la tabla post: distinto de 0 = monoespaciada.
@@ -1565,12 +1566,18 @@ mod tests {
     #[test]
     fn detects_monospace_fonts() {
         let fonts = Path::new(r"C:\Windows\Fonts");
-        if !fonts.join("consola.ttf").exists() {
-            return; // no estamos en Windows con sus fuentes
+        // Solo las que existan: Windows Server (el runner de CI) no trae todas las de Windows 11.
+        for (file, mono) in [
+            ("consola.ttf", true), // Consolas
+            ("CascadiaMono.ttf", true),
+            ("cour.ttf", true), // Courier New
+            ("arial.ttf", false),
+        ] {
+            let path = fonts.join(file);
+            if path.exists() {
+                assert_eq!(is_monospace(&path), mono, "{file}");
+            }
         }
-        assert!(is_monospace(&fonts.join("consola.ttf"))); // Consolas
-        assert!(is_monospace(&fonts.join("CascadiaMono.ttf")));
-        assert!(!is_monospace(&fonts.join("arial.ttf")));
         assert!(!is_monospace(&fonts.join("no-existe.ttf")));
     }
 

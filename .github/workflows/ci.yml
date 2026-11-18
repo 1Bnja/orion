@@ -1,0 +1,35 @@
+# CI: en cada push y pull request, revisa que Orion compile, esté formateado, sin advertencias y con los tests en verde.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Si llega un push nuevo mientras corre uno anterior de la misma rama, cancela el viejo.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # Orion es para Windows (ConPTY, registro de fuentes): probamos en Windows.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Guarda target/ y el registro de crates entre ejecuciones: la primera tarda varios minutos, las siguientes mucho menos.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formato
+        run: cargo fmt --check
+
+      - name: Clippy (advertencias = error)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
