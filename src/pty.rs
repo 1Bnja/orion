@@ -178,4 +178,17 @@ mod tests {
         );
         let _ = shell.child.kill();
     }
+
+    #[test]
+    fn shell_integration_turns_on_suggestions() {
+        let (mut shell, rx) = start(&shell_args(&["-NoProfile", "-NoLogo"]));
+        let mut out = String::new();
+        wait_for(&rx, &mut out, "\x1b]133;B\x07");
+        // Windows PowerShell 5.1 trae PSReadLine 2.0, sin sugerencias: ahí no hay nada que probar.
+        let command = b"if ((Get-Module PSReadLine).Version -ge '2.1') { 'pred:' + (Get-PSReadLineOption).PredictionSource } else { 'pred:History' }\r";
+        shell.writer.borrow_mut().write_all(command).unwrap();
+        // "History" o "HistoryAndPlugin". El eco del comando no contiene "pred:H" (ahí va "'pred:'").
+        wait_for(&rx, &mut out, "pred:History");
+        let _ = shell.child.kill();
+    }
 }

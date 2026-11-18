@@ -43,6 +43,20 @@ function Global:prompt {
     $marks + "$e]133;B$bel"
 }
 
+# Autosugerencias: mientras escribes aparece en gris un comando parecido del historial.
+# → (o Fin) lo acepta entero, Ctrl+→ palabra por palabra, F2 cambia a una lista con varias opciones.
+# Las hace PSReadLine 2.1+ (viene con PowerShell 7). Si en tu perfil las apagaste, se respeta.
+$readLine = Get-Module PSReadLine
+if ($readLine -and $readLine.Version -ge [version]'2.1' -and (Get-PSReadLineOption).PredictionSource -eq 'None') {
+    # HistoryAndPlugin suma sugerencias de módulos (ej. Az, CompletionPredictor); necesita PowerShell 7.2+.
+    try { Set-PSReadLineOption -PredictionSource HistoryAndPlugin }
+    catch { Set-PSReadLineOption -PredictionSource History }
+}
+if ($readLine -and $readLine.Version -ge [version]'2.1') {
+    # Gris del tema de Orion (ANSI 90) en vez del blanco tenue de PSReadLine.
+    Set-PSReadLineOption -Colors @{ InlinePrediction = "$([char]27)[90m" }
+}
+
 # PSReadLine lee lo que escribes con esta función. La envolvemos para marcar el momento del Enter.
 if (Test-Path Function:\PSConsoleHostReadLine) {
     $Global:__OrionReadLine = $function:PSConsoleHostReadLine
