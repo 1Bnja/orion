@@ -19,6 +19,7 @@ use eframe::egui::{
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::cell::RefCell;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
@@ -290,52 +291,165 @@ fn cursor_on(blinking: bool, since: Duration) -> bool {
     !blinking || (since.as_millis() / BLINK.as_millis()) % 2 == 0
 }
 
+// --- Configuración ---
+// ponytail: se lee al arrancar; la recarga en caliente y el resto de opciones llegan con #24.
+
+/// Contenido inicial de config.toml: se escribe la primera vez para que sea fácil encontrarlo y editarlo.
+const DEFAULT_CONFIG: &str = r#"# Configuración de Orion. Los cambios se aplican al reiniciar Orion.
+
+[font]
+# Nombre de una fuente instalada (igual que en VS Code), o la ruta a un archivo .ttf/.otf.
+# Ejemplos: "Cascadia Mono", "Monocraft", 'C:\fuentes\MiFuente.ttf'
+family = "Cascadia Mono"
+size = 14.0
+"#;
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)] // lo que falte en el archivo toma el valor por defecto
+struct Settings {
+    font: FontSettings,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(default)]
+struct FontSettings {
+    family: String,
+    size: f32,
+}
+
+impl Default for FontSettings {
+    fn default() -> Self {
+        Self {
+            family: "Cascadia Mono".into(),
+            size: 14.0,
+        }
+    }
+}
+
+/// %APPDATA%\orion\config.toml
+fn config_path() -> Option<PathBuf> {
+    let appdata = std::env::var_os("APPDATA")?;
+    Some(PathBuf::from(appdata).join("orion").join("config.toml"))
+}
+
+/// Lee la configuración. Si no existe la crea; si tiene errores, avisa y usa los valores por defecto
+/// (una coma mal puesta no debería impedir abrir la terminal).
+fn load_settings() -> Settings {
+    let Some(path) = config_path() else {
+        return Settings::default();
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
+            eprintln!("orion: error en {}:\n{e}", path.display());
+            Settings::default()
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let dir = path.parent().expect("la ruta tiene carpeta");
+            let _ =
+                std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, DEFAULT_CONFIG));
+            Settings::default()
+        }
+        Err(e) => {
+            eprintln!("orion: no pude leer {}: {e}", path.display());
+            Settings::default()
+        }
+    }
+}
+
 // --- Fuentes ---
-// ponytail: fijas hasta el archivo de configuración (#24).
-/// Cascadia Mono viene con Windows 11. Es una fuente *variable*: un solo archivo con todos los pesos.
-const FONT_FILE: &str = r"C:\Windows\Fonts\CascadiaMono.ttf";
-/// Respaldo para símbolos que Cascadia no tiene (flechas, figuras, etc.). También viene con Windows.
-const SYMBOL_FILE: &str = r"C:\Windows\Fonts\seguisym.ttf";
-const FONT_SIZE: f32 = 14.0;
 
 /// Familia de fuente para el texto en negrita.
 fn bold_family() -> egui::FontFamily {
     egui::FontFamily::Name("bold".into())
 }
 
-/// Fuentes de la terminal: Cascadia Mono normal y bold, con respaldos.
+/// ¿Esta entrada del registro de fuentes es de `family`? Some(false) = normal, Some(true) = negrita.
+/// Las entradas se ven como "Monocraft (TrueType)", "Cascadia Mono Regular (TrueType)"
+/// o, con Windows en español, "Consolas Negrita (TrueType)".
+fn face_weight(entry: &str, family: &str) -> Option<bool> {
+    let face = entry.rsplit_once(" (").map_or(entry, |(face, _)| face);
+    let face = face.to_lowercase();
+    let style = face.strip_prefix(&family.to_lowercase())?.trim();
+    match style {
+        "" | "regular" | "normal" => Some(false),
+        "bold" | "negrita" => Some(true),
+        _ => None, // otro estilo (cursiva, light…) u otra fuente que empieza igual
+    }
+}
+
+/// Archivos (normal, negrita si existe) de una fuente: una ruta directa o el nombre de una fuente instalada.
+fn find_font(family: &str) -> Option<(PathBuf, Option<PathBuf>)> {
+    let lower = family.to_lowercase();
+    if lower.ends_with(".ttf") || lower.ends_with(".otf") {
+        return Some((family.into(), None));
+    }
+    use winreg::{RegKey, enums::*};
+    const FONTS_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts";
+    let windows = std::env::var_os("WINDIR").unwrap_or_else(|| r"C:\Windows".into());
+    let system_fonts = Path::new(&windows).join("Fonts");
+    let (mut regular, mut bold) = (None, None);
+    // HKCU: fuentes instaladas solo para tu usuario (guardan la ruta completa).
+    // HKLM: fuentes del sistema (guardan solo el nombre del archivo, dentro de C:\Windows\Fonts).
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let Ok(key) = RegKey::predef(root).open_subkey(FONTS_KEY) else {
+            continue;
+        };
+        for (entry, _) in key.enum_values().flatten() {
+            let Some(is_bold) = face_weight(&entry, family) else {
+                continue;
+            };
+            let Ok(file) = key.get_value::<String, _>(&entry) else {
+                continue;
+            };
+            // `join` con una ruta absoluta la deja tal cual, así que sirve para ambos casos.
+            let slot = if is_bold { &mut bold } else { &mut regular };
+            slot.get_or_insert(system_fonts.join(file));
+        }
+    }
+    regular.map(|regular| (regular, bold))
+}
+
+/// Fuentes de la terminal: la elegida (normal y negrita) y, detrás, los respaldos.
 /// Si a la fuente le falta un carácter, egui lo busca en la siguiente de la lista.
-fn font_definitions() -> egui::FontDefinitions {
+fn font_definitions(files: Option<&(PathBuf, Option<PathBuf>)>) -> egui::FontDefinitions {
     use egui::{FontData, FontFamily, FontTweak, epaint::text::VariationCoords};
+    use std::sync::Arc;
     let mut fonts = egui::FontDefinitions::default();
     // Respaldos que ya trae egui (incluyen emoji en blanco y negro).
     let mut fallback = fonts.families[&FontFamily::Monospace].clone();
-
-    if let Ok(bytes) = std::fs::read(SYMBOL_FILE) {
-        let data = FontData::from_owned(bytes);
-        fonts
-            .font_data
-            .insert("symbols".into(), std::sync::Arc::new(data));
+    // Segoe UI Symbol (viene con Windows): flechas, figuras y símbolos que muchas fuentes no traen.
+    if let Some((symbols, _)) = find_font("Segoe UI Symbol")
+        && let Ok(bytes) = std::fs::read(symbols)
+    {
+        let data = Arc::new(FontData::from_owned(bytes));
+        fonts.font_data.insert("symbols".into(), data);
         fallback.push("symbols".into());
     }
 
     let mut mono = fallback.clone();
     let mut bold = fallback;
-    if let Ok(bytes) = std::fs::read(FONT_FILE) {
-        // Mismo archivo, dos pesos: 400 = normal, 700 = negrita (eje "wght" de la fuente variable).
-        let weight = |wght: f32| {
+    if let Some((regular_file, bold_file)) = files
+        && let Ok(bytes) = std::fs::read(regular_file)
+    {
+        // "wght" es el eje de peso de las fuentes variables (400 normal, 700 negrita).
+        // En fuentes no variables se ignora.
+        let font = |bytes: Vec<u8>, wght: f32| {
             let tweak = FontTweak {
                 coords: VariationCoords::new([(b"wght", wght)]),
                 ..Default::default()
             };
-            std::sync::Arc::new(FontData::from_owned(bytes.clone()).tweak(tweak))
+            Arc::new(FontData::from_owned(bytes).tweak(tweak))
         };
-        fonts.font_data.insert("mono".into(), weight(400.0));
-        fonts.font_data.insert("mono-bold".into(), weight(700.0));
+        // Si hay archivo "Bold" aparte, se usa; si no, el mismo archivo con peso 700
+        // (una fuente variable como Cascadia engorda; una fija se queda igual).
+        let bold_bytes = bold_file.as_ref().and_then(|f| std::fs::read(f).ok());
+        let bold_data = font(bold_bytes.unwrap_or_else(|| bytes.clone()), 700.0);
+        fonts.font_data.insert("mono".into(), font(bytes, 400.0));
+        fonts.font_data.insert("mono-bold".into(), bold_data);
         mono.insert(0, "mono".into());
         bold.insert(0, "mono-bold".into());
     }
-    // Si no está Cascadia, ambas familias quedan con la fuente de egui (pero existen: egui falla si falta una).
+    // Sin fuente propia, ambas familias quedan con la de egui (pero existen: egui falla si falta una).
     fonts.families.insert(FontFamily::Monospace, mono);
     fonts.families.insert(bold_family(), bold);
     fonts
@@ -399,6 +513,13 @@ fn main() -> Result<(), Error> {
     let grid = (80, 24);
     let shell = spawn_shell(pty_size(grid), &["-NoLogo"])?;
 
+    let settings = load_settings();
+    let family = &settings.font.family;
+    let font_files = find_font(family).or_else(|| {
+        eprintln!("orion: no encontré la fuente \"{family}\"; uso Cascadia Mono");
+        find_font("Cascadia Mono")
+    });
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Orion")
@@ -410,7 +531,7 @@ fn main() -> Result<(), Error> {
         options,
         Box::new(|cc| {
             // El Context de egui se puede clonar y usar desde otro hilo para pedir un repaint.
-            cc.egui_ctx.set_fonts(font_definitions());
+            cc.egui_ctx.set_fonts(font_definitions(font_files.as_ref()));
             let ctx = cc.egui_ctx.clone();
             let rx = spawn_reader(&*shell.master, move || ctx.request_repaint())?;
             // Cursor por defecto: bloque que parpadea. Las apps pueden cambiarlo con ESC[n q (DECSCUSR).
@@ -430,6 +551,7 @@ fn main() -> Result<(), Error> {
                 grid,
                 blink_epoch: Instant::now(),
                 scroll_acc: 0.0,
+                font_size: settings.font.size,
             }))
         }),
     )?;
@@ -450,6 +572,7 @@ struct Orion {
     blink_epoch: Instant,
     /// Fracción de línea de scroll pendiente (ver `scroll_lines`).
     scroll_acc: f32,
+    font_size: f32,
 }
 
 impl Orion {
@@ -536,8 +659,8 @@ impl eframe::App for Orion {
             .fill(BG)
             .show(ui, |ui| {
                 // Fuente monoespaciada: todas las letras miden lo mismo, así que 'M' sirve de celda.
-                let font = egui::FontId::new(FONT_SIZE, egui::FontFamily::Monospace);
-                let bold_font = egui::FontId::new(FONT_SIZE, bold_family());
+                let font = egui::FontId::new(self.font_size, egui::FontFamily::Monospace);
+                let bold_font = egui::FontId::new(self.font_size, bold_family());
                 let cell = ui
                     .ctx()
                     .fonts_mut(|f| egui::vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
@@ -817,17 +940,65 @@ mod tests {
     }
 
     #[test]
-    fn fonts_put_cascadia_first_with_fallbacks() {
-        let fonts = font_definitions();
+    fn fonts_put_chosen_font_first_with_fallbacks() {
+        let files = find_font("Cascadia Mono");
+        let fonts = font_definitions(files.as_ref());
         let mono = &fonts.families[&egui::FontFamily::Monospace];
         let bold = &fonts.families[&bold_family()];
-        if std::path::Path::new(FONT_FILE).exists() {
+        if let Some((regular, _)) = &files {
+            assert!(
+                regular.exists(),
+                "el registro apunta a {regular:?}, que no existe"
+            );
             assert_eq!(mono[0], "mono");
             assert_eq!(bold[0], "mono-bold");
         }
         // Normal y negrita comparten los respaldos, después de la fuente principal.
         assert_eq!(mono[1..], bold[1..]);
         assert!(mono.len() > 1);
+    }
+
+    #[test]
+    fn registry_entries_match_family_and_weight() {
+        assert_eq!(
+            face_weight("Monocraft (TrueType)", "monocraft"),
+            Some(false)
+        );
+        assert_eq!(
+            face_weight("Cascadia Mono Regular (TrueType)", "Cascadia Mono"),
+            Some(false)
+        );
+        assert_eq!(
+            face_weight("Consolas Negrita (TrueType)", "Consolas"),
+            Some(true)
+        );
+        assert_eq!(
+            face_weight("Consolas Bold (TrueType)", "Consolas"),
+            Some(true)
+        );
+        assert_eq!(face_weight("Consolas Cursiva (TrueType)", "Consolas"), None);
+        // "Cascadia Mono" no debe confundirse con "Cascadia Code".
+        assert_eq!(
+            face_weight("Cascadia Code Regular (TrueType)", "Cascadia Mono"),
+            None
+        );
+        // Una ruta directa no pasa por el registro.
+        let direct = find_font(r"C:\x\Mi Fuente.otf").unwrap();
+        assert_eq!(direct.0, PathBuf::from(r"C:\x\Mi Fuente.otf"));
+    }
+
+    #[test]
+    fn config_parses_and_fills_defaults() {
+        let s: Settings = toml::from_str(DEFAULT_CONFIG).unwrap();
+        assert_eq!(
+            (s.font.family.as_str(), s.font.size),
+            ("Cascadia Mono", 14.0)
+        );
+        // Lo que falta toma el valor por defecto; un entero sirve como tamaño.
+        let s: Settings = toml::from_str("[font]\nfamily = \"Monocraft\"").unwrap();
+        assert_eq!((s.font.family.as_str(), s.font.size), ("Monocraft", 14.0));
+        let s: Settings = toml::from_str("[font]\nsize = 16").unwrap();
+        assert_eq!(s.font.size, 16.0);
     }
 
     #[test]
