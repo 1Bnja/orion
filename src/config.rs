@@ -1,8 +1,7 @@
 //! Configuración del usuario: leer y guardar %APPDATA%\orion\config.toml.
 
 use std::path::PathBuf;
-
-// ponytail: se lee al arrancar y la escribe el menú (Ctrl+,); la recarga en caliente al editar a mano llega con #24.
+use std::time::SystemTime;
 
 /// Texto de config.toml. Se regenera completo al guardar desde el menú.
 /// ponytail: los comentarios que agregues a mano se pierden al guardar; toml_edit los conservaría.
@@ -11,7 +10,7 @@ pub(crate) fn config_text(settings: &Settings) -> String {
     let family = toml::Value::String(settings.font.family.clone());
     format!(
         r#"# Configuración de Orion. Se puede editar aquí o desde el menú (Ctrl+, o clic derecho).
-# Si editas a mano, los cambios se aplican al reiniciar Orion.
+# Si editas a mano, los cambios se aplican apenas guardas el archivo.
 
 [font]
 # Nombre de una fuente instalada (igual que en VS Code), o la ruta a un archivo .ttf/.otf.
@@ -64,6 +63,32 @@ pub(crate) fn config_path() -> Option<PathBuf> {
     Some(PathBuf::from(appdata).join("orion").join("config.toml"))
 }
 
+/// Cuándo se modificó config.toml por última vez (para notar que lo guardaste).
+pub(crate) fn config_modified() -> Option<SystemTime> {
+    std::fs::metadata(config_path()?).ok()?.modified().ok()
+}
+
+/// Interpreta el texto de config.toml. El error dice la línea y qué está mal, en una sola línea.
+/// Los valores absurdos (tamaño 0, interlineado 50) se llevan al rango que funciona.
+pub(crate) fn parse_settings(text: &str) -> Result<Settings, String> {
+    let mut settings: Settings = toml::from_str(text).map_err(|e| {
+        let line = e
+            .span()
+            .map_or(0, |s| text[..s.start].matches('\n').count() + 1);
+        format!("línea {line}: {}", e.message().trim())
+    })?;
+    settings.font.size = settings.font.size.clamp(6.0, 72.0);
+    settings.font.line_height = settings.font.line_height.clamp(1.0, 3.0);
+    Ok(settings)
+}
+
+/// Vuelve a leer config.toml (lo editaste a mano).
+pub(crate) fn reload_settings() -> Result<Settings, String> {
+    let path = config_path().ok_or("no encuentro %APPDATA%")?;
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    parse_settings(&text)
+}
+
 /// Lee la configuración. Si no existe la crea; si tiene errores, avisa y usa los valores por defecto
 /// (una coma mal puesta no debería impedir abrir la terminal).
 pub(crate) fn load_settings() -> Settings {
@@ -71,8 +96,8 @@ pub(crate) fn load_settings() -> Settings {
         return Settings::default();
     };
     match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
-            eprintln!("orion: error en {}:\n{e}", path.display());
+        Ok(text) => parse_settings(&text).unwrap_or_else(|e| {
+            eprintln!("orion: error en {}, {e}", path.display());
             Settings::default()
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -106,6 +131,17 @@ mod tests {
         assert_eq!(s.font.size, 16.0);
         // Un config viejo, sin line_height, toma el valor por defecto.
         assert_eq!(s.font.line_height, 1.2);
+    }
+
+    #[test]
+    fn bad_config_gives_a_short_error_and_odd_values_are_clamped() {
+        let err = parse_settings("[font]\nfamily = \"Monocraft\"\nsize = grande\n").err();
+        assert!(
+            err.as_deref().is_some_and(|e| e.starts_with("línea 3:")),
+            "{err:?}"
+        );
+        let s = parse_settings("[font]\nsize = 0\nline_height = 50").unwrap();
+        assert_eq!((s.font.size, s.font.line_height), (6.0, 3.0));
     }
 
     #[test]

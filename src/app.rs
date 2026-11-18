@@ -11,7 +11,7 @@ mod render;
 mod session;
 
 use crate::colors::{BG, FG, PALETTE};
-use crate::config::Settings;
+use crate::config::{Settings, config_modified, reload_settings};
 use crate::fonts::{apply_font, is_font_file};
 use crate::pty::Error;
 use alacritty_terminal::term::TermMode;
@@ -21,7 +21,7 @@ use palette::Palette;
 use panes::Split;
 use session::Session;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 /// Fondo de la barra de pestañas: un poco más oscuro que la terminal.
 const TAB_BAR: egui::Color32 = egui::Color32::from_rgb(0x16, 0x16, 0x1e);
@@ -71,7 +71,14 @@ pub(crate) struct Orion {
     toast: Option<(String, Instant)>,
     /// Último título que le pusimos a la ventana (para cambiarlo solo cuando hace falta).
     window_title: String,
+    /// Fecha de config.toml la última vez que lo miramos, y cuándo fue eso.
+    config_modified: Option<SystemTime>,
+    config_checked: Instant,
 }
+
+/// Cada cuánto se revisa si config.toml cambió.
+/// ponytail: se pregunta la fecha del archivo (stdlib); el crate `notify` avisaría al instante, sin preguntar.
+const CONFIG_POLL: Duration = Duration::from_secs(1);
 
 /// Algo que se pidió sobre las pestañas o los paneles en este frame.
 enum Action {
@@ -108,6 +115,8 @@ impl Orion {
             focused: true,
             toast: None,
             window_title: String::new(),
+            config_modified: config_modified(),
+            config_checked: Instant::now(),
         })
     }
 
@@ -384,6 +393,31 @@ impl Orion {
         }
     }
 
+    /// Si guardaste config.toml desde otro editor, lo vuelve a leer y aplica los cambios.
+    fn watch_config(&mut self, ctx: &egui::Context) {
+        // egui duerme si nada pasa: le pedimos despertar para volver a mirar.
+        ctx.request_repaint_after(CONFIG_POLL);
+        if self.config_checked.elapsed() < CONFIG_POLL {
+            return;
+        }
+        self.config_checked = Instant::now();
+        let modified = config_modified();
+        if modified == self.config_modified {
+            return;
+        }
+        self.config_modified = modified;
+        match reload_settings() {
+            // Si es lo mismo que ya tenemos (ej. lo acaba de guardar el menú), no hay nada que avisar.
+            Ok(new) if new == self.settings => {}
+            Ok(new) => {
+                self.apply_settings(ctx, new);
+                self.show_toast("Configuración recargada");
+            }
+            // Mientras tenga errores se sigue usando la configuración anterior.
+            Err(e) => self.show_toast(format!("config.toml tiene un error en la {e}")),
+        }
+    }
+
     /// Dibuja los paneles de la pestaña activa en `area`.
     /// Devuelve true si algún panel pidió abrir la configuración.
     fn draw_panes(&mut self, ui: &mut egui::Ui, area: egui::Rect) -> bool {
@@ -463,6 +497,7 @@ impl eframe::App for Orion {
                 return;
             }
         }
+        self.watch_config(ctx);
         // El título de la ventana sigue al del panel con foco.
         let title = format!("{} — Orion", self.session().title());
         if title != self.window_title {

@@ -31,13 +31,18 @@ impl Orion {
 
     /// Aplica una configuración nueva al instante (la fuente solo si cambió) y la guarda en config.toml.
     pub(crate) fn change_settings(&mut self, ctx: &egui::Context, new: Settings) {
+        self.apply_settings(ctx, new);
+        if let Err(e) = save_settings(&self.settings) {
+            eprintln!("orion: no pude guardar la configuración: {e}");
+        }
+    }
+
+    /// Aplica una configuración sin guardarla (la fuente solo si cambió).
+    pub(crate) fn apply_settings(&mut self, ctx: &egui::Context, new: Settings) {
         if new.font.family != self.settings.font.family {
             apply_font(ctx, &new.font.family);
         }
         self.settings = new;
-        if let Err(e) = save_settings(&self.settings) {
-            eprintln!("orion: no pude guardar la configuración: {e}");
-        }
     }
 
     /// Una fuente arrastrada a la ventana: se copia a la carpeta de Orion y se usa.
