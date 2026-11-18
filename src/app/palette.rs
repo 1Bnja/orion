@@ -95,6 +95,7 @@ impl Orion {
             ("Configuración".into(), "Ctrl+,", Action::OpenSettings),
             ("Agrandar letra".into(), "", Action::FontSize(1.0)),
             ("Achicar letra".into(), "", Action::FontSize(-1.0)),
+            ("Mostrar rendimiento".into(), "", Action::TogglePerf),
         ];
         const ALT: [&str; 9] = [
             "Alt+1", "Alt+2", "Alt+3", "Alt+4", "Alt+5", "Alt+6", "Alt+7", "Alt+8", "Alt+9",

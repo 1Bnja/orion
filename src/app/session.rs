@@ -20,7 +20,7 @@ use std::io::Write;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub(super) struct Session {
     pub(super) shell: Shell,
@@ -59,6 +59,10 @@ pub(super) struct Session {
     /// Se pidió dividir este panel desde el menú de clic derecho: Some(true) = a la derecha.
     pub(super) split_request: Option<bool>,
 }
+
+/// Tiempo máximo por frame para procesar salida de la shell. El resto queda para el próximo frame.
+/// A ~60 MB/s son unos 600 KB por frame: de sobra para cualquier uso normal.
+const OUTPUT_BUDGET: Duration = Duration::from_millis(10);
 
 /// Próximo `id` de panel.
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -133,7 +137,10 @@ impl Session {
     }
 
     /// Procesa lo que la shell imprimió desde el último frame (sin bloquear).
-    pub(super) fn process_output(&mut self) {
+    /// Con mucha salida (un `cat` de un archivo enorme) para a los `OUTPUT_BUDGET`:
+    /// así la ventana se sigue dibujando y Ctrl+C llega. Devuelve true si quedó salida pendiente.
+    pub(super) fn process_output(&mut self) -> bool {
+        let start = Instant::now();
         // try_recv no bloquea: si no hay nada (o el lector terminó), se sale del while.
         while let Ok(chunk) = self.rx.try_recv() {
             for piece in self.marks.feed(&chunk) {
@@ -151,7 +158,11 @@ impl Session {
             {
                 self.marked_block = None;
             }
+            if start.elapsed() > OUTPUT_BUDGET {
+                return true;
+            }
         }
+        false
     }
 
     /// ¿La shell terminó? (escribiste `exit`, o se cerró sola).

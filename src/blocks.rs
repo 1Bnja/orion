@@ -402,6 +402,32 @@ mod tests {
         }
     }
 
+    /// Cuántos MB/s procesa Orion (escáner de marcas + parser + grilla), como un `cat` de un archivo grande.
+    /// No es un test de verdad: `cargo test --release throughput -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn throughput() {
+        // 32 MB de líneas con colores, como la salida de un build o un `git log --color`.
+        let line = b"\x1b[32mok\x1b[0m src/app/render.rs:547 \x1b[1;34mcompilando\x1b[0m orion v0.1.0 (C:\\Users\\orion)\r\n";
+        let data: Vec<u8> = line.iter().copied().cycle().take(32 << 20).collect();
+        let mut term = Term::new(Config::default(), &term_size((200, 50)), VoidListener);
+        let mut blocks = Blocks::default();
+        let chunks: Vec<&[u8]> = data.chunks(4096).collect(); // como llegan del PTY
+        let start = std::time::Instant::now();
+        run(&mut term, &mut blocks, &chunks);
+        let secs = start.elapsed().as_secs_f64();
+        println!("throughput: {:.0} MB/s ({secs:.2} s)", 32.0 / secs);
+        // Solo el escáner de marcas, para ver cuánto pesa cada parte.
+        let mut scanner = MarkScanner::default();
+        let start = std::time::Instant::now();
+        let pieces: usize = chunks.iter().map(|c| scanner.feed(c).len()).sum();
+        let secs = start.elapsed().as_secs_f64();
+        println!(
+            "throughput escáner: {:.0} MB/s ({pieces} trozos)",
+            32.0 / secs
+        );
+    }
+
     #[test]
     fn scanner_extracts_marks_even_when_split() {
         let mut s = MarkScanner::default();

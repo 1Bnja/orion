@@ -71,6 +71,37 @@ pub(crate) struct Orion {
     /// Fecha de config.toml la última vez que lo miramos, y cuándo fue eso.
     config_modified: Option<SystemTime>,
     config_checked: Instant,
+    /// Some = se muestra el medidor de rendimiento.
+    perf: Option<Perf>,
+}
+
+/// Medidor de rendimiento (paleta → "Mostrar rendimiento"): cuánto tarda cada frame y cuántos hay por segundo.
+struct Perf {
+    /// Tiempo de CPU por frame en ms, promediado para que el número no salte.
+    avg_ms: f32,
+    frames: u32,
+    fps: u32,
+    since: Instant,
+}
+
+impl Perf {
+    fn new() -> Self {
+        Self {
+            avg_ms: 0.0,
+            frames: 0,
+            fps: 0,
+            since: Instant::now(),
+        }
+    }
+
+    /// Suma un frame que tardó `cpu` segundos (lo mide eframe: nuestro código + preparar los triángulos).
+    fn frame(&mut self, cpu: f32) {
+        self.avg_ms = self.avg_ms * 0.9 + cpu * 1000.0 * 0.1;
+        self.frames += 1;
+        if self.since.elapsed() >= Duration::from_secs(1) {
+            (self.fps, self.frames, self.since) = (self.frames, 0, Instant::now());
+        }
+    }
 }
 
 /// Cada cuánto se revisa si config.toml cambió.
@@ -95,6 +126,7 @@ enum Action {
     FontSize(f32),
     /// Usar el tema con ese índice en `colors::THEMES`.
     Theme(usize),
+    TogglePerf,
 }
 
 impl Orion {
@@ -118,6 +150,7 @@ impl Orion {
             window_title: String::new(),
             config_modified: config_modified(),
             config_checked: Instant::now(),
+            perf: None,
         })
     }
 
@@ -414,6 +447,13 @@ impl Orion {
                 new.font.size = (new.font.size + delta).clamp(8.0, 48.0);
                 self.change_settings(ctx, new);
             }
+            Action::TogglePerf => {
+                self.perf = if self.perf.is_some() {
+                    None
+                } else {
+                    Some(Perf::new())
+                };
+            }
             Action::Theme(i) => {
                 let mut new = self.settings.clone();
                 new.theme = crate::colors::THEMES[i].name.into();
@@ -516,10 +556,14 @@ impl eframe::App for Orion {
     // logic corre antes de cada ui y también con la ventana oculta: así ningún canal se acumula.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Todos los paneles de todas las pestañas: los de atrás siguen recibiendo su salida.
+        let mut pending = false;
         for tab in &mut self.tabs {
             for session in tab.panes.leaves_mut() {
-                session.process_output();
+                pending |= session.process_output();
             }
+        }
+        if pending {
+            ctx.request_repaint(); // quedó salida: seguir en el próximo frame
         }
         // Paneles cuya shell terminó (escribiste `exit`): se cierran solos.
         while let Some((t, id)) = self.tabs.iter_mut().enumerate().find_map(|(t, tab)| {
@@ -540,7 +584,7 @@ impl eframe::App for Orion {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if self.tabs.is_empty() {
             return; // la ventana se está cerrando
         }
@@ -600,6 +644,18 @@ impl eframe::App for Orion {
         }
         if let Some(toast) = &self.toast {
             render::draw_toast(ui, area, toast, self.settings.font.size);
+        }
+        if let Some(perf) = &mut self.perf {
+            // cpu_usage es del frame anterior (este todavía no terminó).
+            perf.frame(frame.info().cpu_usage.unwrap_or(0.0));
+            let text = format!("{:.1} ms/frame · {} frames/s", perf.avg_ms, perf.fps);
+            let font = egui::FontId::monospace(12.0);
+            let pos = area.right_top() + egui::vec2(-10.0, 6.0);
+            let color = theme().ansi[3];
+            ui.painter()
+                .text(pos, egui::Align2::RIGHT_TOP, text, font, color);
+            // Para que el contador se actualice aunque no pase nada.
+            ui.ctx().request_repaint_after(Duration::from_millis(500));
         }
         self.settings_window(&ctx);
         // Al final: una acción de la paleta (ej. cerrar la última pestaña) puede cerrar la ventana.
