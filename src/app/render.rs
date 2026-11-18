@@ -49,6 +49,40 @@ const PADDING: f32 = 10.0;
 /// Línea que separa un bloque del anterior (el "bg_highlight" de Tokyo Night).
 const SEPARATOR: egui::Color32 = egui::Color32::from_rgb(0x29, 0x2e, 0x42);
 
+/// Borde de arriba de cada fila en pantalla. Antes de cada fila de `gap_rows` (prompts de bloques)
+/// se deja `gap` de aire, salvo en la fila 0. Si con ese aire la fila `keep` (la del cursor) quedaría
+/// debajo de `bottom`, todo sube lo necesario: igual que cuando la salida hace scroll.
+fn row_tops(
+    rows: usize,
+    cell_h: f32,
+    gap: f32,
+    gap_rows: &[usize],
+    keep: Option<usize>,
+    (top, bottom): (f32, f32),
+) -> Vec<f32> {
+    let mut y = top;
+    let mut tops = Vec::with_capacity(rows);
+    for row in 0..rows {
+        if row > 0 && gap_rows.contains(&row) {
+            y += gap;
+        }
+        tops.push(y);
+        y += cell_h;
+    }
+    if let Some(row) = keep.filter(|&r| r < rows) {
+        let overflow = tops[row] + cell_h - bottom;
+        if overflow > 0.0 {
+            tops.iter_mut().for_each(|t| *t -= overflow);
+        }
+    }
+    tops
+}
+
+/// Qué fila hay en la altura `y`. El aire entre bloques cuenta como parte de la fila de arriba.
+fn row_at(tops: &[f32], y: f32) -> usize {
+    tops.partition_point(|&t| t <= y).saturating_sub(1)
+}
+
 /// Color de un bloque según su estado: verde bien, rojo error, amarillo corriendo, gris escribiendo.
 fn status_color(status: Status) -> egui::Color32 {
     match status {
@@ -249,9 +283,24 @@ impl Orion {
                     });
                 }
 
-                // --- Selección con el mouse ---
+                // --- Dónde va cada fila: con aire antes de cada bloque, como en Warp ---
+                let spans = self.block_spans();
+                let gap = (cell.y * 0.6).round();
+                let gap_rows: Vec<usize> = spans.iter().filter(|s| s.3).map(|s| s.1).collect();
                 let offset = self.term.grid().display_offset();
-                let to_point = |pos| pixel_to_point(pos, rect.min, cell, grid, offset);
+                let cursor_row = self.term.grid().cursor.point.line.0 + offset as i32;
+                let keep = usize::try_from(cursor_row).ok();
+                let rows = grid.1 as usize;
+                let tops = row_tops(rows, cell.y, gap, &gap_rows, keep, (rect.min.y, rect.max.y));
+
+                // --- Selección con el mouse ---
+                // El mouse está en coordenadas "con aire"; se pasan a una grilla pareja antes de buscar la celda.
+                let to_point = |pos: egui::Pos2| {
+                    let row = row_at(&tops, pos.y);
+                    let dy = (pos.y - tops[row]).clamp(0.0, cell.y - 0.01);
+                    let even = egui::pos2(pos.x, rect.min.y + row as f32 * cell.y + dy);
+                    pixel_to_point(even, rect.min, cell, grid, offset)
+                };
                 if let (false, Some(pos)) = (mouse_mode, response.interact_pointer_pos()) {
                     let (point, side) = to_point(pos);
                     let start = |ty| Some(Selection::new(ty, point, side));
@@ -276,15 +325,15 @@ impl Orion {
                     }
                 }
 
-                let painter = ui.painter();
+                // Recortado a la zona del texto: si todo subió por el aire, lo de arriba no pisa el margen.
+                let clip = egui::Rect::from_x_y_ranges(area.x_range(), rect.y_range());
+                let painter = ui.painter().with_clip_rect(clip);
                 let colors = self.term.colors();
                 let selected = self.term.renderable_content().selection;
 
                 // --- Bloques: debajo del texto van el tinte, el separador y la barra de color ---
-                let spans = self.block_spans();
                 let rows_rect = |first: usize, last: usize| {
-                    let top = rect.min.y + first as f32 * cell.y;
-                    let bottom = rect.min.y + (last + 1) as f32 * cell.y;
+                    let (top, bottom) = (tops[first], tops[last] + cell.y);
                     egui::Rect::from_x_y_ranges(area.x_range(), top..=bottom)
                 };
                 for &(status, first, last, prompt_visible) in &spans {
@@ -295,7 +344,9 @@ impl Orion {
                         painter.rect_filled(r, 0.0, tint);
                     }
                     if prompt_visible && first > 0 {
-                        painter.hline(area.x_range(), r.min.y, egui::Stroke::new(1.0, SEPARATOR));
+                        // En medio del aire: lejos de la salida de arriba y del prompt de abajo.
+                        let y = (r.min.y - gap / 2.0).round();
+                        painter.hline(area.x_range(), y, egui::Stroke::new(1.0, SEPARATOR));
                     }
                     let bar = egui::Rect::from_x_y_ranges(
                         area.min.x + 6.0..=area.min.x + 9.0,
@@ -305,8 +356,8 @@ impl Orion {
                 }
 
                 for (row, cells) in visible_rows(&self.term).iter().enumerate() {
-                    // Cada fila se dibuja en una posición exacta: fila * alto de celda.
-                    let origin = rect.min + egui::vec2(0.0, row as f32 * cell.y);
+                    // Cada fila se dibuja en su posición: fila * alto de celda + el aire de los bloques de arriba.
+                    let origin = egui::pos2(rect.min.x, tops[row]);
                     let mut text = LayoutJob::default();
 
                     for (col, c) in cells.iter().enumerate() {
@@ -366,7 +417,7 @@ impl Orion {
                     running |= matches!(status, Status::Running(_));
                     let color = status_color(status);
                     let galley = painter.layout_no_wrap(label, small.clone(), color);
-                    let row_top = rect.min.y + first as f32 * cell.y;
+                    let row_top = tops[first];
                     let pos = egui::pos2(
                         rect.max.x - 4.0 - galley.size().x,
                         row_top + (cell.y - galley.size().y) / 2.0,
@@ -411,8 +462,8 @@ impl Orion {
                 // Si scrolleaste hacia arriba (#12), el cursor puede quedar fuera de la vista.
                 let in_view = (0..self.grid.1 as i32).contains(&row);
                 if shape != CursorShape::Hidden && in_view && cursor_on(blinking, since) {
-                    let min = rect.min
-                        + egui::vec2(cursor.point.column.0 as f32 * cell.x, row as f32 * cell.y);
+                    let x = rect.min.x + cursor.point.column.0 as f32 * cell.x;
+                    let min = egui::pos2(x, tops[row as usize]);
                     let r = egui::Rect::from_min_size(min, cell);
                     let thin = 2.0;
                     match shape {
@@ -442,6 +493,21 @@ impl Orion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_leave_room_before_blocks() {
+        // 4 filas de 10 px; un bloque empieza en la fila 2: ahí se suman 5 px de aire.
+        let tops = row_tops(4, 10.0, 5.0, &[0, 2], None, (0.0, 100.0));
+        assert_eq!(tops, [0.0, 10.0, 25.0, 35.0]); // sin aire en la fila 0
+        // El aire entre la fila 1 y la 2 cuenta como fila 1; arriba de todo, fila 0.
+        assert_eq!(row_at(&tops, 21.0), 1);
+        assert_eq!(row_at(&tops, 25.0), 2);
+        assert_eq!(row_at(&tops, 9.9), 0);
+        assert_eq!(row_at(&tops, -3.0), 0);
+        // Si el cursor (fila 3) no cabe en 40 px, todo sube 5 px.
+        let tops = row_tops(4, 10.0, 5.0, &[2], Some(3), (0.0, 40.0));
+        assert_eq!(tops, [-5.0, 5.0, 20.0, 30.0]);
+    }
 
     #[test]
     fn cursor_blinks_in_phases() {
