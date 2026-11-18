@@ -94,54 +94,115 @@ impl Orion {
         self.active = active_after_close(self.active, index, self.sessions.len());
     }
 
-    /// Barra de arriba: una pestaña por shell, la activa resaltada, × para cerrar y + para abrir otra.
-    fn tab_bar(&self, ui: &mut egui::Ui) -> Option<TabAction> {
+    /// Barra lateral de pestañas (como las pestañas verticales de Warp, pero más simple):
+    /// "+ Nueva pestaña" arriba y una fila por pestaña con un punto de estado y el nombre de la carpeta.
+    /// Se puede ensanchar o angostar arrastrando su borde.
+    fn tab_sidebar(&self, ui: &mut egui::Ui) -> Option<TabAction> {
         let mut action = None;
         let frame = egui::Frame::new()
             .fill(TAB_BAR)
-            .inner_margin(egui::Margin::symmetric(8, 5));
-        frame.show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                for (i, session) in self.sessions.iter().enumerate() {
-                    let active = i == self.active;
-                    let color = if active { FG } else { PALETTE[8] };
-                    let title = egui::RichText::new(short_title(&session.title())).color(color);
-                    let tab = egui::Button::new(title)
-                        .fill(if active {
-                            BG
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        })
-                        .corner_radius(6.0);
-                    let tab = ui.add(tab).on_hover_text("Clic del medio para cerrar");
-                    if tab.clicked() {
-                        action = Some(TabAction::Select(i));
-                    }
-                    if tab.middle_clicked() {
-                        action = Some(TabAction::Close(i));
-                    }
-                    let close =
-                        egui::Button::new(egui::RichText::new("×").color(PALETTE[8])).frame(false);
-                    if ui
-                        .add(close)
-                        .on_hover_text("Cerrar  (Ctrl+Shift+W)")
-                        .clicked()
-                    {
-                        action = Some(TabAction::Close(i));
-                    }
-                    ui.add_space(6.0);
+            .inner_margin(egui::Margin::symmetric(6, 8));
+        let panel = egui::Panel::left("pestañas")
+            .resizable(true)
+            .default_size(190.0)
+            .min_size(120.0)
+            .max_size(360.0)
+            .show_separator_line(false)
+            .frame(frame);
+        panel.show(ui, |ui| {
+            let width = ui.available_width();
+            let font = egui::FontId::proportional(13.0);
+
+            // Fila "+ Nueva pestaña".
+            let (rect, new) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::click());
+            if new.hovered() {
+                ui.painter().rect_filled(rect, 6.0, BG);
+            }
+            let color = if new.hovered() { FG } else { PALETTE[8] };
+            let text_pos = rect.left_center() + egui::vec2(10.0, 0.0);
+            ui.painter().text(
+                text_pos,
+                egui::Align2::LEFT_CENTER,
+                "+  Nueva pestaña",
+                font.clone(),
+                color,
+            );
+            if new.on_hover_text("Ctrl+Shift+T").clicked() {
+                action = Some(TabAction::New);
+            }
+            ui.add_space(6.0);
+
+            for (i, session) in self.sessions.iter().enumerate() {
+                let (rect, row) =
+                    ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
+                let active = i == self.active;
+                let painter = ui.painter();
+                if active {
+                    // La activa: fondo como el de la terminal y una línea azul a la izquierda.
+                    painter.rect_filled(rect, 6.0, BG);
+                    let accent = egui::Rect::from_min_size(
+                        rect.min + egui::vec2(0.0, 7.0),
+                        egui::vec2(3.0, 16.0),
+                    );
+                    painter.rect_filled(accent, 1.5, PALETTE[4]);
+                } else if row.hovered() {
+                    painter.rect_filled(rect, 6.0, egui::Color32::from_rgb(0x1f, 0x20, 0x2c));
                 }
-                let plus =
-                    egui::Button::new(egui::RichText::new("+").color(PALETTE[7])).frame(false);
-                if ui
-                    .add(plus)
-                    .on_hover_text("Nueva pestaña  (Ctrl+Shift+T)")
-                    .clicked()
-                {
-                    action = Some(TabAction::New);
+
+                // Punto de estado: cómo terminó el último comando (o amarillo si algo corre).
+                let dot = session.activity().map_or(PALETTE[8], render::status_color);
+                painter.circle_filled(rect.left_center() + egui::vec2(14.0, 0.0), 3.5, dot);
+
+                // × a la derecha, solo al pasar el mouse por la fila.
+                let close_rect = egui::Rect::from_center_size(
+                    rect.right_center() - egui::vec2(14.0, 0.0),
+                    egui::vec2(20.0, 20.0),
+                );
+                let close = ui.interact(close_rect, row.id.with("cerrar"), egui::Sense::click());
+
+                // Nombre de la carpeta, recortado para que no pise la ×.
+                let color = if active { FG } else { PALETTE[7] };
+                let title_rect = egui::Rect::from_min_max(
+                    rect.min + egui::vec2(26.0, 0.0),
+                    egui::pos2(close_rect.min.x - 4.0, rect.max.y),
+                );
+                let galley = ui
+                    .painter()
+                    .layout_no_wrap(session.title(), font.clone(), color);
+                ui.painter().with_clip_rect(title_rect).galley(
+                    title_rect.left_center() - egui::vec2(0.0, galley.size().y / 2.0),
+                    galley,
+                    color,
+                );
+
+                if row.hovered() || close.hovered() {
+                    let x_color = if close.hovered() { FG } else { PALETTE[8] };
+                    ui.painter().text(
+                        close_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "×",
+                        font.clone(),
+                        x_color,
+                    );
                 }
-            });
+                if close.on_hover_text("Cerrar  (Ctrl+Shift+W)").clicked() {
+                    action = Some(TabAction::Close(i));
+                }
+                let tip = match session.last_command() {
+                    Some(command) => {
+                        format!("Último comando: {command}\nClic del medio para cerrar")
+                    }
+                    None => "Clic del medio para cerrar".into(),
+                };
+                let row = row.on_hover_text(tip);
+                if row.clicked() {
+                    action = Some(TabAction::Select(i));
+                }
+                if row.middle_clicked() {
+                    action = Some(TabAction::Close(i));
+                }
+                ui.add_space(2.0);
+            }
         });
         action
     }
@@ -201,16 +262,6 @@ fn active_after_close(active: usize, closed: usize, left: usize) -> usize {
     active.min(left.saturating_sub(1))
 }
 
-/// Títulos cortos para que entren varias pestañas.
-fn short_title(title: &str) -> String {
-    const MAX: usize = 24;
-    if title.chars().count() <= MAX {
-        return title.to_string();
-    }
-    let cut: String = title.chars().take(MAX - 1).collect();
-    format!("{cut}…")
-}
-
 impl eframe::App for Orion {
     // logic corre antes de cada ui y también con la ventana oculta: así ningún canal se acumula.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -266,7 +317,7 @@ impl eframe::App for Orion {
         } else {
             self.tab_shortcuts(ui)
         };
-        if let Some(action) = self.tab_bar(ui).or(shortcut) {
+        if let Some(action) = self.tab_sidebar(ui).or(shortcut) {
             self.apply_tab_action(&ctx, action);
             if self.sessions.is_empty() {
                 return;
@@ -314,13 +365,5 @@ mod tests {
         assert_eq!(active_after_close(2, 3, 3), 2); // cerré una de la derecha: no cambia
         assert_eq!(active_after_close(2, 2, 3), 2); // cerré la activa: queda la de su derecha
         assert_eq!(active_after_close(3, 3, 3), 2); // cerré la activa y era la última: la de la izquierda
-    }
-
-    #[test]
-    fn long_titles_get_shortened() {
-        assert_eq!(short_title("Desktop"), "Desktop");
-        let long = "una carpeta con un nombre larguísimo";
-        assert_eq!(short_title(long).chars().count(), 24);
-        assert!(short_title(long).ends_with('…'));
     }
 }

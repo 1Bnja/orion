@@ -102,6 +102,19 @@ impl Session {
             .unwrap_or_else(|| "PowerShell".into())
     }
 
+    /// Estado para el punto de la pestaña: si algo corre, o cómo terminó el último comando.
+    /// None = todavía no se ejecutó nada.
+    pub(super) fn activity(&self) -> Option<Status> {
+        let mut statuses = self.blocks.list.iter().rev().map(|b| b.status());
+        statuses.find(|s| !matches!(s, Status::Editing))
+    }
+
+    /// El último comando que se ejecutó (para el tooltip de la pestaña).
+    pub(super) fn last_command(&self) -> Option<&str> {
+        let mut commands = self.blocks.list.iter().rev().map(|b| b.command.as_str());
+        commands.find(|c| !c.is_empty())
+    }
+
     /// Procesa lo que la shell imprimió desde el último frame (sin bloquear).
     pub(super) fn process_output(&mut self) {
         // try_recv no bloquea: si no hay nada (o el lector terminó), se sale del while.

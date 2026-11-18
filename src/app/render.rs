@@ -89,7 +89,7 @@ fn row_at(tops: &[f32], y: f32) -> usize {
 }
 
 /// Color de un bloque según su estado: verde bien, rojo error, amarillo corriendo, gris escribiendo.
-fn status_color(status: Status) -> egui::Color32 {
+pub(super) fn status_color(status: Status) -> egui::Color32 {
     match status {
         Status::Editing => PALETTE[8],
         Status::Running(_) => PALETTE[3],
