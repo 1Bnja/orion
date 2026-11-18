@@ -5,6 +5,7 @@
 //! pueden usar los campos privados de `Orion`.
 
 mod menu;
+mod palette;
 mod panes;
 mod render;
 mod session;
@@ -16,6 +17,7 @@ use crate::pty::Error;
 use alacritty_terminal::term::TermMode;
 use eframe::egui;
 use menu::SettingsMenu;
+use palette::Palette;
 use panes::Split;
 use session::Session;
 use std::path::PathBuf;
@@ -62,6 +64,7 @@ pub(crate) struct Orion {
     active: usize,
     settings: Settings,
     menu: SettingsMenu,
+    palette: Palette,
     /// Si la ventana tenía el foco en el frame anterior (para avisar cambios a la app de la pestaña).
     focused: bool,
     /// Aviso breve ("Salida copiada") y desde cuándo se muestra.
@@ -80,6 +83,11 @@ enum Action {
     ClosePane,
     /// Mover el foco al panel de al lado, ej. (1, 0) = el de la derecha.
     Focus(egui::Vec2),
+    /// Abrir o cerrar la paleta de comandos.
+    Palette,
+    OpenSettings,
+    /// Cambiar el tamaño de la letra en tantos puntos.
+    FontSize(f32),
 }
 
 impl Orion {
@@ -96,6 +104,7 @@ impl Orion {
             active: 0,
             settings,
             menu: SettingsMenu::default(),
+            palette: Palette::default(),
             focused: true,
             toast: None,
             window_title: String::new(),
@@ -295,6 +304,9 @@ impl Orion {
         let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
         let count = self.tabs.len();
         ui.input_mut(|i| {
+            if i.consume_key(ctrl_shift, Key::P) {
+                return Some(Action::Palette);
+            }
             if i.consume_key(ctrl_shift, Key::T) {
                 return Some(Action::NewTab);
             }
@@ -362,6 +374,13 @@ impl Orion {
                     tab.focus = id;
                 }
             }
+            Action::Palette => self.palette.toggle(),
+            Action::OpenSettings => self.open_menu(),
+            Action::FontSize(delta) => {
+                let mut new = self.settings.clone();
+                new.font.size = (new.font.size + delta).clamp(8.0, 48.0);
+                self.change_settings(ctx, new);
+            }
         }
     }
 
@@ -369,7 +388,8 @@ impl Orion {
     /// Devuelve true si algún panel pidió abrir la configuración.
     fn draw_panes(&mut self, ui: &mut egui::Ui, area: egui::Rect) -> bool {
         let ctx = ui.ctx().clone();
-        let menu_open = self.menu.open;
+        // Con el menú o la paleta abiertos, la rueda y el mouse son para ellos.
+        let menu_open = self.menu.open || self.palette.open;
         let tab = &mut self.tabs[self.active];
         // Entre panel y panel queda una línea de 2 px del color de la barra lateral.
         ui.painter().rect_filled(area, 0.0, TAB_BAR);
@@ -500,10 +520,10 @@ impl eframe::App for Orion {
             self.open_menu();
         } else if self.menu.open && (toggle || escape) {
             self.menu.open = false;
-        } else if !self.menu.open && !toggle {
+        } else if !self.menu.open && !self.palette.open && !toggle {
             self.session().send_input(ui);
         }
-        // Con el menú abierto, el teclado es para el menú (ej. el buscador), no para la shell.
+        // Con el menú o la paleta abiertos, el teclado es para ellos (sus buscadores), no para la shell.
 
         let area = ui.available_rect_before_wrap();
         if self.draw_panes(ui, area) {
@@ -513,6 +533,10 @@ impl eframe::App for Orion {
             render::draw_toast(ui, area, toast, self.settings.font.size);
         }
         self.settings_window(&ctx);
+        // Al final: una acción de la paleta (ej. cerrar la última pestaña) puede cerrar la ventana.
+        if let Some(action) = self.palette_window(&ctx) {
+            self.apply_action(&ctx, action);
+        }
     }
 }
 
