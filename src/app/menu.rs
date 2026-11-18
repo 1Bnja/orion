@@ -71,6 +71,11 @@ impl Orion {
                     ui.label("Tamaño");
                     ui.add(egui::Slider::new(&mut new.font.size, 8.0..=48.0).step_by(1.0));
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Interlineado");
+                    let line_height = egui::Slider::new(&mut new.font.line_height, 1.0..=2.0);
+                    ui.add(line_height.step_by(0.05).fixed_decimals(2));
+                });
                 ui.add(
                     egui::TextEdit::singleline(&mut menu.search)
                         .hint_text("Buscar fuente…")

@@ -43,7 +43,9 @@ use std::time::Duration;
 pub(crate) const BLINK: Duration = Duration::from_millis(530);
 
 /// Margen a la izquierda del texto: ahí va la barra de color de cada bloque.
-const GUTTER: f32 = 10.0;
+const GUTTER: f32 = 16.0;
+/// Aire entre el texto y los bordes de la ventana (arriba, derecha y abajo), como `window-padding` de Ghostty.
+const PADDING: f32 = 10.0;
 /// Línea que separa un bloque del anterior (el "bg_highlight" de Tokyo Night).
 const SEPARATOR: egui::Color32 = egui::Color32::from_rgb(0x29, 0x2e, 0x42);
 
@@ -113,10 +115,18 @@ impl Orion {
                 // Fuente monoespaciada: todas las letras miden lo mismo, así que 'M' sirve de celda.
                 let font = egui::FontId::new(size, egui::FontFamily::Monospace);
                 let bold_font = egui::FontId::new(size, bold_family());
-                let cell = ui
+                let (width, text_height) = ui
                     .ctx()
-                    .fonts_mut(|f| egui::vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
-                let grid = grid_size(ui.available_size() - egui::vec2(GUTTER, 0.0), cell);
+                    .fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+                // Interlineado: la fila es más alta que la letra y la letra va centrada en ella.
+                // Redondeado a píxeles enteros para que las fuentes pixeladas no se vean borrosas.
+                let cell = egui::vec2(
+                    width,
+                    (text_height * self.settings.font.line_height).round(),
+                );
+                let text_dy = ((cell.y - text_height) / 2.0).round();
+                let margins = egui::vec2(GUTTER + PADDING, 2.0 * PADDING);
+                let grid = grid_size(ui.available_size() - margins, cell);
                 if grid != self.grid {
                     self.grid = grid;
                     // La grilla y la shell tienen que coincidir: si no, la shell corta líneas donde no debe.
@@ -127,7 +137,10 @@ impl Orion {
                 // `area` = toda la superficie (para el mouse); `rect` = donde va el texto, después del margen.
                 let (area, response) =
                     ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-                let rect = area.with_min_x(area.min.x + GUTTER);
+                let rect = egui::Rect::from_min_max(
+                    area.min + egui::vec2(GUTTER, PADDING),
+                    area.max - egui::vec2(PADDING, PADDING),
+                );
 
                 // ¿La app pidió el mouse? (vim, btop, lazygit…) Shift+mouse sigue seleccionando, como en otras terminales.
                 let mode = *self.term.mode();
@@ -270,8 +283,8 @@ impl Orion {
                 // --- Bloques: debajo del texto van el tinte, el separador y la barra de color ---
                 let spans = self.block_spans();
                 let rows_rect = |first: usize, last: usize| {
-                    let top = area.min.y + first as f32 * cell.y;
-                    let bottom = area.min.y + (last + 1) as f32 * cell.y;
+                    let top = rect.min.y + first as f32 * cell.y;
+                    let bottom = rect.min.y + (last + 1) as f32 * cell.y;
                     egui::Rect::from_x_y_ranges(area.x_range(), top..=bottom)
                 };
                 for &(status, first, last, prompt_visible) in &spans {
@@ -285,7 +298,7 @@ impl Orion {
                         painter.hline(area.x_range(), r.min.y, egui::Stroke::new(1.0, SEPARATOR));
                     }
                     let bar = egui::Rect::from_x_y_ranges(
-                        area.min.x + 3.0..=area.min.x + 6.0,
+                        area.min.x + 6.0..=area.min.x + 9.0,
                         r.min.y + 3.0..=r.max.y - 3.0,
                     );
                     painter.rect_filled(bar, 1.5, status_color(status));
@@ -339,7 +352,8 @@ impl Orion {
                         push_char(&mut text, c.c, format);
                     }
 
-                    painter.galley(origin, painter.layout_job(text), FG);
+                    let text_pos = origin + egui::vec2(0.0, text_dy);
+                    painter.galley(text_pos, painter.layout_job(text), FG);
                 }
 
                 // --- Bloques: encima del texto, la etiqueta con el resultado y lo que tardó ---
@@ -352,9 +366,9 @@ impl Orion {
                     running |= matches!(status, Status::Running(_));
                     let color = status_color(status);
                     let galley = painter.layout_no_wrap(label, small.clone(), color);
-                    let row_top = area.min.y + first as f32 * cell.y;
+                    let row_top = rect.min.y + first as f32 * cell.y;
                     let pos = egui::pos2(
-                        area.max.x - 10.0 - galley.size().x,
+                        rect.max.x - 4.0 - galley.size().x,
                         row_top + (cell.y - galley.size().y) / 2.0,
                     );
                     let pill =
@@ -406,7 +420,8 @@ impl Orion {
                             // Bloque relleno y, encima, la letra que tapa con el color del fondo.
                             painter.rect_filled(r, 0.0, color);
                             let c = self.term.grid()[cursor.point].c;
-                            painter.text(r.min, egui::Align2::LEFT_TOP, c, font.clone(), BG);
+                            let pos = r.min + egui::vec2(0.0, text_dy);
+                            painter.text(pos, egui::Align2::LEFT_TOP, c, font.clone(), BG);
                         }
                         CursorShape::Beam => {
                             painter.rect_filled(r.with_max_x(r.min.x + thin), 0.0, color);

@@ -19,8 +19,10 @@ pub(crate) fn config_text(settings: &Settings) -> String {
 family = {family}
 # Las fuentes pixeladas se ven nítidas en múltiplos de su grilla (Monocraft: 18, 27…).
 size = {:.1}
+# Alto de cada línea respecto de la letra: 1.0 = pegadas, 1.2 = con aire, 1.5 = muy espaciadas.
+line_height = {:.2}
 "#,
-        settings.font.size
+        settings.font.size, settings.font.line_height
     )
 }
 
@@ -42,6 +44,8 @@ pub(crate) struct Settings {
 pub(crate) struct FontSettings {
     pub(crate) family: String,
     pub(crate) size: f32,
+    /// Interlineado: alto de la fila = alto de la letra × esto (la letra va centrada).
+    pub(crate) line_height: f32,
 }
 
 impl Default for FontSettings {
@@ -49,6 +53,7 @@ impl Default for FontSettings {
         Self {
             family: "Cascadia Mono".into(),
             size: 14.0,
+            line_height: 1.2,
         }
     }
 }
@@ -99,6 +104,8 @@ mod tests {
         assert_eq!((s.font.family.as_str(), s.font.size), ("Monocraft", 14.0));
         let s: Settings = toml::from_str("[font]\nsize = 16").unwrap();
         assert_eq!(s.font.size, 16.0);
+        // Un config viejo, sin line_height, toma el valor por defecto.
+        assert_eq!(s.font.line_height, 1.2);
     }
 
     #[test]
@@ -108,6 +115,7 @@ mod tests {
         for family in ["Monocraft", r#"C:\fuentes\Mi "Fuente".otf"#] {
             s.font.family = family.into();
             s.font.size = 18.0;
+            s.font.line_height = 1.35;
             let back: Settings = toml::from_str(&config_text(&s)).unwrap();
             assert!(back == s, "no volvió igual: {family}");
         }
