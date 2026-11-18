@@ -1,21 +1,36 @@
+use alacritty_terminal::{
+    Term,
+    event::{Event as TermEvent, EventListener},
+    grid::Dimensions,
+    term::{Config, cell::Flags, test::TermSize},
+    vte::ansi::Processor,
+};
 use eframe::egui;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use std::cell::RefCell;
 use std::io::{Read, Write};
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
+/// Input hacia la shell. Compartido: escriben el teclado (UI) y las respuestas automáticas del Term.
+/// ponytail: Rc<RefCell> porque todo corre en el hilo de la UI; pasaría a Arc<Mutex> si otro hilo escribiera.
+type PtyWriter = Rc<RefCell<Box<dyn Write + Send>>>;
+
 /// Una shell corriendo dentro de un pseudo-terminal (ConPTY en Windows).
 #[allow(dead_code)] // ponytail: child solo se usa en tests hasta manejar el cierre de la shell.
 struct Shell {
-    /// Lado "terminal" del PTY: leemos lo que la shell imprime y escribimos lo que el usuario teclea.
+    /// Lado "terminal" del PTY: leemos lo que la shell imprime y le avisamos cambios de tamaño.
     master: Box<dyn MasterPty + Send>,
-    /// Input hacia la shell (teclado). Solo se puede tomar una vez del master.
-    writer: Box<dyn std::io::Write + Send>,
+    writer: PtyWriter,
     child: Box<dyn Child + Send + Sync>,
 }
 
 /// Lanza pwsh (o powershell.exe si no está) con `args` extra.
+///
+/// Ojo: ConPTY arranca preguntando la posición del cursor (ESC[6n) y no lanza la shell
+/// hasta recibir respuesta. En la app la responde el Term; quien use esto sin Term debe responderla.
 fn spawn_shell(size: PtySize, args: &[&str]) -> Result<Shell, Error> {
     let pair = native_pty_system().openpty(size)?;
     let mut last_err = None;
@@ -25,10 +40,7 @@ fn spawn_shell(size: PtySize, args: &[&str]) -> Result<Shell, Error> {
         match pair.slave.spawn_command(cmd) {
             // ponytail: el slave se suelta al salir de la función; la shell ya tiene su copia.
             Ok(child) => {
-                let mut writer = pair.master.take_writer()?;
-                // ConPTY arranca preguntando la posición del cursor (ESC[6n) y no lanza la shell
-                // hasta recibir respuesta. ponytail: respondemos 1;1 a ciegas; alacritty_terminal (#9) lo hará bien.
-                writer.write_all(b"\x1b[1;1R")?;
+                let writer = Rc::new(RefCell::new(pair.master.take_writer()?));
                 return Ok(Shell {
                     master: pair.master,
                     writer,
@@ -63,23 +75,35 @@ fn spawn_reader(
     Ok(rx)
 }
 
-/// Recibe los eventos del parser VT y se queda solo con el texto imprimible y los saltos de línea.
-/// Ignora colores, movimientos de cursor, títulos de ventana, etc.
-/// ponytail: descarta el posicionamiento del cursor; la grilla real llega con alacritty_terminal (#9).
-#[derive(Default)]
-struct PlainText(String);
+/// Recibe los avisos del Term. Solo nos importa `PtyWrite`: respuestas que la terminal
+/// debe mandarle a la shell, como la posición del cursor cuando la shell la pregunta (ESC[6n).
+struct Replies(PtyWriter);
 
-impl vte::Perform for PlainText {
-    fn print(&mut self, c: char) {
-        self.0.push(c);
-    }
-
-    // Caracteres de control (C0): solo nos interesa '\n'; '\r', BEL, etc. se descartan.
-    fn execute(&mut self, byte: u8) {
-        if byte == b'\n' {
-            self.0.push('\n');
+impl EventListener for Replies {
+    fn send_event(&self, event: TermEvent) {
+        if let TermEvent::PtyWrite(text) = event {
+            let _ = self.0.borrow_mut().write_all(text.as_bytes());
         }
     }
+}
+
+/// Texto visible del Term, un String por fila (con los espacios del final incluidos).
+fn screen_text<T: EventListener>(term: &Term<T>) -> Vec<String> {
+    let content = term.renderable_content();
+    let mut lines = vec![String::new(); term.screen_lines()];
+    for cell in content.display_iter {
+        // Un carácter ancho (CJK, emoji) ocupa 2 celdas; la otra es un "spacer" sin contenido propio.
+        if cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            continue;
+        }
+        // Las líneas del historial son negativas; display_offset dice cuánto scrolleamos hacia arriba.
+        let row = (cell.point.line.0 + content.display_offset as i32) as usize;
+        lines[row].push(cell.c);
+    }
+    lines
 }
 
 /// Traduce una tecla especial a los bytes que espera la shell (convención xterm).
@@ -122,6 +146,11 @@ fn pty_size((cols, rows): (u16, u16)) -> PtySize {
     }
 }
 
+/// ponytail: TermSize vive en `term::test` pero es público y es justo lo que Term::new/resize piden.
+fn term_size((cols, rows): (u16, u16)) -> TermSize {
+    TermSize::new(cols as usize, rows as usize)
+}
+
 /// Cuántas celdas de tamaño `cell` caben en `area`. Nunca menos de 1x1: un PTY de 0 columnas falla.
 fn grid_size(area: egui::Vec2, cell: egui::Vec2) -> (u16, u16) {
     let fit = |a: f32, c: f32| (a / c).floor().clamp(1.0, u16::MAX as f32) as u16;
@@ -146,11 +175,16 @@ fn main() -> Result<(), Error> {
             // El Context de egui se puede clonar y usar desde otro hilo para pedir un repaint.
             let ctx = cc.egui_ctx.clone();
             let rx = spawn_reader(&*shell.master, move || ctx.request_repaint())?;
+            let term = Term::new(
+                Config::default(),
+                &term_size(grid),
+                Replies(shell.writer.clone()),
+            );
             Ok(Box::new(Orion {
                 shell,
                 rx,
-                parser: vte::Parser::new(),
-                text: PlainText::default(),
+                processor: Processor::new(),
+                term,
                 grid,
             }))
         }),
@@ -161,11 +195,12 @@ fn main() -> Result<(), Error> {
 struct Orion {
     shell: Shell,
     rx: Receiver<Vec<u8>>,
+    /// Parser VT: convierte bytes en acciones (escribir, mover cursor, borrar…) que aplica sobre el Term.
     /// Guarda estado entre trozos: una secuencia o un carácter UTF-8 puede llegar partido en dos lecturas.
-    parser: vte::Parser,
-    /// ponytail: crece sin límite hasta tener scrollback (#12).
-    text: PlainText,
-    /// Columnas y filas que la shell cree tener. Se compara cada frame para avisarle solo si cambia.
+    processor: Processor,
+    /// La grilla de celdas + cursor + historial. Es el "estado de la pantalla".
+    term: Term<Replies>,
+    /// Columnas y filas actuales. Se compara cada frame para redimensionar solo si cambia.
     grid: (u16, u16),
 }
 
@@ -174,7 +209,7 @@ impl eframe::App for Orion {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // try_iter vacía el canal sin bloquear el frame.
         for chunk in self.rx.try_iter() {
-            self.parser.advance(&mut self.text, &chunk);
+            self.processor.advance(&mut self.term, &chunk);
         }
     }
 
@@ -200,7 +235,7 @@ impl eframe::App for Orion {
                 _ => continue,
             };
             // Si la shell ya terminó, escribir falla; no hay nada que hacer con el error.
-            let _ = self.shell.writer.write_all(&bytes);
+            let _ = self.shell.writer.borrow_mut().write_all(&bytes);
         }
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
@@ -212,16 +247,25 @@ impl eframe::App for Orion {
             let grid = grid_size(ui.available_size(), cell);
             if grid != self.grid {
                 self.grid = grid;
-                // ConPTY le avisa a la shell, que reacomoda su salida (por ejemplo, dónde corta las líneas).
+                // La grilla y la shell tienen que coincidir: si no, la shell corta líneas donde no debe.
+                self.term.resize(term_size(grid));
                 let _ = self.shell.master.resize(pty_size(grid));
             }
 
-            egui::ScrollArea::vertical()
-                .auto_shrink(false)
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new(&self.text.0).monospace());
-                });
+            // Cada fila se dibuja en una posición exacta: fila * alto de celda.
+            // ponytail: sin colores ni cursor todavía (#10, #11).
+            let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+            let color = ui.visuals().text_color();
+            for (row, line) in screen_text(&self.term).iter().enumerate() {
+                let pos = rect.min + egui::vec2(0.0, row as f32 * cell.y);
+                ui.painter().text(
+                    pos,
+                    egui::Align2::LEFT_TOP,
+                    line.trim_end(),
+                    font.clone(),
+                    color,
+                );
+            }
         });
     }
 }
@@ -229,6 +273,7 @@ impl eframe::App for Orion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alacritty_terminal::event::VoidListener;
     use std::time::Duration;
 
     #[test]
@@ -238,6 +283,8 @@ mod tests {
             &["-NoProfile", "-Command", "Write-Output orion-ok"],
         )
         .unwrap();
+        // Sin Term, respondemos nosotros la pregunta inicial de ConPTY (ESC[6n).
+        shell.writer.borrow_mut().write_all(b"\x1b[1;1R").unwrap();
         let rx = spawn_reader(&*shell.master, || {}).unwrap();
 
         let mut out = String::new();
@@ -251,13 +298,20 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_strips_escapes() {
-        let mut parser = vte::Parser::new();
-        let mut text = PlainText::default();
-        // Color, título de ventana (OSC), \r\n, y una 'á' (0xC3 0xA1) partida entre dos trozos.
-        parser.advance(&mut text, b"\x1b[31mhola\x1b[0m\r\n\x1b]0;titulo\x07m\xC3");
-        parser.advance(&mut text, b"\xA1s\x1b[?25h");
-        assert_eq!(text.0, "hola\nmás");
+    fn term_applies_cursor_moves_and_erase() {
+        let mut term = Term::new(Config::default(), &term_size((10, 3)), VoidListener);
+        let mut processor: Processor = Processor::new();
+        // Escribe, vuelve a (1,1) y sobrescribe; en la fila 2 escribe y borra desde la columna 2.
+        processor.advance(
+            &mut term,
+            b"hola mundo\x1b[1;1HX\x1b[2;1Hxyz\x1b[2;2H\x1b[K\x1b[31m\xC3",
+        );
+        processor.advance(&mut term, b"\xA1"); // 'á' partida entre dos trozos, en la fila 2
+        let lines: Vec<_> = screen_text(&term)
+            .iter()
+            .map(|l| l.trim_end().to_string())
+            .collect();
+        assert_eq!(lines, ["Xola mundo", "xá", ""]);
     }
 
     #[test]
