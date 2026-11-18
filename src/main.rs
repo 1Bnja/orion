@@ -292,25 +292,42 @@ fn cursor_on(blinking: bool, since: Duration) -> bool {
 }
 
 // --- Configuración ---
-// ponytail: se lee al arrancar; la recarga en caliente y el resto de opciones llegan con #24.
+// ponytail: se lee al arrancar y la escribe el menú (Ctrl+,); la recarga en caliente al editar a mano llega con #24.
 
-/// Contenido inicial de config.toml: se escribe la primera vez para que sea fácil encontrarlo y editarlo.
-const DEFAULT_CONFIG: &str = r#"# Configuración de Orion. Los cambios se aplican al reiniciar Orion.
+/// Texto de config.toml. Se regenera completo al guardar desde el menú.
+/// ponytail: los comentarios que agregues a mano se pierden al guardar; toml_edit los conservaría.
+fn config_text(settings: &Settings) -> String {
+    // toml::Value escribe el texto con las comillas y escapes correctos (ej. rutas con '\').
+    let family = toml::Value::String(settings.font.family.clone());
+    format!(
+        r#"# Configuración de Orion. Se puede editar aquí o desde el menú (Ctrl+, o clic derecho).
+# Si editas a mano, los cambios se aplican al reiniciar Orion.
 
 [font]
 # Nombre de una fuente instalada (igual que en VS Code), o la ruta a un archivo .ttf/.otf.
 # Ejemplos: "Cascadia Mono", "Monocraft", 'C:\fuentes\MiFuente.ttf'
-family = "Cascadia Mono"
-size = 14.0
-"#;
+family = {family}
+# Las fuentes pixeladas se ven nítidas en múltiplos de su grilla (Monocraft: 18, 27…).
+size = {:.1}
+"#,
+        settings.font.size
+    )
+}
 
-#[derive(serde::Deserialize, Default)]
+/// Guarda la configuración en config.toml (creando la carpeta si hace falta).
+fn save_settings(settings: &Settings) -> std::io::Result<()> {
+    let path = config_path().ok_or(std::io::ErrorKind::NotFound)?;
+    std::fs::create_dir_all(path.parent().expect("la ruta tiene carpeta"))?;
+    std::fs::write(path, config_text(settings))
+}
+
+#[derive(serde::Deserialize, Default, Clone, PartialEq)]
 #[serde(default)] // lo que falte en el archivo toma el valor por defecto
 struct Settings {
     font: FontSettings,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone, PartialEq)]
 #[serde(default)]
 struct FontSettings {
     family: String,
@@ -344,10 +361,10 @@ fn load_settings() -> Settings {
             Settings::default()
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let dir = path.parent().expect("la ruta tiene carpeta");
-            let _ =
-                std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, DEFAULT_CONFIG));
-            Settings::default()
+            // Primera vez: dejamos el archivo con los valores por defecto para que sea fácil encontrarlo.
+            let settings = Settings::default();
+            let _ = save_settings(&settings);
+            settings
         }
         Err(e) => {
             eprintln!("orion: no pude leer {}: {e}", path.display());
@@ -377,36 +394,199 @@ fn face_weight(entry: &str, family: &str) -> Option<bool> {
     }
 }
 
-/// Archivos (normal, negrita si existe) de una fuente: una ruta directa o el nombre de una fuente instalada.
-fn find_font(family: &str) -> Option<(PathBuf, Option<PathBuf>)> {
-    let lower = family.to_lowercase();
-    if lower.ends_with(".ttf") || lower.ends_with(".otf") {
-        return Some((family.into(), None));
-    }
+/// Todas las fuentes instaladas: (entrada del registro, archivo).
+/// HKCU = instaladas solo para tu usuario (guardan la ruta completa).
+/// HKLM = del sistema (guardan solo el nombre del archivo, dentro de C:\Windows\Fonts).
+fn registry_fonts() -> Vec<(String, PathBuf)> {
     use winreg::{RegKey, enums::*};
     const FONTS_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts";
     let windows = std::env::var_os("WINDIR").unwrap_or_else(|| r"C:\Windows".into());
     let system_fonts = Path::new(&windows).join("Fonts");
-    let (mut regular, mut bold) = (None, None);
-    // HKCU: fuentes instaladas solo para tu usuario (guardan la ruta completa).
-    // HKLM: fuentes del sistema (guardan solo el nombre del archivo, dentro de C:\Windows\Fonts).
+    let mut fonts = Vec::new();
     for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
         let Ok(key) = RegKey::predef(root).open_subkey(FONTS_KEY) else {
             continue;
         };
         for (entry, _) in key.enum_values().flatten() {
-            let Some(is_bold) = face_weight(&entry, family) else {
-                continue;
-            };
-            let Ok(file) = key.get_value::<String, _>(&entry) else {
-                continue;
-            };
-            // `join` con una ruta absoluta la deja tal cual, así que sirve para ambos casos.
+            if let Ok(file) = key.get_value::<String, _>(&entry) {
+                // `join` con una ruta absoluta la deja tal cual, así que sirve para ambos casos.
+                fonts.push((entry, system_fonts.join(file)));
+            }
+        }
+    }
+    fonts
+}
+
+fn is_font_file(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.ends_with(".ttf") || lower.ends_with(".otf")
+}
+
+/// Archivos (normal, negrita si existe) de una fuente: una ruta directa o el nombre de una fuente instalada.
+fn find_font(family: &str) -> Option<(PathBuf, Option<PathBuf>)> {
+    if is_font_file(family) {
+        return Some((family.into(), None));
+    }
+    let (mut regular, mut bold) = (None, None);
+    for (entry, file) in registry_fonts() {
+        if let Some(is_bold) = face_weight(&entry, family) {
             let slot = if is_bold { &mut bold } else { &mut regular };
-            slot.get_or_insert(system_fonts.join(file));
+            slot.get_or_insert(file);
         }
     }
     regular.map(|regular| (regular, bold))
+}
+
+/// ¿La fuente es monoespaciada? Lo dice el flag `isFixedPitch` de su tabla `post`.
+/// Un archivo de fuente empieza con un índice de tablas (nombre de 4 letras + posición),
+/// así que basta leer unos pocos bytes, no el archivo entero.
+fn is_monospace(path: &Path) -> bool {
+    use std::io::{Seek, SeekFrom};
+    let read = || -> std::io::Result<bool> {
+        let mut file = std::fs::File::open(path)?;
+        let mut header = [0u8; 12];
+        file.read_exact(&mut header)?;
+        // ponytail: las colecciones .ttc (varias fuentes en un archivo) se tratan como no monoespaciadas.
+        if &header[..4] == b"ttcf" {
+            return Ok(false);
+        }
+        let tables = u16::from_be_bytes([header[4], header[5]]) as usize;
+        let mut directory = vec![0u8; tables * 16];
+        file.read_exact(&mut directory)?;
+        // Cada entrada: tag (4) + checksum (4) + offset (4) + largo (4).
+        for entry in directory.chunks_exact(16) {
+            if &entry[..4] == b"post" {
+                let offset = u32::from_be_bytes([entry[8], entry[9], entry[10], entry[11]]);
+                // isFixedPitch es un u32 en el byte 12 de la tabla post: distinto de 0 = monoespaciada.
+                file.seek(SeekFrom::Start(offset as u64 + 12))?;
+                let mut flag = [0u8; 4];
+                file.read_exact(&mut flag)?;
+                return Ok(flag != [0; 4]);
+            }
+        }
+        Ok(false)
+    };
+    read().unwrap_or(false)
+}
+
+/// Nombre de familia de una entrada del registro si es la variante normal, o None si es otro estilo.
+/// "Cascadia Mono Regular (TrueType)" → "Cascadia Mono"; "Consolas Negrita (TrueType)" → None.
+fn family_name(entry: &str) -> Option<String> {
+    let face = entry.rsplit_once(" (").map_or(entry, |(face, _)| face);
+    let family = face
+        .strip_suffix(" Regular")
+        .or_else(|| face.strip_suffix(" Normal"))
+        .unwrap_or(face);
+    // Si la última palabra es un estilo, es una variante (Bold, Cursiva…), no la versión normal.
+    const STYLES: [&str; 17] = [
+        "bold",
+        "negrita",
+        "italic",
+        "cursiva",
+        "inclinada",
+        "oblique",
+        "light",
+        "semilight",
+        "extralight",
+        "thin",
+        "medium",
+        "semibold",
+        "seminegrita",
+        "black",
+        "heavy",
+        "extrabold",
+        "condensed",
+    ];
+    // Algunas fuentes separan el estilo con guion: "Unispace-Bold".
+    let last_word = family
+        .rsplit([' ', '-'])
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    (!STYLES.contains(&last_word.as_str())).then(|| family.to_string())
+}
+
+/// Carpeta donde se copian las fuentes que agregas arrastrándolas: %APPDATA%\orion\fonts
+fn fonts_dir() -> Option<PathBuf> {
+    Some(config_path()?.parent()?.join("fonts"))
+}
+
+/// Una opción del menú de fuentes.
+#[derive(Clone)]
+struct FontChoice {
+    /// Lo que se muestra en la lista.
+    label: String,
+    /// Lo que se guarda en `font.family`: un nombre instalado o una ruta.
+    family: String,
+    monospace: bool,
+}
+
+/// Fuentes para el menú: las instaladas en Windows y las agregadas a Orion, ordenadas y sin repetir.
+fn font_choices() -> Vec<FontChoice> {
+    let mut fonts: Vec<FontChoice> = registry_fonts()
+        .into_iter()
+        .filter_map(|(entry, file)| {
+            let name = family_name(&entry)?;
+            Some(FontChoice {
+                label: name.clone(),
+                family: name,
+                monospace: is_monospace(&file),
+            })
+        })
+        .collect();
+    let added = fonts_dir().and_then(|dir| std::fs::read_dir(dir).ok());
+    for file in added.into_iter().flatten().flatten() {
+        let path = file.path();
+        let family = path.display().to_string();
+        if is_font_file(&family) {
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+            fonts.push(FontChoice {
+                label: format!("{stem} (agregada)"),
+                family,
+                monospace: is_monospace(&path),
+            });
+        }
+    }
+    fonts.sort_by_key(|f| f.label.to_lowercase());
+    fonts.dedup_by(|a, b| a.label == b.label);
+    fonts
+}
+
+/// Copia una fuente a la carpeta de Orion y devuelve la ruta nueva (lo que va en `font.family`).
+fn add_font(source: &Path) -> std::io::Result<PathBuf> {
+    let dir = fonts_dir().ok_or(std::io::ErrorKind::NotFound)?;
+    std::fs::create_dir_all(&dir)?;
+    let name = source.file_name().ok_or(std::io::ErrorKind::InvalidInput)?;
+    let dest = dir.join(name);
+    if dest != source {
+        std::fs::copy(source, &dest)?;
+    }
+    Ok(dest)
+}
+
+/// Busca la fuente, la carga en egui y avisa en la consola cuál quedó.
+fn apply_font(ctx: &egui::Context, family: &str) {
+    let files = find_font(family).or_else(|| {
+        eprintln!("orion: no encontré la fuente \"{family}\"; uso Cascadia Mono");
+        find_font("Cascadia Mono")
+    });
+    match &files {
+        Some((regular, bold)) => {
+            eprintln!("orion: fuente {} (negrita: {bold:?})", regular.display())
+        }
+        None => eprintln!("orion: sin fuente propia, uso la de egui"),
+    }
+    ctx.set_fonts(font_definitions(files.as_ref()));
+}
+
+/// Estado del menú de configuración.
+#[derive(Default)]
+struct SettingsMenu {
+    open: bool,
+    /// Se llena la primera vez que se abre (leer las fuentes toma unos milisegundos).
+    fonts: Vec<FontChoice>,
+    search: String,
+    show_all: bool,
 }
 
 /// Fuentes de la terminal: la elegida (normal y negrita) y, detrás, los respaldos.
@@ -514,20 +694,9 @@ fn main() -> Result<(), Error> {
     let shell = spawn_shell(pty_size(grid), &["-NoLogo"])?;
 
     let settings = load_settings();
-    let family = &settings.font.family;
-    let font_files = find_font(family).or_else(|| {
-        eprintln!("orion: no encontré la fuente \"{family}\"; uso Cascadia Mono");
-        find_font("Cascadia Mono")
-    });
     // Para saber qué se aplicó: útil al probar fuentes nuevas.
     if let Some(path) = config_path() {
         eprintln!("orion: config {}", path.display());
-    }
-    match &font_files {
-        Some((regular, bold)) => {
-            eprintln!("orion: fuente {} (negrita: {bold:?})", regular.display())
-        }
-        None => eprintln!("orion: sin fuente propia, uso la de egui"),
     }
 
     let options = eframe::NativeOptions {
@@ -541,7 +710,7 @@ fn main() -> Result<(), Error> {
         options,
         Box::new(|cc| {
             // El Context de egui se puede clonar y usar desde otro hilo para pedir un repaint.
-            cc.egui_ctx.set_fonts(font_definitions(font_files.as_ref()));
+            apply_font(&cc.egui_ctx, &settings.font.family);
             let ctx = cc.egui_ctx.clone();
             let rx = spawn_reader(&*shell.master, move || ctx.request_repaint())?;
             // Cursor por defecto: bloque que parpadea. Las apps pueden cambiarlo con ESC[n q (DECSCUSR).
@@ -561,7 +730,8 @@ fn main() -> Result<(), Error> {
                 grid,
                 blink_epoch: Instant::now(),
                 scroll_acc: 0.0,
-                font_size: settings.font.size,
+                settings,
+                menu: SettingsMenu::default(),
             }))
         }),
     )?;
@@ -582,10 +752,99 @@ struct Orion {
     blink_epoch: Instant,
     /// Fracción de línea de scroll pendiente (ver `scroll_lines`).
     scroll_acc: f32,
-    font_size: f32,
+    settings: Settings,
+    menu: SettingsMenu,
 }
 
 impl Orion {
+    fn open_menu(&mut self) {
+        if self.menu.fonts.is_empty() {
+            self.menu.fonts = font_choices();
+        }
+        self.menu.open = true;
+    }
+
+    /// Aplica una configuración nueva al instante (la fuente solo si cambió) y la guarda en config.toml.
+    fn change_settings(&mut self, ctx: &egui::Context, new: Settings) {
+        if new.font.family != self.settings.font.family {
+            apply_font(ctx, &new.font.family);
+        }
+        self.settings = new;
+        if let Err(e) = save_settings(&self.settings) {
+            eprintln!("orion: no pude guardar la configuración: {e}");
+        }
+    }
+
+    /// Una fuente arrastrada a la ventana: se copia a la carpeta de Orion y se usa.
+    fn font_dropped(&mut self, ctx: &egui::Context, path: &Path) {
+        match add_font(path) {
+            Ok(dest) => {
+                let mut new = self.settings.clone();
+                new.font.family = dest.display().to_string();
+                self.change_settings(ctx, new);
+                self.menu.fonts = font_choices(); // para que aparezca en la lista
+                self.open_menu();
+            }
+            Err(e) => eprintln!("orion: no pude agregar {}: {e}", path.display()),
+        }
+    }
+
+    /// Ventana de configuración (Ctrl+, o clic derecho → Configuración…).
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.menu.open;
+        let mut new = self.settings.clone();
+        let menu = &mut self.menu;
+        egui::Window::new("Configuración")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(340.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.heading("Fuente");
+                ui.horizontal(|ui| {
+                    ui.label("Tamaño");
+                    ui.add(egui::Slider::new(&mut new.font.size, 8.0..=48.0).step_by(1.0));
+                });
+                ui.add(
+                    egui::TextEdit::singleline(&mut menu.search)
+                        .hint_text("Buscar fuente…")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.checkbox(&mut menu.show_all, "Mostrar también las no monoespaciadas");
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        let search = menu.search.to_lowercase();
+                        for font in &menu.fonts {
+                            let visible = font.monospace || menu.show_all;
+                            if !visible || !font.label.to_lowercase().contains(&search) {
+                                continue;
+                            }
+                            let selected = new.font.family == font.family;
+                            if ui.selectable_label(selected, &font.label).clicked() {
+                                new.font.family = font.family.clone();
+                            }
+                        }
+                    });
+                let current = menu.fonts.iter().find(|f| f.family == new.font.family);
+                if current.is_some_and(|f| !f.monospace) {
+                    // En una terminal todas las letras deben medir lo mismo, o la grilla se descuadra.
+                    ui.colored_label(
+                        PALETTE[3],
+                        "⚠ No es monoespaciada: las letras pueden encimarse.",
+                    );
+                }
+                ui.separator();
+                ui.label("Para agregar otra fuente, arrastra un archivo .ttf u .otf a la ventana.");
+                ui.weak("Los cambios se guardan en config.toml.");
+            });
+        self.menu.open = open;
+        if new != self.settings {
+            self.change_settings(ctx, new);
+        }
+    }
     /// Copia la selección al portapapeles y la quita (señal visual de que se copió).
     /// Devuelve false si no había nada seleccionado.
     fn copy_selection(&mut self, ctx: &egui::Context) -> bool {
@@ -610,6 +869,41 @@ impl eframe::App for Orion {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
+        // Archivos de fuente arrastrados a la ventana.
+        let dropped: Vec<PathBuf> = ui.input(|i| {
+            let files = i.raw.dropped_files.iter();
+            files.map(|f| f.path().to_path_buf()).collect()
+        });
+        for path in dropped {
+            if is_font_file(&path.to_string_lossy()) {
+                self.font_dropped(&ctx, &path);
+            }
+        }
+
+        // Ctrl+, abre o cierra la configuración (como en VS Code); Escape la cierra.
+        let (toggle, escape) = ui.input(|i| {
+            let toggle = i.modifiers.ctrl && i.key_pressed(egui::Key::Comma);
+            (toggle, i.key_pressed(egui::Key::Escape))
+        });
+        if toggle && !self.menu.open {
+            self.open_menu();
+        } else if self.menu.open && (toggle || escape) {
+            self.menu.open = false;
+        } else if !self.menu.open && !toggle {
+            self.send_input(ui);
+        }
+        // Con el menú abierto, el teclado es para el menú (ej. el buscador), no para la shell.
+
+        self.draw_terminal(ui);
+        self.settings_window(&ctx);
+    }
+}
+
+impl Orion {
+    /// Teclado y portapapeles → shell.
+    fn send_input(&mut self, ui: &egui::Ui) {
         let bracketed = self.term.mode().contains(TermMode::BRACKETED_PASTE);
         // El teclado va en ui y no en logic: con la ventana oculta, logic vería otra vez los eventos del último frame.
         for event in ui.input(|i| i.events.clone()) {
@@ -664,13 +958,17 @@ impl eframe::App for Orion {
             self.term.scroll_display(Scroll::Bottom);
             self.term.selection = None;
         }
+    }
 
+    /// Grilla, cursor, selección y menú de clic derecho.
+    fn draw_terminal(&mut self, ui: &mut egui::Ui) {
         egui::Frame::central_panel(ui.style())
             .fill(BG)
             .show(ui, |ui| {
+                let size = self.settings.font.size;
                 // Fuente monoespaciada: todas las letras miden lo mismo, así que 'M' sirve de celda.
-                let font = egui::FontId::new(self.font_size, egui::FontFamily::Monospace);
-                let bold_font = egui::FontId::new(self.font_size, bold_family());
+                let font = egui::FontId::new(size, egui::FontFamily::Monospace);
+                let bold_font = egui::FontId::new(size, bold_family());
                 let cell = ui
                     .ctx()
                     .fonts_mut(|f| egui::vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
@@ -683,7 +981,12 @@ impl eframe::App for Orion {
                 }
 
                 // Rueda del mouse: positivo = hacia arriba (historial más viejo).
-                let delta = ui.input(|i| i.smooth_scroll_delta.y);
+                // Con el menú abierto, la rueda es para su lista de fuentes.
+                let delta = if self.menu.open {
+                    0.0
+                } else {
+                    ui.input(|i| i.smooth_scroll_delta.y)
+                };
                 let lines = scroll_lines(&mut self.scroll_acc, delta, cell.y);
                 if lines != 0 {
                     let alt_scroll = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL;
@@ -700,6 +1003,28 @@ impl eframe::App for Orion {
 
                 let (rect, response) =
                     ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+
+                // Clic derecho: menú con copiar, pegar y configuración.
+                response.context_menu(|ui| {
+                    let has_selection = self.term.selection.is_some();
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("Copiar"))
+                        .clicked()
+                    {
+                        self.copy_selection(ui.ctx());
+                        ui.close();
+                    }
+                    if ui.button("Pegar").clicked() {
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Configuración…   Ctrl+,").clicked() {
+                        self.open_menu();
+                        ui.close();
+                    }
+                });
 
                 // --- Selección con el mouse ---
                 let offset = self.term.grid().display_offset();
@@ -999,7 +1324,7 @@ mod tests {
 
     #[test]
     fn config_parses_and_fills_defaults() {
-        let s: Settings = toml::from_str(DEFAULT_CONFIG).unwrap();
+        let s: Settings = toml::from_str(&config_text(&Settings::default())).unwrap();
         assert_eq!(
             (s.font.family.as_str(), s.font.size),
             ("Cascadia Mono", 14.0)
@@ -1009,6 +1334,49 @@ mod tests {
         assert_eq!((s.font.family.as_str(), s.font.size), ("Monocraft", 14.0));
         let s: Settings = toml::from_str("[font]\nsize = 16").unwrap();
         assert_eq!(s.font.size, 16.0);
+    }
+
+    #[test]
+    fn saved_config_round_trips() {
+        // Lo que guarda el menú se vuelve a leer igual, incluidas rutas con '\' y comillas.
+        let mut s = Settings::default();
+        for family in ["Monocraft", r#"C:\fuentes\Mi "Fuente".otf"#] {
+            s.font.family = family.into();
+            s.font.size = 18.0;
+            let back: Settings = toml::from_str(&config_text(&s)).unwrap();
+            assert!(back == s, "no volvió igual: {family}");
+        }
+    }
+
+    #[test]
+    fn registry_entries_give_family_names() {
+        assert_eq!(
+            family_name("Monocraft (TrueType)").as_deref(),
+            Some("Monocraft")
+        );
+        assert_eq!(
+            family_name("Cascadia Mono Regular (TrueType)").as_deref(),
+            Some("Cascadia Mono")
+        );
+        assert_eq!(family_name("Consolas Negrita (TrueType)"), None); // variante, no familia
+        assert_eq!(family_name("Arial Bold Italic (TrueType)"), None);
+        assert_eq!(
+            family_name("Lucida Sans Typewriter Inclinada (TrueType)"),
+            None
+        );
+        assert_eq!(family_name("Unispace-Bold (TrueType)"), None);
+    }
+
+    #[test]
+    fn detects_monospace_fonts() {
+        let fonts = Path::new(r"C:\Windows\Fonts");
+        if !fonts.join("consola.ttf").exists() {
+            return; // no estamos en Windows con sus fuentes
+        }
+        assert!(is_monospace(&fonts.join("consola.ttf"))); // Consolas
+        assert!(is_monospace(&fonts.join("CascadiaMono.ttf")));
+        assert!(!is_monospace(&fonts.join("arial.ttf")));
+        assert!(!is_monospace(&fonts.join("no-existe.ttf")));
     }
 
     #[test]
