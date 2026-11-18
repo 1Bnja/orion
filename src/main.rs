@@ -6,12 +6,17 @@
 //!   Antes del parser, `blocks` saca las marcas OSC 133 y arma un bloque por comando.
 //!   Cada pestaña (`app::session`) tiene su propia shell, grilla y bloques.
 
+// En release, Orion es una app de ventana: sin esto, Windows abre una consola negra detrás.
+// En debug la dejamos: ahí se ven los mensajes de `eprintln!`.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod blocks;
 mod colors;
 mod config;
 mod fonts;
 mod grid;
+mod icon;
 mod input;
 mod pty;
 
@@ -28,7 +33,13 @@ fn main() -> Result<(), pty::Error> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Orion")
-            .with_inner_size([900.0, 560.0]),
+            .with_inner_size([900.0, 560.0])
+            // El de la barra de tareas y la esquina de la ventana (el del .exe lo pone build.rs).
+            .with_icon(eframe::egui::IconData {
+                rgba: icon::render(64),
+                width: 64,
+                height: 64,
+            }),
         ..Default::default()
     };
     eframe::run_native(

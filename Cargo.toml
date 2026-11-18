@@ -2,6 +2,8 @@
 name = "orion"
 version = "0.1.0"
 edition = "2024"
+description = "Una terminal simple para Windows 11"
+repository = "https://github.com/1Bnja/orion"
 
 [dependencies]
 alacritty_terminal = "0.26.0"
@@ -27,3 +29,6 @@ opt-level = 1
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[build-dependencies]
+winresource = "0.1.34"
