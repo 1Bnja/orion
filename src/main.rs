@@ -184,6 +184,25 @@ fn resolve(color: Color, colors: &Colors) -> Color32 {
 }
 
 /// Colores finales (texto, fondo) de una celda, ya aplicados dim, inverso y oculto.
+/// Contraste mínimo entre texto y un fondo de color (escala WCAG: 1 = igual, 21 = negro/blanco).
+/// 3:1 es el mínimo legible para texto; por debajo, cambiamos el texto a oscuro o claro.
+const MIN_CONTRAST: f64 = 3.0;
+
+/// Si `fg` casi no se distingue de `bg`, lo reemplaza por el fondo o el texto del tema, el que contraste más.
+/// Ej.: PowerShell pinta carpetas con fondo azul (ESC[44m); el azul de Tokyo Night es claro y el texto claro no se lee.
+fn readable(fg: Color32, bg: Color32) -> Color32 {
+    let rgb = |c: Color32| Rgb {
+        r: c.r(),
+        g: c.g(),
+        b: c.b(),
+    };
+    let contrast = |a: Color32| rgb(a).contrast(rgb(bg));
+    if contrast(fg) >= MIN_CONTRAST {
+        return fg;
+    }
+    if contrast(BG) > contrast(FG) { BG } else { FG }
+}
+
 fn cell_colors(cell: &Cell, colors: &Colors) -> (Color32, Color32) {
     let mut fg = resolve(cell.fg, colors);
     let mut bg = resolve(cell.bg, colors);
@@ -192,6 +211,10 @@ fn cell_colors(cell: &Cell, colors: &Colors) -> (Color32, Color32) {
     }
     if cell.flags.contains(Flags::INVERSE) {
         std::mem::swap(&mut fg, &mut bg);
+    }
+    // Solo sobre fondos de color: el texto tenue sobre el fondo normal (sugerencias de PSReadLine) es intencional.
+    if bg != BG {
+        fg = readable(fg, bg);
     }
     if cell.flags.contains(Flags::HIDDEN) {
         fg = bg;
@@ -622,6 +645,19 @@ mod tests {
         assert!(!cursor_on(true, ms(530))); // segunda fase: apagado
         assert!(cursor_on(true, ms(1060)));
         assert!(cursor_on(false, ms(530))); // sin parpadeo: siempre visible
+    }
+
+    #[test]
+    fn text_on_colored_background_stays_readable() {
+        let mut term = Term::new(Config::default(), &term_size((10, 1)), VoidListener);
+        let mut processor: Processor = Processor::new();
+        // A: como las carpetas de pwsh (fondo azul + negrita). B: texto tenue sobre el fondo normal.
+        processor.advance(&mut term, b"\x1b[44;1mA\x1b[0m\x1b[90mB");
+        let rows = visible_rows(&term);
+        let colors = term.colors();
+        assert_eq!(cell_colors(rows[0][0], colors), (BG, PALETTE[4])); // texto oscuro sobre azul claro
+        assert_eq!(cell_colors(rows[0][1], colors).0, PALETTE[8]); // se respeta el gris tenue
+        assert_eq!(readable(PALETTE[1], BG), PALETTE[1]); // rojo sobre fondo oscuro ya contrasta
     }
 
     #[test]
