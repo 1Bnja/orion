@@ -246,8 +246,11 @@ mod tests {
         // Primer prompt: A (empieza) y B (termina, empieza lo que escribes).
         wait_for(&rx, &mut out, "\x1b]133;B\x07");
         assert!(out.contains("\x1b]133;A\x07"), "falta A: {out:?}");
-        // Título de la pestaña: la carpeta actual. La shell arranca en tu carpeta de usuario: "~".
-        assert!(out.contains("]0;~\x07"), "falta el título: {out:?}");
+        // Título de la pestaña: la carpeta actual. La shell arranca en tu carpeta de usuario (ej. "benja").
+        let home = std::env::var("USERPROFILE").unwrap();
+        let user = std::path::Path::new(&home).file_name().unwrap();
+        let title = format!("]0;{}\x07", user.to_string_lossy());
+        assert!(out.contains(&title), "falta el título {title:?}: {out:?}");
 
         // Un comando que falla con código 3: después del Enter llegan C (salida) y D;3 (terminó).
         out.clear();

@@ -32,9 +32,9 @@ function Global:prompt {
     }
     $Global:__OrionLastId = $lastId
 
-    # Título de la pestaña (OSC 0): el nombre de la carpeta actual, o ~ en tu carpeta de usuario.
+    # Título de la pestaña (OSC 0): el nombre de la carpeta actual (en tu carpeta de usuario, tu usuario).
     $dir = $PWD.ProviderPath
-    $title = if ($dir -eq $HOME) { '~' } else { Split-Path -Leaf $dir }
+    $title = Split-Path -Leaf $dir
     if (-not $title) { $title = $dir }  # en la raíz (C:\) no hay "último pedazo"
     $marks += "$e]0;$title$bel"
 
