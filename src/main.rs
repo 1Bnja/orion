@@ -1,9 +1,9 @@
 use alacritty_terminal::{
     Term,
     event::{Event as TermEvent, EventListener},
-    grid::Dimensions,
+    grid::{Dimensions, Scroll},
     term::{
-        Config,
+        Config, TermMode,
         cell::{Cell, Flags},
         color::Colors,
         test::TermSize,
@@ -265,6 +265,15 @@ fn cursor_on(blinking: bool, since: Duration) -> bool {
     !blinking || (since.as_millis() / BLINK.as_millis()) % 2 == 0
 }
 
+/// Convierte píxeles de rueda en líneas enteras. Lo que sobra queda en `acc` para el próximo frame:
+/// un touchpad manda deltas chicos que por sí solos no llegan a una línea.
+fn scroll_lines(acc: &mut f32, delta_px: f32, line_height: f32) -> i32 {
+    *acc += delta_px / line_height;
+    let lines = acc.trunc();
+    *acc -= lines;
+    lines as i32
+}
+
 /// Cuántas celdas de tamaño `cell` caben en `area`. Nunca menos de 1x1: un PTY de 0 columnas falla.
 fn grid_size(area: egui::Vec2, cell: egui::Vec2) -> (u16, u16) {
     let fit = |a: f32, c: f32| (a / c).floor().clamp(1.0, u16::MAX as f32) as u16;
@@ -305,6 +314,7 @@ fn main() -> Result<(), Error> {
                 term,
                 grid,
                 blink_epoch: Instant::now(),
+                scroll_acc: 0.0,
             }))
         }),
     )?;
@@ -323,6 +333,8 @@ struct Orion {
     grid: (u16, u16),
     /// Desde cuándo cuenta el parpadeo. Se reinicia al teclear: el cursor queda visible mientras escribes.
     blink_epoch: Instant,
+    /// Fracción de línea de scroll pendiente (ver `scroll_lines`).
+    scroll_acc: f32,
 }
 
 impl eframe::App for Orion {
@@ -358,6 +370,8 @@ impl eframe::App for Orion {
             // Si la shell ya terminó, escribir falla; no hay nada que hacer con el error.
             let _ = self.shell.writer.borrow_mut().write_all(&bytes);
             self.blink_epoch = Instant::now();
+            // Si estabas mirando el historial, escribir te devuelve abajo, a donde está el prompt.
+            self.term.scroll_display(Scroll::Bottom);
         }
 
         egui::Frame::central_panel(ui.style())
@@ -374,6 +388,22 @@ impl eframe::App for Orion {
                     // La grilla y la shell tienen que coincidir: si no, la shell corta líneas donde no debe.
                     self.term.resize(term_size(grid));
                     let _ = self.shell.master.resize(pty_size(grid));
+                }
+
+                // Rueda del mouse: positivo = hacia arriba (historial más viejo).
+                let delta = ui.input(|i| i.smooth_scroll_delta.y);
+                let lines = scroll_lines(&mut self.scroll_acc, delta, cell.y);
+                if lines != 0 {
+                    let alt_scroll = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL;
+                    if self.term.mode().contains(alt_scroll) {
+                        // Apps de pantalla completa (less, man) no tienen historial: la rueda se vuelve flechas.
+                        // ponytail: apps que piden eventos de mouse (vim, btop) quedan para #15.
+                        let arrow: &[u8] = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
+                        let keys = arrow.repeat(lines.unsigned_abs() as usize);
+                        let _ = self.shell.writer.borrow_mut().write_all(&keys);
+                    } else {
+                        self.term.scroll_display(Scroll::Delta(lines));
+                    }
                 }
 
                 let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
@@ -592,6 +622,25 @@ mod tests {
         assert!(!cursor_on(true, ms(530))); // segunda fase: apagado
         assert!(cursor_on(true, ms(1060)));
         assert!(cursor_on(false, ms(530))); // sin parpadeo: siempre visible
+    }
+
+    #[test]
+    fn scroll_keeps_fractions_between_frames() {
+        let mut acc = 0.0;
+        assert_eq!(scroll_lines(&mut acc, 50.0, 16.0), 3); // 3.125 líneas: salen 3, sobra 0.125
+        assert_eq!(scroll_lines(&mut acc, 10.0, 16.0), 0); // 0.125 + 0.625 = 0.75: todavía no
+        assert_eq!(scroll_lines(&mut acc, 4.0, 16.0), 1); // 0.75 + 0.25 = 1: ahora sí
+        assert_eq!(scroll_lines(&mut acc, -40.0, 16.0), -2); // hacia abajo: -2.5 → -2
+    }
+
+    #[test]
+    fn scrolled_history_shows_old_lines() {
+        let mut term = Term::new(Config::default(), &term_size((5, 2)), VoidListener);
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, b"uno\r\ndos\r\ntres");
+        term.scroll_display(Scroll::Delta(1)); // una línea hacia arriba
+        let first: String = visible_rows(&term)[0].iter().map(|c| c.c).collect();
+        assert_eq!(first.trim_end(), "uno");
     }
 
     #[test]
