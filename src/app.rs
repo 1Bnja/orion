@@ -1,140 +1,251 @@
-//! La app: estado de Orion y lo que pasa en cada frame (shell → pantalla, teclado → shell).
+//! La app: las pestañas, la configuración y lo que pasa en cada frame.
 //!
-//! `menu` y `render` son submódulos: al ser hijos de `app`, pueden usar los campos privados de `Orion`.
+//! Cada pestaña es una `Session` (su shell, su grilla, sus bloques). `session`, `render` y `menu`
+//! son submódulos: al ser hijos de `app`, pueden usar los campos privados de `Orion`.
 
 mod menu;
 mod render;
+mod session;
 
-use crate::blocks::{
-    Blocks, MarkScanner, Piece, Status, grid_line_of, neighbor_block, scroll_to_show,
-};
+use crate::colors::{BG, FG, PALETTE};
 use crate::config::Settings;
 use crate::fonts::{apply_font, is_font_file};
-use crate::grid::term_size;
-use crate::input::{key_bytes, paste_bytes};
-use crate::pty::{Error, Replies, Shell, spawn_reader};
-use alacritty_terminal::Term;
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::grid::Scroll;
-use alacritty_terminal::term::{Config, TermMode};
-use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor};
+use crate::pty::Error;
+use alacritty_terminal::term::TermMode;
 use eframe::egui;
 use menu::SettingsMenu;
-use std::io::Write;
+use session::Session;
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
+/// Fondo de la barra de pestañas: un poco más oscuro que la terminal.
+const TAB_BAR: egui::Color32 = egui::Color32::from_rgb(0x16, 0x16, 0x1e);
+
 pub(crate) struct Orion {
-    shell: Shell,
-    rx: Receiver<Vec<u8>>,
-    /// Parser VT: convierte bytes en acciones (escribir, mover cursor, borrar…) que aplica sobre el Term.
-    /// Guarda estado entre trozos: una secuencia o un carácter UTF-8 puede llegar partido en dos lecturas.
-    processor: Processor,
-    /// La grilla de celdas + cursor + historial. Es el "estado de la pantalla".
-    term: Term<Replies>,
-    /// Columnas y filas actuales. Se compara cada frame para redimensionar solo si cambia.
-    grid: (u16, u16),
-    /// Desde cuándo cuenta el parpadeo. Se reinicia al teclear: el cursor queda visible mientras escribes.
-    blink_epoch: Instant,
-    /// Fracción de línea de scroll pendiente (ver `scroll_lines`).
-    scroll_acc: f32,
+    /// Las pestañas abiertas, de izquierda a derecha.
+    sessions: Vec<Session>,
+    /// La pestaña que se ve.
+    active: usize,
     settings: Settings,
     menu: SettingsMenu,
-    /// Botón apretado mientras la app recibe el mouse (para informar arrastres).
-    mouse_button: Option<u8>,
-    /// Última celda informada a la app: solo avisamos movimientos cuando cambia.
-    mouse_cell: Option<(usize, usize)>,
-    /// Si la ventana tenía el foco en el frame anterior (para avisar cambios a la app).
+    /// Si la ventana tenía el foco en el frame anterior (para avisar cambios a la app de la pestaña).
     focused: bool,
-    /// Separa las marcas OSC 133 del resto de la salida.
-    marks: MarkScanner,
-    /// Un bloque por comando: lo que escribiste, dónde está su salida, código y duración.
-    blocks: Blocks,
-    /// Bloque sobre el que se hizo clic derecho (el menú lo usa mientras está abierto).
-    context_block: Option<usize>,
     /// Aviso breve ("Salida copiada") y desde cuándo se muestra.
     toast: Option<(String, Instant)>,
-    /// Bloque marcado al navegar con Ctrl+↑/↓ (se resalta y Ctrl+C copia su salida).
-    marked_block: Option<usize>,
+    /// Último título que le pusimos a la ventana (para cambiarlo solo cuando hace falta).
+    window_title: String,
+}
+
+/// Algo que se pidió sobre las pestañas en este frame.
+enum TabAction {
+    New,
+    Close(usize),
+    Select(usize),
 }
 
 impl Orion {
-    /// Prepara la app cuando egui ya creó la ventana: fuente, hilo lector del PTY y la grilla.
+    /// Prepara la app cuando egui ya creó la ventana: la fuente y la primera pestaña.
     pub(crate) fn new(
         cc: &eframe::CreationContext<'_>,
-        shell: Shell,
         settings: Settings,
         grid: (u16, u16),
     ) -> Result<Self, Error> {
         apply_font(&cc.egui_ctx, &settings.font.family);
-        // El Context de egui se puede clonar y usar desde otro hilo para pedir un repaint.
-        let ctx = cc.egui_ctx.clone();
-        let rx = spawn_reader(&*shell.master, move || ctx.request_repaint())?;
-        // Cursor por defecto: bloque que parpadea. Las apps pueden cambiarlo con ESC[n q (DECSCUSR).
-        let config = Config {
-            default_cursor_style: CursorStyle {
-                shape: CursorShape::Block,
-                blinking: true,
-            },
-            ..Config::default()
-        };
-        let term = Term::new(config, &term_size(grid), Replies(shell.writer.clone()));
+        let first = Session::new(&cc.egui_ctx, grid)?;
         Ok(Self {
-            shell,
-            rx,
-            processor: Processor::new(),
-            term,
-            grid,
-            blink_epoch: Instant::now(),
-            scroll_acc: 0.0,
+            sessions: vec![first],
+            active: 0,
             settings,
             menu: SettingsMenu::default(),
-            mouse_button: None,
-            mouse_cell: None,
             focused: true,
-            marks: MarkScanner::default(),
-            blocks: Blocks::default(),
-            context_block: None,
             toast: None,
-            marked_block: None,
+            window_title: String::new(),
         })
+    }
+
+    fn session(&mut self) -> &mut Session {
+        &mut self.sessions[self.active]
+    }
+
+    fn show_toast(&mut self, text: impl Into<String>) {
+        self.toast = Some((text.into(), Instant::now()));
+    }
+
+    /// Abre una pestaña nueva del mismo tamaño que la actual, y la deja activa.
+    fn new_tab(&mut self, ctx: &egui::Context) {
+        let grid = self.session().grid;
+        match Session::new(ctx, grid) {
+            Ok(session) => {
+                self.sessions.push(session);
+                self.active = self.sessions.len() - 1;
+            }
+            Err(e) => self.show_toast(format!("No pude abrir otra pestaña: {e}")),
+        }
+    }
+
+    /// Cierra una pestaña (y su shell). Si era la última, se cierra la ventana.
+    fn close_tab(&mut self, ctx: &egui::Context, index: usize) {
+        let mut session = self.sessions.remove(index);
+        let _ = session.shell.child.kill();
+        if self.sessions.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        self.active = active_after_close(self.active, index, self.sessions.len());
+    }
+
+    /// Barra de arriba: una pestaña por shell, la activa resaltada, × para cerrar y + para abrir otra.
+    fn tab_bar(&self, ui: &mut egui::Ui) -> Option<TabAction> {
+        let mut action = None;
+        let frame = egui::Frame::new()
+            .fill(TAB_BAR)
+            .inner_margin(egui::Margin::symmetric(8, 5));
+        frame.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                for (i, session) in self.sessions.iter().enumerate() {
+                    let active = i == self.active;
+                    let color = if active { FG } else { PALETTE[8] };
+                    let title = egui::RichText::new(short_title(&session.title())).color(color);
+                    let tab = egui::Button::new(title)
+                        .fill(if active {
+                            BG
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .corner_radius(6.0);
+                    let tab = ui.add(tab).on_hover_text("Clic del medio para cerrar");
+                    if tab.clicked() {
+                        action = Some(TabAction::Select(i));
+                    }
+                    if tab.middle_clicked() {
+                        action = Some(TabAction::Close(i));
+                    }
+                    let close =
+                        egui::Button::new(egui::RichText::new("×").color(PALETTE[8])).frame(false);
+                    if ui
+                        .add(close)
+                        .on_hover_text("Cerrar  (Ctrl+Shift+W)")
+                        .clicked()
+                    {
+                        action = Some(TabAction::Close(i));
+                    }
+                    ui.add_space(6.0);
+                }
+                let plus =
+                    egui::Button::new(egui::RichText::new("+").color(PALETTE[7])).frame(false);
+                if ui
+                    .add(plus)
+                    .on_hover_text("Nueva pestaña  (Ctrl+Shift+T)")
+                    .clicked()
+                {
+                    action = Some(TabAction::New);
+                }
+            });
+        });
+        action
+    }
+
+    /// Atajos de pestañas. Se "consumen": así no llegan a la shell.
+    fn tab_shortcuts(&self, ui: &mut egui::Ui) -> Option<TabAction> {
+        use egui::{Key, Modifiers};
+        let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
+        let count = self.sessions.len();
+        ui.input_mut(|i| {
+            if i.consume_key(ctrl_shift, Key::T) {
+                return Some(TabAction::New);
+            }
+            if i.consume_key(ctrl_shift, Key::W) {
+                return Some(TabAction::Close(self.active));
+            }
+            // Primero Ctrl+Shift+Tab: si no, Ctrl+Tab también lo atraparía.
+            if i.consume_key(ctrl_shift, Key::Tab) {
+                return Some(TabAction::Select((self.active + count - 1) % count));
+            }
+            if i.consume_key(Modifiers::CTRL, Key::Tab) {
+                return Some(TabAction::Select((self.active + 1) % count));
+            }
+            // Alt+1 … Alt+9: ir a esa pestaña.
+            const NUMBERS: [Key; 9] = [
+                Key::Num1,
+                Key::Num2,
+                Key::Num3,
+                Key::Num4,
+                Key::Num5,
+                Key::Num6,
+                Key::Num7,
+                Key::Num8,
+                Key::Num9,
+            ];
+            let n = NUMBERS
+                .iter()
+                .position(|&key| i.consume_key(Modifiers::ALT, key))?;
+            (n < count).then_some(TabAction::Select(n))
+        })
+    }
+
+    fn apply_tab_action(&mut self, ctx: &egui::Context, action: TabAction) {
+        match action {
+            TabAction::New => self.new_tab(ctx),
+            TabAction::Close(i) => self.close_tab(ctx, i),
+            TabAction::Select(i) => self.active = i,
+        }
     }
 }
 
+/// Qué pestaña queda activa al cerrar la `closed`, si quedan `left`.
+/// La activa sigue siendo la misma pestaña: si cerraste una de su izquierda, su índice baja uno.
+/// Si cerraste la activa, queda la de su derecha (o la de su izquierda si era la última).
+fn active_after_close(active: usize, closed: usize, left: usize) -> usize {
+    let active = if closed < active { active - 1 } else { active };
+    active.min(left.saturating_sub(1))
+}
+
+/// Títulos cortos para que entren varias pestañas.
+fn short_title(title: &str) -> String {
+    const MAX: usize = 24;
+    if title.chars().count() <= MAX {
+        return title.to_string();
+    }
+    let cut: String = title.chars().take(MAX - 1).collect();
+    format!("{cut}…")
+}
+
 impl eframe::App for Orion {
-    // logic corre antes de cada ui y también con la ventana oculta: así el canal nunca se acumula.
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // try_iter vacía el canal sin bloquear el frame.
-        for chunk in self.rx.try_iter() {
-            for piece in self.marks.feed(&chunk) {
-                match piece {
-                    Piece::Data(bytes) => self.processor.advance(&mut self.term, &bytes),
-                    // La marca se aplica al llegar: el cursor está justo donde la shell la puso.
-                    Piece::Mark(mark) => self.blocks.on_mark(mark, &self.term),
-                }
+    // logic corre antes de cada ui y también con la ventana oculta: así ningún canal se acumula.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Todas las pestañas, no solo la visible: las de atrás siguen recibiendo su salida.
+        for session in &mut self.sessions {
+            session.process_output();
+        }
+        // Pestañas cuya shell terminó (escribiste `exit`): se cierran solas.
+        while let Some(i) = self.sessions.iter_mut().position(|s| s.exited()) {
+            self.close_tab(ctx, i);
+            if self.sessions.is_empty() {
+                return;
             }
-            self.blocks.after_output(&self.term);
-            // Un `cls` vacía la lista: la marca no puede quedar apuntando a un bloque que ya no existe.
-            if self
-                .marked_block
-                .is_some_and(|i| i >= self.blocks.list.len())
-            {
-                self.marked_block = None;
-            }
+        }
+        // El título de la ventana sigue al de la pestaña activa.
+        let title = format!("{} — Orion", self.session().title());
+        if title != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.window_title = title;
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.sessions.is_empty() {
+            return; // la ventana se está cerrando
+        }
         let ctx = ui.ctx().clone();
 
         // Si la app lo pidió (ESC[?1004h, ej. vim), avisarle cuando la ventana gana o pierde el foco.
         let focused = ui.input(|i| i.focused);
         if focused != self.focused {
             self.focused = focused;
-            if self.term.mode().contains(TermMode::FOCUS_IN_OUT) {
-                let report: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
-                let _ = self.shell.writer.borrow_mut().write_all(report);
+            let session = self.session();
+            if session.term.mode().contains(TermMode::FOCUS_IN_OUT) {
+                session.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
             }
         }
 
@@ -149,6 +260,19 @@ impl eframe::App for Orion {
             }
         }
 
+        // Pestañas: barra de arriba y atajos.
+        let shortcut = if self.menu.open {
+            None
+        } else {
+            self.tab_shortcuts(ui)
+        };
+        if let Some(action) = self.tab_bar(ui).or(shortcut) {
+            self.apply_tab_action(&ctx, action);
+            if self.sessions.is_empty() {
+                return;
+            }
+        }
+
         // Ctrl+, abre o cierra la configuración (como en VS Code); Escape la cierra.
         let (toggle, escape) = ui.input(|i| {
             let toggle = i.modifiers.ctrl && i.key_pressed(egui::Key::Comma);
@@ -159,153 +283,44 @@ impl eframe::App for Orion {
         } else if self.menu.open && (toggle || escape) {
             self.menu.open = false;
         } else if !self.menu.open && !toggle {
-            self.send_input(ui);
+            self.session().send_input(ui);
         }
         // Con el menú abierto, el teclado es para el menú (ej. el buscador), no para la shell.
 
-        self.draw_terminal(ui);
+        let area = ui.available_rect_before_wrap();
+        let menu_open = self.menu.open;
+        let open_menu = self.sessions[self.active].draw(ui, &self.settings.font, menu_open);
+        if open_menu {
+            self.open_menu();
+        }
+        if let Some(text) = self.session().toast.take() {
+            self.show_toast(text);
+        }
+        if let Some(toast) = &self.toast {
+            render::draw_toast(ui, area, toast, self.settings.font.size);
+        }
         self.settings_window(&ctx);
     }
 }
 
-impl Orion {
-    /// Copia la selección al portapapeles y la quita (señal visual de que se copió).
-    /// Devuelve false si no había nada seleccionado.
-    pub(crate) fn copy_selection(&mut self, ctx: &egui::Context) -> bool {
-        match self.term.selection_to_string() {
-            Some(text) if !text.is_empty() => {
-                ctx.copy_text(text);
-                self.term.selection = None;
-                true
-            }
-            _ => false,
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closing_tabs_keeps_the_right_one_active() {
+        // 4 pestañas, la activa es la 2.
+        assert_eq!(active_after_close(2, 0, 3), 1); // cerré una de la izquierda: se corre
+        assert_eq!(active_after_close(2, 3, 3), 2); // cerré una de la derecha: no cambia
+        assert_eq!(active_after_close(2, 2, 3), 2); // cerré la activa: queda la de su derecha
+        assert_eq!(active_after_close(3, 3, 3), 2); // cerré la activa y era la última: la de la izquierda
     }
 
-    /// Ctrl+C / Ctrl+Shift+C: copia la selección; si no hay, la salida del bloque marcado.
-    /// Devuelve false si no había nada que copiar.
-    fn copy(&mut self, ctx: &egui::Context) -> bool {
-        if self.copy_selection(ctx) {
-            return true;
-        }
-        let Some(index) = self.marked_block else {
-            return false;
-        };
-        self.apply_block_action(ctx, render::BlockAction::CopyOutput(index));
-        true
-    }
-
-    /// Ctrl+↑ / Ctrl+↓: marca el bloque anterior o el siguiente y mueve la vista para que se vea.
-    /// Pasado el último, se quita la marca y se vuelve abajo, al prompt.
-    fn jump_to_block(&mut self, up: bool) {
-        let done: Vec<usize> = (0..self.blocks.list.len())
-            .filter(|&i| matches!(self.blocks.list[i].status(), Status::Done(..)))
-            .collect();
-        // Si la marca apunta a un bloque que ya no existe (por un `cls`), se empieza de cero.
-        let marked = self.marked_block.filter(|&i| i < self.blocks.list.len());
-        self.marked_block = neighbor_block(&done, marked, up);
-        let Some(index) = self.marked_block else {
-            self.term.scroll_display(Scroll::Bottom);
-            return;
-        };
-        let prompt = self.blocks.list[index].prompt;
-        let Some(line) = grid_line_of(&self.term, prompt) else {
-            return; // ya no está en el historial
-        };
-        let grid = self.term.grid();
-        let (offset, screen) = (grid.display_offset(), grid.screen_lines());
-        if let Some(target) = scroll_to_show(line.0, offset, screen, grid.history_size()) {
-            let delta = target as i32 - offset as i32;
-            self.term.scroll_display(Scroll::Delta(delta));
-        }
-    }
-
-    /// Teclado y portapapeles → shell.
-    pub(crate) fn send_input(&mut self, ui: &egui::Ui) {
-        let bracketed = self.term.mode().contains(TermMode::BRACKETED_PASTE);
-        let app_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
-        let alt = ui.input(|i| i.modifiers.alt);
-        // En apps de pantalla completa (vim, micro) no hay bloques: Ctrl+↑/↓ siguen yendo a la app.
-        let alt_screen = self.term.mode().contains(TermMode::ALT_SCREEN);
-        // El teclado va en ui y no en logic: con la ventana oculta, logic vería otra vez los eventos del último frame.
-        for event in ui.input(|i| i.events.clone()) {
-            let bytes = match event {
-                // Ctrl+↑ / Ctrl+↓: saltar entre bloques.
-                egui::Event::Key {
-                    key: key @ (egui::Key::ArrowUp | egui::Key::ArrowDown),
-                    pressed: true,
-                    modifiers,
-                    ..
-                } if modifiers.ctrl && !modifiers.shift && !modifiers.alt && !alt_screen => {
-                    self.jump_to_block(key == egui::Key::ArrowUp);
-                    continue;
-                }
-                // Escape con un bloque marcado: quitar la marca y volver al prompt (no se manda a la shell).
-                egui::Event::Key {
-                    key: egui::Key::Escape,
-                    pressed: true,
-                    ..
-                } if self.marked_block.is_some() => {
-                    self.marked_block = None;
-                    self.term.scroll_display(Scroll::Bottom);
-                    continue;
-                }
-                // Alt+letra también llega como texto; ya la manda key_bytes con su ESC adelante.
-                egui::Event::Text(t)
-                    if alt && t.len() == 1 && t.as_bytes()[0].is_ascii_alphabetic() =>
-                {
-                    continue;
-                }
-                egui::Event::Text(t) => t.into_bytes(),
-                egui::Event::Paste(t) => paste_bytes(&t, bracketed),
-                // egui convierte Ctrl+C en Copy. Como en Windows Terminal: si hay selección (o un bloque
-                // marcado) copia; si no, es la interrupción de siempre (ETX).
-                egui::Event::Copy => {
-                    if self.copy(ui.ctx()) {
-                        continue;
-                    }
-                    vec![0x03]
-                }
-                egui::Event::Cut => vec![0x18],
-                // Ctrl+Shift+C / Ctrl+Shift+V: los atajos de Ghostty/Warp/Linux.
-                egui::Event::Key {
-                    key: egui::Key::C,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } if modifiers.ctrl && modifiers.shift => {
-                    self.copy(ui.ctx());
-                    continue;
-                }
-                egui::Event::Key {
-                    key: egui::Key::V,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } if modifiers.ctrl && modifiers.shift => {
-                    // egui lee el portapapeles y nos lo devuelve como Event::Paste en un próximo frame.
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
-                    continue;
-                }
-                egui::Event::Key {
-                    key,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } => match key_bytes(key, modifiers, app_cursor) {
-                    Some(b) => b,
-                    None => continue,
-                },
-                _ => continue,
-            };
-            // Si la shell ya terminó, escribir falla; no hay nada que hacer con el error.
-            let _ = self.shell.writer.borrow_mut().write_all(&bytes);
-            self.blink_epoch = Instant::now();
-            // Si estabas mirando el historial, escribir te devuelve abajo, a donde está el prompt.
-            self.term.scroll_display(Scroll::Bottom);
-            self.term.selection = None;
-            self.marked_block = None; // escribir vuelve al modo normal
-        }
+    #[test]
+    fn long_titles_get_shortened() {
+        assert_eq!(short_title("Desktop"), "Desktop");
+        let long = "una carpeta con un nombre larguísimo";
+        assert_eq!(short_title(long).chars().count(), 24);
+        assert!(short_title(long).ends_with('…'));
     }
 }

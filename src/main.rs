@@ -4,6 +4,7 @@
 //!   teclado/mouse → `input` → shell (en un `pty`) → bytes → parser VT → `Term` (la grilla)
 //!   → `app::render` la dibuja con egui, usando `colors`, `fonts` y la geometría de `grid`.
 //!   Antes del parser, `blocks` saca las marcas OSC 133 y arma un bloque por comando.
+//!   Cada pestaña (`app::session`) tiene su propia shell, grilla y bloques.
 
 mod app;
 mod blocks;
@@ -17,8 +18,6 @@ mod pty;
 fn main() -> Result<(), pty::Error> {
     // Tamaño inicial; se corrige en el primer frame, cuando ya sabemos cuánto mide la ventana.
     let grid = (80, 24);
-    // La shell arranca con la integración de Orion: marca cada prompt y comando con OSC 133.
-    let shell = pty::spawn_shell(pty::pty_size(grid), &pty::shell_args(&["-NoLogo"]))?;
 
     let settings = config::load_settings();
     // Para saber qué se aplicó: útil al probar fuentes nuevas.
@@ -35,7 +34,7 @@ fn main() -> Result<(), pty::Error> {
     eframe::run_native(
         "Orion",
         options,
-        Box::new(|cc| Ok(Box::new(app::Orion::new(cc, shell, settings, grid)?))),
+        Box::new(|cc| Ok(Box::new(app::Orion::new(cc, settings, grid)?))),
     )?;
     Ok(())
 }

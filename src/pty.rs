@@ -22,7 +22,6 @@ pub(crate) type Error = Box<dyn std::error::Error + Send + Sync>;
 pub(crate) type PtyWriter = Rc<RefCell<Box<dyn Write + Send>>>;
 
 /// Una shell corriendo dentro de un pseudo-terminal (ConPTY en Windows).
-#[allow(dead_code)] // ponytail: child solo se usa en tests hasta manejar el cierre de la shell.
 pub(crate) struct Shell {
     /// Lado "terminal" del PTY: leemos lo que la shell imprime y le avisamos cambios de tamaño.
     pub(crate) master: Box<dyn MasterPty + Send>,
@@ -95,14 +94,24 @@ pub(crate) fn spawn_reader(
     Ok(rx)
 }
 
-/// Recibe los avisos del Term. Solo nos importa `PtyWrite`: respuestas que la terminal
-/// debe mandarle a la shell, como la posición del cursor cuando la shell la pregunta (ESC[6n).
-pub(crate) struct Replies(pub(crate) PtyWriter);
+/// Recibe los avisos del Term. Nos importan dos:
+/// - `PtyWrite`: respuestas que la terminal debe mandarle a la shell, como la posición del cursor
+///   cuando la shell la pregunta (ESC[6n).
+/// - `Title`: el título que pone la shell (OSC 0); lo usa la pestaña.
+pub(crate) struct Replies {
+    pub(crate) writer: PtyWriter,
+    pub(crate) title: Rc<RefCell<Option<String>>>,
+}
 
 impl EventListener for Replies {
     fn send_event(&self, event: TermEvent) {
-        if let TermEvent::PtyWrite(text) = event {
-            let _ = self.0.borrow_mut().write_all(text.as_bytes());
+        match event {
+            TermEvent::PtyWrite(text) => {
+                let _ = self.writer.borrow_mut().write_all(text.as_bytes());
+            }
+            TermEvent::Title(title) => *self.title.borrow_mut() = Some(title),
+            TermEvent::ResetTitle => *self.title.borrow_mut() = None,
+            _ => {}
         }
     }
 }
@@ -154,6 +163,8 @@ mod tests {
         // Primer prompt: A (empieza) y B (termina, empieza lo que escribes).
         wait_for(&rx, &mut out, "\x1b]133;B\x07");
         assert!(out.contains("\x1b]133;A\x07"), "falta A: {out:?}");
+        // Título de la pestaña: la carpeta actual. La shell arranca en tu carpeta de usuario: "~".
+        assert!(out.contains("]0;~\x07"), "falta el título: {out:?}");
 
         // Un comando que falla con código 3: después del Enter llegan C (salida) y D;3 (terminó).
         out.clear();

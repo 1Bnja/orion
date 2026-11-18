@@ -1,6 +1,6 @@
 //! Dibujar la terminal: celdas con sus colores y estilos, cursor, selección y mouse.
 
-use crate::app::Orion;
+use super::session::Session;
 use crate::blocks::{
     Status, format_duration, logical_line, visible_logical_lines, visible_rows_of,
 };
@@ -11,6 +11,7 @@ use crate::colors::SELECTION;
 use crate::colors::cell_colors;
 use crate::colors::readable;
 use crate::colors::resolve;
+use crate::config::FontSettings;
 use crate::fonts::bold_family;
 use crate::grid::grid_size;
 use crate::grid::is_spacer;
@@ -152,7 +153,26 @@ pub(super) enum BlockAction {
     ToggleCollapse(usize),
 }
 
-impl Orion {
+/// El aviso breve ("Salida copiada"), abajo al centro de `area`, durante 1.5 s.
+pub(super) fn draw_toast(ui: &egui::Ui, area: egui::Rect, toast: &(String, Instant), size: f32) {
+    let (text, since) = toast;
+    if since.elapsed().as_secs_f32() > 1.5 {
+        return;
+    }
+    let small = egui::FontId::new(size * 0.8, egui::FontFamily::Monospace);
+    let painter = ui.painter();
+    let galley = painter.layout_no_wrap(text.clone(), small, FG);
+    let pos = egui::pos2(
+        area.center().x - galley.size().x / 2.0,
+        area.max.y - galley.size().y - 16.0,
+    );
+    let r = egui::Rect::from_min_size(pos, galley.size()).expand2(egui::vec2(10.0, 4.0));
+    painter.rect_filled(r, 6.0, SELECTION);
+    painter.galley(pos, galley, FG);
+    ui.ctx().request_repaint_after(Duration::from_millis(100));
+}
+
+impl Session {
     /// Bloques que se ven ahora, de arriba hacia abajo.
     /// En apps de pantalla completa (vim, less) no hay bloques: la pantalla alternativa no tiene prompts.
     fn block_views(&self) -> Vec<BlockView> {
@@ -209,26 +229,29 @@ impl Orion {
                 (text, "Salida copiada")
             }
         };
-        match text {
+        self.toast = Some(match text {
             Some(text) => {
                 ctx.copy_text(text);
-                self.toast = Some((what.into(), Instant::now()));
+                what.into()
             }
-            None => {
-                self.toast = Some((
-                    "Esa salida ya no está en el historial".into(),
-                    Instant::now(),
-                ))
-            }
-        }
+            None => "Esa salida ya no está en el historial".into(),
+        });
     }
 
     /// Grilla, cursor, selección y menú de clic derecho.
-    pub(crate) fn draw_terminal(&mut self, ui: &mut egui::Ui) {
+    /// `menu_open`: la ventana de configuración está abierta (el teclado y la rueda son para ella).
+    /// Devuelve true si se pidió abrir la configuración desde el menú de clic derecho.
+    pub(super) fn draw(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &FontSettings,
+        menu_open: bool,
+    ) -> bool {
+        let mut open_menu = false;
         egui::Frame::central_panel(ui.style())
             .fill(BG)
             .show(ui, |ui| {
-                let size = self.settings.font.size;
+                let size = settings.size;
                 // Fuente monoespaciada: todas las letras miden lo mismo, así que 'M' sirve de celda.
                 let font = egui::FontId::new(size, egui::FontFamily::Monospace);
                 let bold_font = egui::FontId::new(size, bold_family());
@@ -237,10 +260,7 @@ impl Orion {
                     .fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
                 // Interlineado: la fila es más alta que la letra y la letra va centrada en ella.
                 // Redondeado a píxeles enteros para que las fuentes pixeladas no se vean borrosas.
-                let cell = egui::vec2(
-                    width,
-                    (text_height * self.settings.font.line_height).round(),
-                );
+                let cell = egui::vec2(width, (text_height * settings.line_height).round());
                 let text_dy = ((cell.y - text_height) / 2.0).round();
                 let margins = egui::vec2(GUTTER + PADDING, 2.0 * PADDING);
                 let grid = grid_size(ui.available_size() - margins, cell);
@@ -262,7 +282,7 @@ impl Orion {
                 // ¿La app pidió el mouse? (vim, btop, lazygit…) Shift+mouse sigue seleccionando, como en otras terminales.
                 let mode = *self.term.mode();
                 let shift = ui.input(|i| i.modifiers.shift);
-                let mouse_mode = mode.intersects(TermMode::MOUSE_MODE) && !shift && !self.menu.open;
+                let mouse_mode = mode.intersects(TermMode::MOUSE_MODE) && !shift && !menu_open;
                 let sgr = mode.contains(TermMode::SGR_MOUSE);
                 let cell_at = |pos| {
                     let (point, _) = pixel_to_point(pos, rect.min, cell, grid, 0);
@@ -272,7 +292,7 @@ impl Orion {
 
                 // Rueda del mouse: positivo = hacia arriba (historial más viejo).
                 // Con el menú abierto, la rueda es para su lista de fuentes.
-                let delta = if self.menu.open {
+                let delta = if menu_open {
                     0.0
                 } else {
                     ui.input(|i| i.smooth_scroll_delta.y)
@@ -430,7 +450,7 @@ impl Orion {
                         }
                         ui.separator();
                         if ui.button("Configuración…   Ctrl+,").clicked() {
-                            self.open_menu();
+                            open_menu = true;
                             ui.close();
                         }
                     });
@@ -667,22 +687,6 @@ impl Orion {
                     ui.ctx().request_repaint_after(Duration::from_millis(100));
                 }
 
-                // Aviso breve de "copiado", abajo al centro.
-                if let Some((text, since)) = &self.toast {
-                    let left = 1.5 - since.elapsed().as_secs_f32();
-                    if left > 0.0 {
-                        let galley = painter.layout_no_wrap(text.clone(), small.clone(), FG);
-                        let pos = egui::pos2(
-                            area.center().x - galley.size().x / 2.0,
-                            rect.max.y - galley.size().y - 6.0,
-                        );
-                        let r = egui::Rect::from_min_size(pos, galley.size())
-                            .expand2(egui::vec2(10.0, 4.0));
-                        painter.rect_filled(r, 6.0, SELECTION);
-                        painter.galley(pos, galley, FG);
-                        ui.ctx().request_repaint_after(Duration::from_millis(100));
-                    }
-                }
                 // El cursor usa el color "Cursor" del Term (las apps pueden cambiarlo con OSC 12).
                 let color = resolve(Color::Named(NamedColor::Cursor), colors);
 
@@ -738,6 +742,7 @@ impl Orion {
                     self.apply_block_action(ui.ctx(), action);
                 }
             });
+        open_menu
     }
 }
 

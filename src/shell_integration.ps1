@@ -8,6 +8,8 @@
 #   ESC]133;C BEL   apretaste Enter: lo que sigue es la salida del comando
 #   ESC]133;D;n BEL terminó el comando, con código de salida n
 #
+# Además pone el título (OSC 0) con el nombre de la carpeta actual: es lo que muestra la pestaña.
+#
 # Se carga después de tu perfil, así que envuelve el prompt que ya tengas (oh-my-posh, Starship, etc.).
 
 $Global:__OrionPrompt = $function:prompt
@@ -29,6 +31,12 @@ function Global:prompt {
         else { $marks += "$e]133;D$bel" }
     }
     $Global:__OrionLastId = $lastId
+
+    # Título de la pestaña (OSC 0): el nombre de la carpeta actual, o ~ en tu carpeta de usuario.
+    $dir = $PWD.ProviderPath
+    $title = if ($dir -eq $HOME) { '~' } else { Split-Path -Leaf $dir }
+    if (-not $title) { $title = $dir }  # en la raíz (C:\) no hay "último pedazo"
+    $marks += "$e]0;$title$bel"
 
     $marks += "$e]133;A$bel"
     $marks += & $Global:__OrionPrompt
