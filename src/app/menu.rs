@@ -1,7 +1,7 @@
-//! Ventana de configuración (Ctrl+, o clic derecho): elegir, agrandar y agregar fuentes.
+//! Ventana de configuración (Ctrl+, o clic derecho): el tema y elegir, agrandar y agregar fuentes.
 
 use crate::app::Orion;
-use crate::colors::PALETTE;
+use crate::colors::{THEMES, find_theme, set_theme, theme};
 use crate::config::Settings;
 use crate::config::save_settings;
 use crate::fonts::FontChoice;
@@ -21,6 +21,17 @@ pub(crate) struct SettingsMenu {
     pub(crate) show_all: bool,
 }
 
+/// Cambia el tema: los colores de la terminal y, si el fondo es claro, las ventanas de egui también.
+pub(crate) fn apply_theme(ctx: &egui::Context, name: &str) {
+    set_theme(find_theme(name).unwrap_or(0));
+    let visuals = if theme().is_light() {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
+    ctx.set_visuals(visuals);
+}
+
 impl Orion {
     pub(crate) fn open_menu(&mut self) {
         if self.menu.fonts.is_empty() {
@@ -37,10 +48,13 @@ impl Orion {
         }
     }
 
-    /// Aplica una configuración sin guardarla (la fuente solo si cambió).
+    /// Aplica una configuración sin guardarla (la fuente y el tema solo si cambiaron).
     pub(crate) fn apply_settings(&mut self, ctx: &egui::Context, new: Settings) {
         if new.font.family != self.settings.font.family {
             apply_font(ctx, &new.font.family);
+        }
+        if new.theme != self.settings.theme {
+            apply_theme(ctx, &new.theme);
         }
         self.settings = new;
     }
@@ -71,6 +85,17 @@ impl Orion {
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Tema");
+                    egui::ComboBox::from_id_salt("tema")
+                        .selected_text(&new.theme)
+                        .show_ui(ui, |ui| {
+                            for t in &THEMES {
+                                ui.selectable_value(&mut new.theme, t.name.to_string(), t.name);
+                            }
+                        });
+                });
+                ui.separator();
                 ui.heading("Fuente");
                 ui.horizontal(|ui| {
                     ui.label("Tamaño");
@@ -107,7 +132,7 @@ impl Orion {
                 if current.is_some_and(|f| !f.monospace) {
                     // En una terminal todas las letras deben medir lo mismo, o la grilla se descuadra.
                     ui.colored_label(
-                        PALETTE[3],
+                        theme().ansi[3],
                         "⚠ No es monoespaciada: las letras pueden encimarse.",
                     );
                 }

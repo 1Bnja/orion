@@ -4,13 +4,10 @@ use super::session::Session;
 use crate::blocks::{
     Status, format_duration, logical_line, visible_logical_lines, visible_rows_of,
 };
-use crate::colors::BG;
-use crate::colors::FG;
-use crate::colors::PALETTE;
-use crate::colors::SELECTION;
 use crate::colors::cell_colors;
 use crate::colors::readable;
 use crate::colors::resolve;
+use crate::colors::theme;
 use crate::config::FontSettings;
 use crate::fonts::bold_family;
 use crate::grid::grid_size;
@@ -47,8 +44,6 @@ pub(crate) const BLINK: Duration = Duration::from_millis(530);
 const GUTTER: f32 = 16.0;
 /// Aire entre el texto y los bordes de la ventana (arriba, derecha y abajo), como `window-padding` de Ghostty.
 const PADDING: f32 = 10.0;
-/// Línea que separa un bloque del anterior (el "bg_highlight" de Tokyo Night).
-const SEPARATOR: egui::Color32 = egui::Color32::from_rgb(0x29, 0x2e, 0x42);
 
 /// Borde de arriba de cada fila en pantalla. Antes de cada fila de `gap_rows` (prompts de bloques)
 /// se deja `gap` de aire, salvo en la fila 0. Las filas con `hidden[fila]` (salida de un bloque
@@ -91,10 +86,10 @@ fn row_at(tops: &[f32], y: f32) -> usize {
 /// Color de un bloque según su estado: verde bien, rojo error, amarillo corriendo, gris escribiendo.
 pub(super) fn status_color(status: Status) -> egui::Color32 {
     match status {
-        Status::Editing => PALETTE[8],
-        Status::Running(_) => PALETTE[3],
-        Status::Done(Some(0), _) | Status::Done(None, _) => PALETTE[2],
-        Status::Done(Some(_), _) => PALETTE[1],
+        Status::Editing => theme().ansi[8],
+        Status::Running(_) => theme().ansi[3],
+        Status::Done(Some(0), _) | Status::Done(None, _) => theme().ansi[2],
+        Status::Done(Some(_), _) => theme().ansi[1],
     }
 }
 
@@ -161,14 +156,14 @@ pub(super) fn draw_toast(ui: &egui::Ui, area: egui::Rect, toast: &(String, Insta
     }
     let small = egui::FontId::new(size * 0.8, egui::FontFamily::Monospace);
     let painter = ui.painter();
-    let galley = painter.layout_no_wrap(text.clone(), small, FG);
+    let galley = painter.layout_no_wrap(text.clone(), small, theme().fg);
     let pos = egui::pos2(
         area.center().x - galley.size().x / 2.0,
         area.max.y - galley.size().y - 16.0,
     );
     let r = egui::Rect::from_min_size(pos, galley.size()).expand2(egui::vec2(10.0, 4.0));
-    painter.rect_filled(r, 6.0, SELECTION);
-    painter.galley(pos, galley, FG);
+    painter.rect_filled(r, 6.0, theme().selection);
+    painter.galley(pos, galley, theme().fg);
     ui.ctx().request_repaint_after(Duration::from_millis(100));
 }
 
@@ -251,7 +246,7 @@ impl Session {
     ) -> bool {
         let mut open_menu = false;
         egui::Frame::central_panel(ui.style())
-            .fill(BG)
+            .fill(theme().bg)
             .show(ui, |ui| {
                 let size = settings.size;
                 // Fuente monoespaciada: todas las letras miden lo mismo, así que 'M' sirve de celda.
@@ -525,7 +520,7 @@ impl Session {
                         // Bloque marcado con Ctrl+↑/↓: fondo un poco más claro y borde azul.
                         let glow = egui::Color32::from_rgba_unmultiplied(0x7a, 0xa2, 0xf7, 16);
                         painter.rect_filled(r, 4.0, glow);
-                        let stroke = egui::Stroke::new(1.0, PALETTE[4]);
+                        let stroke = egui::Stroke::new(1.0, theme().ansi[4]);
                         painter.rect_stroke(r.shrink(1.0), 4.0, stroke, egui::StrokeKind::Inside);
                     } else if hovered.is_some_and(|h| h.index == view.index) {
                         // El bloque bajo el mouse se ilumina apenas: así se ve a cuál apuntan los botones.
@@ -540,7 +535,7 @@ impl Session {
                     if prompt_visible && first > 0 {
                         // En medio del aire: lejos de la salida de arriba y del prompt de abajo.
                         let y = (r.min.y - gap / 2.0).round();
-                        painter.hline(area.x_range(), y, egui::Stroke::new(1.0, SEPARATOR));
+                        painter.hline(area.x_range(), y, egui::Stroke::new(1.0, theme().line()));
                     }
                     let bar = egui::Rect::from_x_y_ranges(
                         area.min.x + 6.0..=area.min.x + 9.0,
@@ -561,10 +556,10 @@ impl Session {
                         let (mut fg, mut bg) = cell_colors(c, colors);
                         let point = Point::new(Line(row as i32 - offset as i32), Column(col));
                         if selected.is_some_and(|s| s.contains(point)) {
-                            bg = SELECTION;
+                            bg = theme().selection;
                             fg = readable(fg, bg);
                         }
-                        if bg != BG {
+                        if bg != theme().bg {
                             let width = if c.flags.contains(Flags::WIDE_CHAR) {
                                 2.0
                             } else {
@@ -601,7 +596,7 @@ impl Session {
                     }
 
                     let text_pos = origin + egui::vec2(0.0, text_dy);
-                    painter.galley(text_pos, painter.layout_job(text), FG);
+                    painter.galley(text_pos, painter.layout_job(text), theme().fg);
                 }
 
                 // --- Bloques: encima del texto, la etiqueta con el resultado y lo que tardó ---
@@ -631,9 +626,9 @@ impl Session {
                     let border = if click.hovered() && done {
                         color
                     } else {
-                        SEPARATOR
+                        theme().line()
                     };
-                    painter.rect_filled(pill, 4.0, BG);
+                    painter.rect_filled(pill, 4.0, theme().bg);
                     painter.rect_stroke(
                         pill,
                         4.0,
@@ -676,9 +671,9 @@ impl Session {
                         for (text, tip, action) in buttons {
                             let text = egui::RichText::new(text)
                                 .font(small.clone())
-                                .color(PALETTE[7]);
+                                .color(theme().ansi[7]);
                             let width = painter
-                                .layout_no_wrap(text.text().into(), small.clone(), FG)
+                                .layout_no_wrap(text.text().into(), small.clone(), theme().fg)
                                 .size()
                                 .x;
                             let r = egui::Rect::from_min_max(
@@ -686,8 +681,8 @@ impl Session {
                                 egui::pos2(right, pill.max.y),
                             );
                             let button = egui::Button::new(text)
-                                .fill(BG)
-                                .stroke(egui::Stroke::new(1.0, SEPARATOR))
+                                .fill(theme().bg)
+                                .stroke(egui::Stroke::new(1.0, theme().line()))
                                 .corner_radius(4.0);
                             if ui.put(r, button).on_hover_text(tip).clicked() {
                                 actions.push(action);
@@ -737,7 +732,7 @@ impl Session {
                             painter.rect_filled(r, 0.0, color);
                             let c = self.term.grid()[cursor.point].c;
                             let pos = r.min + egui::vec2(0.0, text_dy);
-                            painter.text(pos, egui::Align2::LEFT_TOP, c, font.clone(), BG);
+                            painter.text(pos, egui::Align2::LEFT_TOP, c, font.clone(), theme().bg);
                         }
                         CursorShape::Beam => {
                             painter.rect_filled(r.with_max_x(r.min.x + thin), 0.0, color);

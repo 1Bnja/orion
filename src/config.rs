@@ -1,5 +1,6 @@
 //! Configuración del usuario: leer y guardar %APPDATA%\orion\config.toml.
 
+use crate::colors::{THEMES, find_theme};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -8,9 +9,15 @@ use std::time::SystemTime;
 pub(crate) fn config_text(settings: &Settings) -> String {
     // toml::Value escribe el texto con las comillas y escapes correctos (ej. rutas con '\').
     let family = toml::Value::String(settings.font.family.clone());
+    let theme = toml::Value::String(settings.theme.clone());
+    let themes: Vec<&str> = THEMES.iter().map(|t| t.name).collect();
+    let themes = themes.join(", ");
     format!(
         r#"# Configuración de Orion. Se puede editar aquí o desde el menú (Ctrl+, o clic derecho).
 # Si editas a mano, los cambios se aplican apenas guardas el archivo.
+
+# Colores. Hay: {themes}.
+theme = {theme}
 
 [font]
 # Nombre de una fuente instalada (igual que en VS Code), o la ruta a un archivo .ttf/.otf.
@@ -32,10 +39,21 @@ pub(crate) fn save_settings(settings: &Settings) -> std::io::Result<()> {
     std::fs::write(path, config_text(settings))
 }
 
-#[derive(serde::Deserialize, Default, Clone, PartialEq)]
+#[derive(serde::Deserialize, Clone, PartialEq)]
 #[serde(default)] // lo que falte en el archivo toma el valor por defecto
 pub(crate) struct Settings {
+    /// Nombre de uno de los temas de `colors::THEMES`.
+    pub(crate) theme: String,
     pub(crate) font: FontSettings,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: THEMES[0].name.into(),
+            font: FontSettings::default(),
+        }
+    }
 }
 
 #[derive(serde::Deserialize, Clone, PartialEq)]
@@ -79,6 +97,10 @@ pub(crate) fn parse_settings(text: &str) -> Result<Settings, String> {
     })?;
     settings.font.size = settings.font.size.clamp(6.0, 72.0);
     settings.font.line_height = settings.font.line_height.clamp(1.0, 3.0);
+    // El nombre queda escrito como en la lista ("dracula" → "Dracula").
+    let theme = find_theme(&settings.theme)
+        .ok_or_else(|| format!("no hay un tema \"{}\"", settings.theme))?;
+    settings.theme = THEMES[theme].name.into();
     Ok(settings)
 }
 
@@ -142,6 +164,13 @@ mod tests {
         );
         let s = parse_settings("[font]\nsize = 0\nline_height = 50").unwrap();
         assert_eq!((s.font.size, s.font.line_height), (6.0, 3.0));
+        // Tema: sin importar mayúsculas; uno que no existe es un error.
+        assert_eq!(
+            parse_settings("theme = 'dracula'").unwrap().theme,
+            "Dracula"
+        );
+        let err = parse_settings("theme = 'Nope'").err().unwrap();
+        assert!(err.contains("Nope"), "{err}");
     }
 
     #[test]

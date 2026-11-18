@@ -10,7 +10,7 @@ mod panes;
 mod render;
 mod session;
 
-use crate::colors::{BG, FG, PALETTE};
+use crate::colors::theme;
 use crate::config::{Settings, config_modified, reload_settings};
 use crate::fonts::{apply_font, is_font_file};
 use crate::pty::Error;
@@ -22,9 +22,6 @@ use panes::Split;
 use session::Session;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
-
-/// Fondo de la barra de pestañas: un poco más oscuro que la terminal.
-const TAB_BAR: egui::Color32 = egui::Color32::from_rgb(0x16, 0x16, 0x1e);
 
 /// Una pestaña: sus paneles y cuál tiene el foco.
 struct Tab {
@@ -95,6 +92,8 @@ enum Action {
     OpenSettings,
     /// Cambiar el tamaño de la letra en tantos puntos.
     FontSize(f32),
+    /// Usar el tema con ese índice en `colors::THEMES`.
+    Theme(usize),
 }
 
 impl Orion {
@@ -105,6 +104,7 @@ impl Orion {
         grid: (u16, u16),
     ) -> Result<Self, Error> {
         apply_font(&cc.egui_ctx, &settings.font.family);
+        menu::apply_theme(&cc.egui_ctx, &settings.theme);
         let first = Session::new(&cc.egui_ctx, grid)?;
         Ok(Self {
             tabs: vec![Tab::new(first)],
@@ -198,7 +198,7 @@ impl Orion {
     fn tab_sidebar(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         let frame = egui::Frame::new()
-            .fill(TAB_BAR)
+            .fill(theme().sidebar())
             .inner_margin(egui::Margin::symmetric(6, 8));
         let panel = egui::Panel::left("pestañas")
             .resizable(true)
@@ -214,9 +214,13 @@ impl Orion {
             // Fila "+ Nueva pestaña".
             let (rect, new) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::click());
             if new.hovered() {
-                ui.painter().rect_filled(rect, 6.0, BG);
+                ui.painter().rect_filled(rect, 6.0, theme().bg);
             }
-            let color = if new.hovered() { FG } else { PALETTE[8] };
+            let color = if new.hovered() {
+                theme().fg
+            } else {
+                theme().ansi[8]
+            };
             let text_pos = rect.left_center() + egui::vec2(10.0, 0.0);
             ui.painter().text(
                 text_pos,
@@ -239,18 +243,20 @@ impl Orion {
                 let painter = ui.painter();
                 if active {
                     // La activa: fondo como el de la terminal y una línea azul a la izquierda.
-                    painter.rect_filled(rect, 6.0, BG);
+                    painter.rect_filled(rect, 6.0, theme().bg);
                     let accent = egui::Rect::from_min_size(
                         rect.min + egui::vec2(0.0, 7.0),
                         egui::vec2(3.0, 16.0),
                     );
-                    painter.rect_filled(accent, 1.5, PALETTE[4]);
+                    painter.rect_filled(accent, 1.5, theme().ansi[4]);
                 } else if row.hovered() {
-                    painter.rect_filled(rect, 6.0, egui::Color32::from_rgb(0x1f, 0x20, 0x2c));
+                    painter.rect_filled(rect, 6.0, theme().hover());
                 }
 
                 // Punto de estado: cómo terminó el último comando (o amarillo si algo corre).
-                let dot = session.activity().map_or(PALETTE[8], render::status_color);
+                let dot = session
+                    .activity()
+                    .map_or(theme().ansi[8], render::status_color);
                 painter.circle_filled(rect.left_center() + egui::vec2(14.0, 0.0), 3.5, dot);
 
                 // × a la derecha, solo al pasar el mouse por la fila.
@@ -261,7 +267,7 @@ impl Orion {
                 let close = ui.interact(close_rect, row.id.with("cerrar"), egui::Sense::click());
 
                 // Nombre de la carpeta, recortado para que no pise la ×.
-                let color = if active { FG } else { PALETTE[7] };
+                let color = if active { theme().fg } else { theme().ansi[7] };
                 let title_rect = egui::Rect::from_min_max(
                     rect.min + egui::vec2(26.0, 0.0),
                     egui::pos2(close_rect.min.x - 4.0, rect.max.y),
@@ -276,7 +282,11 @@ impl Orion {
                 );
 
                 if row.hovered() || close.hovered() {
-                    let x_color = if close.hovered() { FG } else { PALETTE[8] };
+                    let x_color = if close.hovered() {
+                        theme().fg
+                    } else {
+                        theme().ansi[8]
+                    };
                     ui.painter().text(
                         close_rect.center(),
                         egui::Align2::CENTER_CENTER,
@@ -390,6 +400,11 @@ impl Orion {
                 new.font.size = (new.font.size + delta).clamp(8.0, 48.0);
                 self.change_settings(ctx, new);
             }
+            Action::Theme(i) => {
+                let mut new = self.settings.clone();
+                new.theme = crate::colors::THEMES[i].name.into();
+                self.change_settings(ctx, new);
+            }
         }
     }
 
@@ -414,7 +429,7 @@ impl Orion {
                 self.show_toast("Configuración recargada");
             }
             // Mientras tenga errores se sigue usando la configuración anterior.
-            Err(e) => self.show_toast(format!("config.toml tiene un error en la {e}")),
+            Err(e) => self.show_toast(format!("Error en config.toml, {e}")),
         }
     }
 
@@ -426,7 +441,7 @@ impl Orion {
         let menu_open = self.menu.open || self.palette.open;
         let tab = &mut self.tabs[self.active];
         // Entre panel y panel queda una línea de 2 px del color de la barra lateral.
-        ui.painter().rect_filled(area, 0.0, TAB_BAR);
+        ui.painter().rect_filled(area, 0.0, theme().sidebar());
         tab.rects.clear();
         tab.panes.layout(area, 2.0, &mut tab.rects);
 

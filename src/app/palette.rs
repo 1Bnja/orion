@@ -2,7 +2,7 @@
 //! como en VS Code o Warp. Cada entrada muestra su atajo: así se aprenden sin memorizarlos.
 
 use super::{Action, Orion};
-use crate::colors::{FG, PALETTE};
+use crate::colors::theme;
 use eframe::egui;
 
 #[derive(Default)]
@@ -99,6 +99,9 @@ impl Orion {
         const ALT: [&str; 9] = [
             "Alt+1", "Alt+2", "Alt+3", "Alt+4", "Alt+5", "Alt+6", "Alt+7", "Alt+8", "Alt+9",
         ];
+        for (i, t) in crate::colors::THEMES.iter().enumerate() {
+            list.push((format!("Tema: {}", t.name), "", Action::Theme(i)));
+        }
         for (i, tab) in self.tabs.iter().enumerate() {
             let name = format!("Ir a pestaña: {}", tab.focused().title());
             list.push((
@@ -172,24 +175,16 @@ impl Orion {
                                 ui.allocate_exact_size(size, egui::Sense::click());
                             let painter = ui.painter();
                             if row == p.selected {
-                                painter.rect_filled(
-                                    rect,
-                                    4.0,
-                                    egui::Color32::from_rgb(0x29, 0x2e, 0x42),
-                                );
+                                painter.rect_filled(rect, 4.0, theme().line());
                                 if up || down {
                                     response.scroll_to_me(None);
                                 }
                             } else if response.hovered() {
-                                painter.rect_filled(
-                                    rect,
-                                    4.0,
-                                    egui::Color32::from_rgb(0x1f, 0x20, 0x2c),
-                                );
+                                painter.rect_filled(rect, 4.0, theme().hover());
                             }
                             let left = rect.left_center() + egui::vec2(8.0, 0.0);
                             let font = egui::FontId::proportional(14.0);
-                            painter.text(left, egui::Align2::LEFT_CENTER, name, font, FG);
+                            painter.text(left, egui::Align2::LEFT_CENTER, name, font, theme().fg);
                             let right = rect.right_center() - egui::vec2(8.0, 0.0);
                             let small = egui::FontId::proportional(12.0);
                             painter.text(
@@ -197,7 +192,7 @@ impl Orion {
                                 egui::Align2::RIGHT_CENTER,
                                 keys,
                                 small,
-                                PALETTE[8],
+                                theme().ansi[8],
                             );
                             if response.clicked() {
                                 chosen = Some(row);
