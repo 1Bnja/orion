@@ -63,6 +63,25 @@ fn spawn_reader(
     Ok(rx)
 }
 
+/// Recibe los eventos del parser VT y se queda solo con el texto imprimible y los saltos de línea.
+/// Ignora colores, movimientos de cursor, títulos de ventana, etc.
+/// ponytail: descarta el posicionamiento del cursor; la grilla real llega con alacritty_terminal (#9).
+#[derive(Default)]
+struct PlainText(String);
+
+impl vte::Perform for PlainText {
+    fn print(&mut self, c: char) {
+        self.0.push(c);
+    }
+
+    // Caracteres de control (C0): solo nos interesa '\n'; '\r', BEL, etc. se descartan.
+    fn execute(&mut self, byte: u8) {
+        if byte == b'\n' {
+            self.0.push('\n');
+        }
+    }
+}
+
 fn main() -> Result<(), Error> {
     let size = PtySize {
         rows: 24,
@@ -88,7 +107,8 @@ fn main() -> Result<(), Error> {
             Ok(Box::new(Orion {
                 shell,
                 rx,
-                output: Vec::new(),
+                parser: vte::Parser::new(),
+                text: PlainText::default(),
             }))
         }),
     )?;
@@ -99,8 +119,10 @@ struct Orion {
     #[allow(dead_code)] // ponytail: se usa desde la issue #7; tenerla aquí mantiene viva la shell.
     shell: Shell,
     rx: Receiver<Vec<u8>>,
-    /// Todo lo que la shell imprimió. ponytail: crece sin límite hasta tener scrollback (#12).
-    output: Vec<u8>,
+    /// Guarda estado entre trozos: una secuencia o un carácter UTF-8 puede llegar partido en dos lecturas.
+    parser: vte::Parser,
+    /// ponytail: crece sin límite hasta tener scrollback (#12).
+    text: PlainText,
 }
 
 impl eframe::App for Orion {
@@ -108,14 +130,18 @@ impl eframe::App for Orion {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // try_iter vacía el canal sin bloquear el frame.
         for chunk in self.rx.try_iter() {
-            self.output.extend(chunk);
+            self.parser.advance(&mut self.text, &chunk);
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
-            // ponytail: solo el contador; la issue #6 muestra el texto.
-            ui.label(format!("{} bytes recibidos de la shell", self.output.len()));
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(&self.text.0).monospace());
+                });
         });
     }
 }
@@ -145,5 +171,15 @@ mod tests {
             out.push_str(&String::from_utf8_lossy(&chunk));
         }
         let _ = shell.child.kill();
+    }
+
+    #[test]
+    fn plain_text_strips_escapes() {
+        let mut parser = vte::Parser::new();
+        let mut text = PlainText::default();
+        // Color, título de ventana (OSC), \r\n, y una 'á' (0xC3 0xA1) partida entre dos trozos.
+        parser.advance(&mut text, b"\x1b[31mhola\x1b[0m\r\n\x1b]0;titulo\x07m\xC3");
+        parser.advance(&mut text, b"\xA1s\x1b[?25h");
+        assert_eq!(text.0, "hola\nmás");
     }
 }
