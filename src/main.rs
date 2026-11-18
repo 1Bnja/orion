@@ -1,12 +1,12 @@
 use eframe::egui;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// Una shell corriendo dentro de un pseudo-terminal (ConPTY en Windows).
-#[allow(dead_code)] // ponytail: writer/child se usan desde la issue #7.
+#[allow(dead_code)] // ponytail: child solo se usa en tests hasta manejar el cierre de la shell.
 struct Shell {
     /// Lado "terminal" del PTY: leemos lo que la shell imprime y escribimos lo que el usuario teclea.
     master: Box<dyn MasterPty + Send>,
@@ -82,6 +82,36 @@ impl vte::Perform for PlainText {
     }
 }
 
+/// Traduce una tecla especial a los bytes que espera la shell (convención xterm).
+/// El texto normal no pasa por aquí: llega como `Event::Text`.
+fn key_bytes(key: egui::Key, mods: egui::Modifiers) -> Option<Vec<u8>> {
+    use egui::Key::*;
+    let seq: &[u8] = match key {
+        Enter => b"\r", // las terminales mandan CR, no LF
+        Backspace => b"\x7f",
+        Tab => b"\t",
+        Escape => b"\x1b",
+        ArrowUp => b"\x1b[A",
+        ArrowDown => b"\x1b[B",
+        ArrowRight => b"\x1b[C",
+        ArrowLeft => b"\x1b[D",
+        Home => b"\x1b[H",
+        End => b"\x1b[F",
+        Delete => b"\x1b[3~",
+        PageUp => b"\x1b[5~",
+        PageDown => b"\x1b[6~",
+        // Ctrl+letra = código de control: Ctrl+A = 0x01 ... Ctrl+Z = 0x1A.
+        _ if mods.ctrl => {
+            let &[c] = key.name().as_bytes() else {
+                return None;
+            };
+            return c.is_ascii_uppercase().then(|| vec![c - b'A' + 1]);
+        }
+        _ => return None,
+    };
+    Some(seq.to_vec())
+}
+
 fn main() -> Result<(), Error> {
     let size = PtySize {
         rows: 24,
@@ -116,7 +146,6 @@ fn main() -> Result<(), Error> {
 }
 
 struct Orion {
-    #[allow(dead_code)] // ponytail: se usa desde la issue #7; tenerla aquí mantiene viva la shell.
     shell: Shell,
     rx: Receiver<Vec<u8>>,
     /// Guarda estado entre trozos: una secuencia o un carácter UTF-8 puede llegar partido en dos lecturas.
@@ -135,6 +164,30 @@ impl eframe::App for Orion {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // El teclado va en ui y no en logic: con la ventana oculta, logic vería otra vez los eventos del último frame.
+        for event in ui.input(|i| i.events.clone()) {
+            let bytes = match event {
+                egui::Event::Text(t) => t.into_bytes(),
+                // ponytail: sin bracketed paste hasta la issue #13.
+                egui::Event::Paste(t) => t.replace('\n', "\r").into_bytes(),
+                // egui convierte Ctrl+C/Ctrl+X en Copy/Cut. Sin selección (#13), son señales para la shell.
+                egui::Event::Copy => vec![0x03],
+                egui::Event::Cut => vec![0x18],
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => match key_bytes(key, modifiers) {
+                    Some(b) => b,
+                    None => continue,
+                },
+                _ => continue,
+            };
+            // Si la shell ya terminó, escribir falla; no hay nada que hacer con el error.
+            let _ = self.shell.writer.write_all(&bytes);
+        }
+
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
@@ -181,5 +234,16 @@ mod tests {
         parser.advance(&mut text, b"\x1b[31mhola\x1b[0m\r\n\x1b]0;titulo\x07m\xC3");
         parser.advance(&mut text, b"\xA1s\x1b[?25h");
         assert_eq!(text.0, "hola\nmás");
+    }
+
+    #[test]
+    fn keys_map_to_terminal_bytes() {
+        use egui::{Key, Modifiers};
+        let none = Modifiers::NONE;
+        assert_eq!(key_bytes(Key::Enter, none).unwrap(), b"\r");
+        assert_eq!(key_bytes(Key::ArrowUp, none).unwrap(), b"\x1b[A");
+        assert_eq!(key_bytes(Key::D, Modifiers::CTRL).unwrap(), [0x04]);
+        assert_eq!(key_bytes(Key::A, none), None); // la 'a' llega como Event::Text
+        assert_eq!(key_bytes(Key::Num1, Modifiers::CTRL), None);
     }
 }
