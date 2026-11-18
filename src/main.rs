@@ -3,7 +3,7 @@ use alacritty_terminal::{
     event::{Event as TermEvent, EventListener},
     grid::Dimensions,
     term::{Config, cell::Flags, test::TermSize},
-    vte::ansi::Processor,
+    vte::ansi::{CursorShape, CursorStyle, Processor},
 };
 use eframe::egui;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -11,6 +11,10 @@ use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
+
+/// Medio ciclo de parpadeo (encendido o apagado), el mismo valor que usa Windows por defecto.
+const BLINK: Duration = Duration::from_millis(530);
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -151,6 +155,11 @@ fn term_size((cols, rows): (u16, u16)) -> TermSize {
     TermSize::new(cols as usize, rows as usize)
 }
 
+/// ¿El cursor está en su fase "encendida"? Alterna cada BLINK desde `since` (el último input).
+fn cursor_on(blinking: bool, since: Duration) -> bool {
+    !blinking || (since.as_millis() / BLINK.as_millis()) % 2 == 0
+}
+
 /// Cuántas celdas de tamaño `cell` caben en `area`. Nunca menos de 1x1: un PTY de 0 columnas falla.
 fn grid_size(area: egui::Vec2, cell: egui::Vec2) -> (u16, u16) {
     let fit = |a: f32, c: f32| (a / c).floor().clamp(1.0, u16::MAX as f32) as u16;
@@ -175,17 +184,22 @@ fn main() -> Result<(), Error> {
             // El Context de egui se puede clonar y usar desde otro hilo para pedir un repaint.
             let ctx = cc.egui_ctx.clone();
             let rx = spawn_reader(&*shell.master, move || ctx.request_repaint())?;
-            let term = Term::new(
-                Config::default(),
-                &term_size(grid),
-                Replies(shell.writer.clone()),
-            );
+            // Cursor por defecto: bloque que parpadea. Las apps pueden cambiarlo con ESC[n q (DECSCUSR).
+            let config = Config {
+                default_cursor_style: CursorStyle {
+                    shape: CursorShape::Block,
+                    blinking: true,
+                },
+                ..Config::default()
+            };
+            let term = Term::new(config, &term_size(grid), Replies(shell.writer.clone()));
             Ok(Box::new(Orion {
                 shell,
                 rx,
                 processor: Processor::new(),
                 term,
                 grid,
+                blink_epoch: Instant::now(),
             }))
         }),
     )?;
@@ -202,6 +216,8 @@ struct Orion {
     term: Term<Replies>,
     /// Columnas y filas actuales. Se compara cada frame para redimensionar solo si cambia.
     grid: (u16, u16),
+    /// Desde cuándo cuenta el parpadeo. Se reinicia al teclear: el cursor queda visible mientras escribes.
+    blink_epoch: Instant,
 }
 
 impl eframe::App for Orion {
@@ -236,6 +252,7 @@ impl eframe::App for Orion {
             };
             // Si la shell ya terminó, escribir falla; no hay nada que hacer con el error.
             let _ = self.shell.writer.borrow_mut().write_all(&bytes);
+            self.blink_epoch = Instant::now();
         }
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
@@ -253,18 +270,65 @@ impl eframe::App for Orion {
             }
 
             // Cada fila se dibuja en una posición exacta: fila * alto de celda.
-            // ponytail: sin colores ni cursor todavía (#10, #11).
+            // ponytail: sin colores todavía (#10).
             let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
             let color = ui.visuals().text_color();
+            let painter = ui.painter();
             for (row, line) in screen_text(&self.term).iter().enumerate() {
                 let pos = rect.min + egui::vec2(0.0, row as f32 * cell.y);
-                ui.painter().text(
+                painter.text(
                     pos,
                     egui::Align2::LEFT_TOP,
                     line.trim_end(),
                     font.clone(),
                     color,
                 );
+            }
+
+            // --- Cursor ---
+            let content = self.term.renderable_content();
+            let (cursor, offset) = (content.cursor, content.display_offset);
+            let focused = ui.input(|i| i.focused);
+            let blinking = self.term.cursor_style().blinking && focused;
+            let since = self.blink_epoch.elapsed();
+            if blinking {
+                // egui duerme si nada cambia: le pedimos despertar justo en el próximo cambio de fase.
+                let phase = Duration::from_millis((since.as_millis() % BLINK.as_millis()) as u64);
+                ui.ctx().request_repaint_after(BLINK - phase);
+            }
+            // Sin foco, cursor hueco y fijo (como Alacritty/Ghostty): se ve dónde estás, sin distraer.
+            let shape = match cursor.shape {
+                CursorShape::Hidden => CursorShape::Hidden,
+                _ if !focused => CursorShape::HollowBlock,
+                shape => shape,
+            };
+            let row = cursor.point.line.0 + offset as i32;
+            // Si scrolleaste hacia arriba (#12), el cursor puede quedar fuera de la vista.
+            let in_view = (0..self.grid.1 as i32).contains(&row);
+            if shape != CursorShape::Hidden && in_view && cursor_on(blinking, since) {
+                let min = rect.min
+                    + egui::vec2(cursor.point.column.0 as f32 * cell.x, row as f32 * cell.y);
+                let r = egui::Rect::from_min_size(min, cell);
+                let thin = 2.0;
+                match shape {
+                    CursorShape::Block => {
+                        // Bloque relleno y, encima, la letra que tapa con el color del fondo.
+                        painter.rect_filled(r, 0.0, color);
+                        let c = self.term.grid()[cursor.point].c;
+                        let bg = ui.visuals().panel_fill;
+                        painter.text(r.min, egui::Align2::LEFT_TOP, c, font.clone(), bg);
+                    }
+                    CursorShape::Beam => {
+                        painter.rect_filled(r.with_max_x(r.min.x + thin), 0.0, color);
+                    }
+                    CursorShape::Underline => {
+                        painter.rect_filled(r.with_min_y(r.max.y - thin), 0.0, color);
+                    }
+                    _ => {
+                        let stroke = egui::Stroke::new(1.0, color);
+                        painter.rect_stroke(r, 0.0, stroke, egui::StrokeKind::Inside);
+                    }
+                }
             }
         });
     }
@@ -323,6 +387,16 @@ mod tests {
         assert_eq!(key_bytes(Key::D, Modifiers::CTRL).unwrap(), [0x04]);
         assert_eq!(key_bytes(Key::A, none), None); // la 'a' llega como Event::Text
         assert_eq!(key_bytes(Key::Num1, Modifiers::CTRL), None);
+    }
+
+    #[test]
+    fn cursor_blinks_in_phases() {
+        let ms = Duration::from_millis;
+        assert!(cursor_on(true, ms(0))); // recién tecleado: visible
+        assert!(cursor_on(true, ms(529)));
+        assert!(!cursor_on(true, ms(530))); // segunda fase: apagado
+        assert!(cursor_on(true, ms(1060)));
+        assert!(cursor_on(false, ms(530))); // sin parpadeo: siempre visible
     }
 
     #[test]
