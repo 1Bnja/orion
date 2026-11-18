@@ -1,0 +1,59 @@
+# Release: al subir un tag v* (ej. v0.1.0), compila Orion, arma el zip y lo publica en GitHub Releases.
+#   git tag v0.1.0
+#   git push origin v0.1.0
+# También se puede correr a mano (Actions → Release → Run workflow): arma el zip y lo deja como
+# artefacto, sin publicar nada. Sirve para probar.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # para crear la release y subirle archivos
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Que no se publique un v0.2.0 que adentro dice 0.1.0.
+      - name: La versión del tag coincide con Cargo.toml
+        if: github.ref_type == 'tag'
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "El tag ${{ github.ref_name }} no coincide con la versión de Cargo.toml ($version)"
+          }
+
+      - name: Tests
+        run: cargo test
+
+      - name: Armar el zip
+        run: ./scripts/package.ps1
+
+      # Prueba a mano: el zip queda descargable en la página de la ejecución.
+      - name: Guardar el zip (prueba)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: orion-windows-x64
+          path: target/dist/*.zip*
+
+      - name: Publicar la release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # PowerShell no expande comodines para otros programas: listamos los archivos nosotros.
+          $files = Get-ChildItem target/dist/*.zip, target/dist/*.sha256 | ForEach-Object FullName
+          gh release create "${{ github.ref_name }}" @files --title "Orion ${{ github.ref_name }}" --generate-notes
