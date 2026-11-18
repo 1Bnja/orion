@@ -290,6 +290,57 @@ fn cursor_on(blinking: bool, since: Duration) -> bool {
     !blinking || (since.as_millis() / BLINK.as_millis()) % 2 == 0
 }
 
+// --- Fuentes ---
+// ponytail: fijas hasta el archivo de configuración (#24).
+/// Cascadia Mono viene con Windows 11. Es una fuente *variable*: un solo archivo con todos los pesos.
+const FONT_FILE: &str = r"C:\Windows\Fonts\CascadiaMono.ttf";
+/// Respaldo para símbolos que Cascadia no tiene (flechas, figuras, etc.). También viene con Windows.
+const SYMBOL_FILE: &str = r"C:\Windows\Fonts\seguisym.ttf";
+const FONT_SIZE: f32 = 14.0;
+
+/// Familia de fuente para el texto en negrita.
+fn bold_family() -> egui::FontFamily {
+    egui::FontFamily::Name("bold".into())
+}
+
+/// Fuentes de la terminal: Cascadia Mono normal y bold, con respaldos.
+/// Si a la fuente le falta un carácter, egui lo busca en la siguiente de la lista.
+fn font_definitions() -> egui::FontDefinitions {
+    use egui::{FontData, FontFamily, FontTweak, epaint::text::VariationCoords};
+    let mut fonts = egui::FontDefinitions::default();
+    // Respaldos que ya trae egui (incluyen emoji en blanco y negro).
+    let mut fallback = fonts.families[&FontFamily::Monospace].clone();
+
+    if let Ok(bytes) = std::fs::read(SYMBOL_FILE) {
+        let data = FontData::from_owned(bytes);
+        fonts
+            .font_data
+            .insert("symbols".into(), std::sync::Arc::new(data));
+        fallback.push("symbols".into());
+    }
+
+    let mut mono = fallback.clone();
+    let mut bold = fallback;
+    if let Ok(bytes) = std::fs::read(FONT_FILE) {
+        // Mismo archivo, dos pesos: 400 = normal, 700 = negrita (eje "wght" de la fuente variable).
+        let weight = |wght: f32| {
+            let tweak = FontTweak {
+                coords: VariationCoords::new([(b"wght", wght)]),
+                ..Default::default()
+            };
+            std::sync::Arc::new(FontData::from_owned(bytes.clone()).tweak(tweak))
+        };
+        fonts.font_data.insert("mono".into(), weight(400.0));
+        fonts.font_data.insert("mono-bold".into(), weight(700.0));
+        mono.insert(0, "mono".into());
+        bold.insert(0, "mono-bold".into());
+    }
+    // Si no está Cascadia, ambas familias quedan con la fuente de egui (pero existen: egui falla si falta una).
+    fonts.families.insert(FontFamily::Monospace, mono);
+    fonts.families.insert(bold_family(), bold);
+    fonts
+}
+
 /// Fondo del texto seleccionado (selección de Tokyo Night).
 const SELECTION: Color32 = Color32::from_rgb(0x33, 0x46, 0x7c);
 
@@ -359,6 +410,7 @@ fn main() -> Result<(), Error> {
         options,
         Box::new(|cc| {
             // El Context de egui se puede clonar y usar desde otro hilo para pedir un repaint.
+            cc.egui_ctx.set_fonts(font_definitions());
             let ctx = cc.egui_ctx.clone();
             let rx = spawn_reader(&*shell.master, move || ctx.request_repaint())?;
             // Cursor por defecto: bloque que parpadea. Las apps pueden cambiarlo con ESC[n q (DECSCUSR).
@@ -484,7 +536,8 @@ impl eframe::App for Orion {
             .fill(BG)
             .show(ui, |ui| {
                 // Fuente monoespaciada: todas las letras miden lo mismo, así que 'M' sirve de celda.
-                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                let font = egui::FontId::new(FONT_SIZE, egui::FontFamily::Monospace);
+                let bold_font = egui::FontId::new(FONT_SIZE, bold_family());
                 let cell = ui
                     .ctx()
                     .fonts_mut(|f| egui::vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
@@ -549,9 +602,6 @@ impl eframe::App for Orion {
                     // Cada fila se dibuja en una posición exacta: fila * alto de celda.
                     let origin = rect.min + egui::vec2(0.0, row as f32 * cell.y);
                     let mut text = LayoutJob::default();
-                    // Copia de la fila donde solo se ve lo que va en negrita (el resto, transparente).
-                    let mut bold = LayoutJob::default();
-                    let mut any_bold = false;
 
                     for (col, c) in cells.iter().enumerate() {
                         let (mut fg, mut bg) = cell_colors(c, colors);
@@ -581,7 +631,11 @@ impl eframe::App for Orion {
                             }
                         };
                         let format = TextFormat {
-                            font_id: font.clone(),
+                            font_id: if c.flags.contains(Flags::BOLD) {
+                                bold_font.clone()
+                            } else {
+                                font.clone()
+                            },
                             color: fg,
                             italics: c.flags.contains(Flags::ITALIC),
                             // ponytail: los 5 tipos de subrayado (doble, ondulado…) se ven como uno simple.
@@ -589,26 +643,10 @@ impl eframe::App for Orion {
                             strikethrough: line(c.flags.contains(Flags::STRIKEOUT)),
                             ..Default::default()
                         };
-                        let is_bold = c.flags.contains(Flags::BOLD);
-                        any_bold |= is_bold;
-                        let bold_color = if is_bold { fg } else { Color32::TRANSPARENT };
-                        push_char(
-                            &mut bold,
-                            c.c,
-                            TextFormat {
-                                color: bold_color,
-                                ..format.clone()
-                            },
-                        );
                         push_char(&mut text, c.c, format);
                     }
 
                     painter.galley(origin, painter.layout_job(text), FG);
-                    if any_bold {
-                        // ponytail: negrita falsa (repintar corrido medio píxel); la fuente con bold real llega en #14.
-                        let shifted = origin + egui::vec2(0.5, 0.0);
-                        painter.galley(shifted, painter.layout_job(bold), FG);
-                    }
                 }
                 // El cursor usa el color "Cursor" del Term (las apps pueden cambiarlo con OSC 12).
                 let color = resolve(Color::Named(NamedColor::Cursor), colors);
@@ -776,6 +814,20 @@ mod tests {
         assert_eq!(cell_colors(rows[0][0], colors), (BG, PALETTE[4])); // texto oscuro sobre azul claro
         assert_eq!(cell_colors(rows[0][1], colors).0, PALETTE[8]); // se respeta el gris tenue
         assert_eq!(readable(PALETTE[1], BG), PALETTE[1]); // rojo sobre fondo oscuro ya contrasta
+    }
+
+    #[test]
+    fn fonts_put_cascadia_first_with_fallbacks() {
+        let fonts = font_definitions();
+        let mono = &fonts.families[&egui::FontFamily::Monospace];
+        let bold = &fonts.families[&bold_family()];
+        if std::path::Path::new(FONT_FILE).exists() {
+            assert_eq!(mono[0], "mono");
+            assert_eq!(bold[0], "mono-bold");
+        }
+        // Normal y negrita comparten los respaldos, después de la fuente principal.
+        assert_eq!(mono[1..], bold[1..]);
+        assert!(mono.len() > 1);
     }
 
     #[test]
