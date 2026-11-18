@@ -2,10 +2,18 @@ use alacritty_terminal::{
     Term,
     event::{Event as TermEvent, EventListener},
     grid::Dimensions,
-    term::{Config, cell::Flags, test::TermSize},
-    vte::ansi::{CursorShape, CursorStyle, Processor},
+    term::{
+        Config,
+        cell::{Cell, Flags},
+        color::Colors,
+        test::TermSize,
+    },
+    vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb},
 };
-use eframe::egui;
+use eframe::egui::{
+    self, Color32,
+    text::{ByteIndex, LayoutJob, LayoutSection, TextFormat},
+};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::cell::RefCell;
 use std::io::{Read, Write};
@@ -91,23 +99,120 @@ impl EventListener for Replies {
     }
 }
 
-/// Texto visible del Term, un String por fila (con los espacios del final incluidos).
-fn screen_text<T: EventListener>(term: &Term<T>) -> Vec<String> {
+/// Celdas visibles, una fila por línea de pantalla. El índice dentro de la fila es la columna.
+fn visible_rows<T: EventListener>(term: &Term<T>) -> Vec<Vec<&Cell>> {
     let content = term.renderable_content();
-    let mut lines = vec![String::new(); term.screen_lines()];
-    for cell in content.display_iter {
-        // Un carácter ancho (CJK, emoji) ocupa 2 celdas; la otra es un "spacer" sin contenido propio.
-        if cell
-            .flags
-            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-        {
-            continue;
-        }
+    let mut rows = vec![Vec::with_capacity(term.columns()); term.screen_lines()];
+    for indexed in content.display_iter {
         // Las líneas del historial son negativas; display_offset dice cuánto scrolleamos hacia arriba.
-        let row = (cell.point.line.0 + content.display_offset as i32) as usize;
-        lines[row].push(cell.c);
+        let row = (indexed.point.line.0 + content.display_offset as i32) as usize;
+        rows[row].push(indexed.cell);
     }
-    lines
+    rows
+}
+
+/// Un carácter ancho (CJK, emoji) ocupa 2 celdas; la otra es un "spacer" sin contenido propio.
+fn is_spacer(cell: &Cell) -> bool {
+    cell.flags
+        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+}
+
+// --- Colores ---
+// Tema: Tokyo Night. ponytail: fijo hasta tener temas en el config (#25).
+const FG: Color32 = Color32::from_rgb(0xc0, 0xca, 0xf5);
+const BG: Color32 = Color32::from_rgb(0x1a, 0x1b, 0x26);
+/// Los 16 colores ANSI: 0-7 normales, 8-15 brillantes.
+const PALETTE: [Color32; 16] = [
+    Color32::from_rgb(0x15, 0x16, 0x1e), // negro
+    Color32::from_rgb(0xf7, 0x76, 0x8e), // rojo
+    Color32::from_rgb(0x9e, 0xce, 0x6a), // verde
+    Color32::from_rgb(0xe0, 0xaf, 0x68), // amarillo
+    Color32::from_rgb(0x7a, 0xa2, 0xf7), // azul
+    Color32::from_rgb(0xbb, 0x9a, 0xf7), // magenta
+    Color32::from_rgb(0x7d, 0xcf, 0xff), // cian
+    Color32::from_rgb(0xa9, 0xb1, 0xd6), // blanco
+    Color32::from_rgb(0x41, 0x48, 0x68), // negro brillante (gris)
+    Color32::from_rgb(0xff, 0x89, 0x9d),
+    Color32::from_rgb(0x9f, 0xe0, 0x44),
+    Color32::from_rgb(0xfa, 0xba, 0x4a),
+    Color32::from_rgb(0x8d, 0xb0, 0xff),
+    Color32::from_rgb(0xc7, 0xa9, 0xff),
+    Color32::from_rgb(0xa4, 0xda, 0xff),
+    Color32::from_rgb(0xc0, 0xca, 0xf5),
+];
+
+/// "Dim" (SGR 2) = el color a 2/3 de intensidad, igual que Alacritty.
+fn dim(c: Color32) -> Color32 {
+    let f = |v: u8| (v as f32 * 2.0 / 3.0) as u8;
+    Color32::from_rgb(f(c.r()), f(c.g()), f(c.b()))
+}
+
+/// Color por índice cuando la app no lo redefinió. Numeración de xterm + los extras de Alacritty.
+fn default_color(idx: usize) -> Color32 {
+    // El cubo 6x6x6 usa estos 6 niveles por canal.
+    let level = |v: usize| if v == 0 { 0 } else { (55 + 40 * v) as u8 };
+    match idx {
+        0..16 => PALETTE[idx],
+        16..232 => {
+            let i = idx - 16;
+            Color32::from_rgb(level(i / 36), level(i / 6 % 6), level(i % 6))
+        }
+        232..256 => {
+            let g = (8 + 10 * (idx - 232)) as u8; // 24 grises de 8 a 238
+            Color32::from_rgb(g, g, g)
+        }
+        _ => match idx {
+            i if i == NamedColor::Background as usize => BG,
+            i if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize).contains(&i) => {
+                dim(PALETTE[i - NamedColor::DimBlack as usize])
+            }
+            i if i == NamedColor::DimForeground as usize => dim(FG),
+            _ => FG, // Foreground, Cursor, BrightForeground
+        },
+    }
+}
+
+/// Convierte el color de una celda a RGB.
+fn resolve(color: Color, colors: &Colors) -> Color32 {
+    let idx = match color {
+        Color::Spec(Rgb { r, g, b }) => return Color32::from_rgb(r, g, b), // truecolor
+        Color::Indexed(i) => i as usize,
+        Color::Named(n) => n as usize,
+    };
+    // Si la app redefinió ese color (OSC 4/10/11), manda eso; si no, nuestra paleta.
+    colors[idx].map_or_else(|| default_color(idx), |c| Color32::from_rgb(c.r, c.g, c.b))
+}
+
+/// Colores finales (texto, fondo) de una celda, ya aplicados dim, inverso y oculto.
+fn cell_colors(cell: &Cell, colors: &Colors) -> (Color32, Color32) {
+    let mut fg = resolve(cell.fg, colors);
+    let mut bg = resolve(cell.bg, colors);
+    if cell.flags.contains(Flags::DIM) {
+        fg = dim(fg);
+    }
+    if cell.flags.contains(Flags::INVERSE) {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    if cell.flags.contains(Flags::HIDDEN) {
+        fg = bg;
+    }
+    (fg, bg)
+}
+
+/// Agrega un carácter al LayoutJob. Si tiene el mismo estilo que el anterior, extiende esa sección:
+/// así egui maneja unos pocos tramos por fila en vez de una sección por letra.
+fn push_char(job: &mut LayoutJob, c: char, format: TextFormat) {
+    let start = ByteIndex(job.text.len());
+    job.text.push(c);
+    let end = ByteIndex(job.text.len());
+    match job.sections.last_mut() {
+        Some(s) if s.format == format => s.byte_range.end = end,
+        _ => job.sections.push(LayoutSection {
+            leading_space: 0.0,
+            byte_range: start..end,
+            format,
+        }),
+    }
 }
 
 /// Traduce una tecla especial a los bytes que espera la shell (convención xterm).
@@ -255,82 +360,134 @@ impl eframe::App for Orion {
             self.blink_epoch = Instant::now();
         }
 
-        egui::Frame::central_panel(ui.style()).show(ui, |ui| {
-            // Fuente monoespaciada: todas las letras miden lo mismo, así que 'M' sirve de celda.
-            let font = egui::TextStyle::Monospace.resolve(ui.style());
-            let cell = ui
-                .ctx()
-                .fonts_mut(|f| egui::vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
-            let grid = grid_size(ui.available_size(), cell);
-            if grid != self.grid {
-                self.grid = grid;
-                // La grilla y la shell tienen que coincidir: si no, la shell corta líneas donde no debe.
-                self.term.resize(term_size(grid));
-                let _ = self.shell.master.resize(pty_size(grid));
-            }
+        egui::Frame::central_panel(ui.style())
+            .fill(BG)
+            .show(ui, |ui| {
+                // Fuente monoespaciada: todas las letras miden lo mismo, así que 'M' sirve de celda.
+                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                let cell = ui
+                    .ctx()
+                    .fonts_mut(|f| egui::vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
+                let grid = grid_size(ui.available_size(), cell);
+                if grid != self.grid {
+                    self.grid = grid;
+                    // La grilla y la shell tienen que coincidir: si no, la shell corta líneas donde no debe.
+                    self.term.resize(term_size(grid));
+                    let _ = self.shell.master.resize(pty_size(grid));
+                }
 
-            // Cada fila se dibuja en una posición exacta: fila * alto de celda.
-            // ponytail: sin colores todavía (#10).
-            let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
-            let color = ui.visuals().text_color();
-            let painter = ui.painter();
-            for (row, line) in screen_text(&self.term).iter().enumerate() {
-                let pos = rect.min + egui::vec2(0.0, row as f32 * cell.y);
-                painter.text(
-                    pos,
-                    egui::Align2::LEFT_TOP,
-                    line.trim_end(),
-                    font.clone(),
-                    color,
-                );
-            }
+                let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+                let painter = ui.painter();
+                let colors = self.term.colors();
+                for (row, cells) in visible_rows(&self.term).iter().enumerate() {
+                    // Cada fila se dibuja en una posición exacta: fila * alto de celda.
+                    let origin = rect.min + egui::vec2(0.0, row as f32 * cell.y);
+                    let mut text = LayoutJob::default();
+                    // Copia de la fila donde solo se ve lo que va en negrita (el resto, transparente).
+                    let mut bold = LayoutJob::default();
+                    let mut any_bold = false;
 
-            // --- Cursor ---
-            let content = self.term.renderable_content();
-            let (cursor, offset) = (content.cursor, content.display_offset);
-            let focused = ui.input(|i| i.focused);
-            let blinking = self.term.cursor_style().blinking && focused;
-            let since = self.blink_epoch.elapsed();
-            if blinking {
-                // egui duerme si nada cambia: le pedimos despertar justo en el próximo cambio de fase.
-                let phase = Duration::from_millis((since.as_millis() % BLINK.as_millis()) as u64);
-                ui.ctx().request_repaint_after(BLINK - phase);
-            }
-            // Sin foco, cursor hueco y fijo (como Alacritty/Ghostty): se ve dónde estás, sin distraer.
-            let shape = match cursor.shape {
-                CursorShape::Hidden => CursorShape::Hidden,
-                _ if !focused => CursorShape::HollowBlock,
-                shape => shape,
-            };
-            let row = cursor.point.line.0 + offset as i32;
-            // Si scrolleaste hacia arriba (#12), el cursor puede quedar fuera de la vista.
-            let in_view = (0..self.grid.1 as i32).contains(&row);
-            if shape != CursorShape::Hidden && in_view && cursor_on(blinking, since) {
-                let min = rect.min
-                    + egui::vec2(cursor.point.column.0 as f32 * cell.x, row as f32 * cell.y);
-                let r = egui::Rect::from_min_size(min, cell);
-                let thin = 2.0;
-                match shape {
-                    CursorShape::Block => {
-                        // Bloque relleno y, encima, la letra que tapa con el color del fondo.
-                        painter.rect_filled(r, 0.0, color);
-                        let c = self.term.grid()[cursor.point].c;
-                        let bg = ui.visuals().panel_fill;
-                        painter.text(r.min, egui::Align2::LEFT_TOP, c, font.clone(), bg);
+                    for (col, c) in cells.iter().enumerate() {
+                        let (fg, bg) = cell_colors(c, colors);
+                        if bg != BG {
+                            let width = if c.flags.contains(Flags::WIDE_CHAR) {
+                                2.0
+                            } else {
+                                1.0
+                            };
+                            let min = origin + egui::vec2(col as f32 * cell.x, 0.0);
+                            let size = egui::vec2(width * cell.x, cell.y);
+                            painter.rect_filled(egui::Rect::from_min_size(min, size), 0.0, bg);
+                        }
+                        if is_spacer(c) {
+                            continue;
+                        }
+                        let line = |on: bool| {
+                            if on {
+                                egui::Stroke::new(1.0, fg)
+                            } else {
+                                egui::Stroke::NONE
+                            }
+                        };
+                        let format = TextFormat {
+                            font_id: font.clone(),
+                            color: fg,
+                            italics: c.flags.contains(Flags::ITALIC),
+                            // ponytail: los 5 tipos de subrayado (doble, ondulado…) se ven como uno simple.
+                            underline: line(c.flags.intersects(Flags::ALL_UNDERLINES)),
+                            strikethrough: line(c.flags.contains(Flags::STRIKEOUT)),
+                            ..Default::default()
+                        };
+                        let is_bold = c.flags.contains(Flags::BOLD);
+                        any_bold |= is_bold;
+                        let bold_color = if is_bold { fg } else { Color32::TRANSPARENT };
+                        push_char(
+                            &mut bold,
+                            c.c,
+                            TextFormat {
+                                color: bold_color,
+                                ..format.clone()
+                            },
+                        );
+                        push_char(&mut text, c.c, format);
                     }
-                    CursorShape::Beam => {
-                        painter.rect_filled(r.with_max_x(r.min.x + thin), 0.0, color);
-                    }
-                    CursorShape::Underline => {
-                        painter.rect_filled(r.with_min_y(r.max.y - thin), 0.0, color);
-                    }
-                    _ => {
-                        let stroke = egui::Stroke::new(1.0, color);
-                        painter.rect_stroke(r, 0.0, stroke, egui::StrokeKind::Inside);
+
+                    painter.galley(origin, painter.layout_job(text), FG);
+                    if any_bold {
+                        // ponytail: negrita falsa (repintar corrido medio píxel); la fuente con bold real llega en #14.
+                        let shifted = origin + egui::vec2(0.5, 0.0);
+                        painter.galley(shifted, painter.layout_job(bold), FG);
                     }
                 }
-            }
-        });
+                // El cursor usa el color "Cursor" del Term (las apps pueden cambiarlo con OSC 12).
+                let color = resolve(Color::Named(NamedColor::Cursor), colors);
+
+                // --- Cursor ---
+                let content = self.term.renderable_content();
+                let (cursor, offset) = (content.cursor, content.display_offset);
+                let focused = ui.input(|i| i.focused);
+                let blinking = self.term.cursor_style().blinking && focused;
+                let since = self.blink_epoch.elapsed();
+                if blinking {
+                    // egui duerme si nada cambia: le pedimos despertar justo en el próximo cambio de fase.
+                    let phase =
+                        Duration::from_millis((since.as_millis() % BLINK.as_millis()) as u64);
+                    ui.ctx().request_repaint_after(BLINK - phase);
+                }
+                // Sin foco, cursor hueco y fijo (como Alacritty/Ghostty): se ve dónde estás, sin distraer.
+                let shape = match cursor.shape {
+                    CursorShape::Hidden => CursorShape::Hidden,
+                    _ if !focused => CursorShape::HollowBlock,
+                    shape => shape,
+                };
+                let row = cursor.point.line.0 + offset as i32;
+                // Si scrolleaste hacia arriba (#12), el cursor puede quedar fuera de la vista.
+                let in_view = (0..self.grid.1 as i32).contains(&row);
+                if shape != CursorShape::Hidden && in_view && cursor_on(blinking, since) {
+                    let min = rect.min
+                        + egui::vec2(cursor.point.column.0 as f32 * cell.x, row as f32 * cell.y);
+                    let r = egui::Rect::from_min_size(min, cell);
+                    let thin = 2.0;
+                    match shape {
+                        CursorShape::Block => {
+                            // Bloque relleno y, encima, la letra que tapa con el color del fondo.
+                            painter.rect_filled(r, 0.0, color);
+                            let c = self.term.grid()[cursor.point].c;
+                            painter.text(r.min, egui::Align2::LEFT_TOP, c, font.clone(), BG);
+                        }
+                        CursorShape::Beam => {
+                            painter.rect_filled(r.with_max_x(r.min.x + thin), 0.0, color);
+                        }
+                        CursorShape::Underline => {
+                            painter.rect_filled(r.with_min_y(r.max.y - thin), 0.0, color);
+                        }
+                        _ => {
+                            let stroke = egui::Stroke::new(1.0, color);
+                            painter.rect_stroke(r, 0.0, stroke, egui::StrokeKind::Inside);
+                        }
+                    }
+                }
+            });
     }
 }
 
@@ -371,11 +528,49 @@ mod tests {
             b"hola mundo\x1b[1;1HX\x1b[2;1Hxyz\x1b[2;2H\x1b[K\x1b[31m\xC3",
         );
         processor.advance(&mut term, b"\xA1"); // 'á' partida entre dos trozos, en la fila 2
-        let lines: Vec<_> = screen_text(&term)
+        let lines: Vec<String> = visible_rows(&term)
             .iter()
-            .map(|l| l.trim_end().to_string())
+            .map(|row| {
+                let line: String = row.iter().filter(|c| !is_spacer(c)).map(|c| c.c).collect();
+                line.trim_end().to_string()
+            })
             .collect();
         assert_eq!(lines, ["Xola mundo", "xá", ""]);
+    }
+
+    #[test]
+    fn palette_256_follows_xterm() {
+        let rgb = |r, g, b| Color32::from_rgb(r, g, b);
+        assert_eq!(default_color(1), PALETTE[1]);
+        assert_eq!(default_color(16), rgb(0, 0, 0)); // inicio del cubo
+        assert_eq!(default_color(196), rgb(255, 0, 0)); // rojo puro del cubo
+        assert_eq!(default_color(231), rgb(255, 255, 255)); // fin del cubo
+        assert_eq!(default_color(232), rgb(8, 8, 8)); // primer gris
+        assert_eq!(default_color(255), rgb(238, 238, 238)); // último gris
+        assert_eq!(default_color(NamedColor::Background as usize), BG);
+        assert_eq!(default_color(NamedColor::DimRed as usize), dim(PALETTE[1]));
+    }
+
+    #[test]
+    fn cells_get_sgr_colors() {
+        let mut term = Term::new(Config::default(), &term_size((10, 1)), VoidListener);
+        let mut processor: Processor = Processor::new();
+        // X: rojo + inverso. Y: truecolor. Z: índice 256 (verde del cubo).
+        processor.advance(
+            &mut term,
+            b"\x1b[31;7mX\x1b[0m\x1b[38;2;1;2;3mY\x1b[0m\x1b[38;5;46mZ",
+        );
+        let rows = visible_rows(&term);
+        let colors = term.colors();
+        assert_eq!(cell_colors(rows[0][0], colors), (BG, PALETTE[1]));
+        assert_eq!(
+            cell_colors(rows[0][1], colors).0,
+            Color32::from_rgb(1, 2, 3)
+        );
+        assert_eq!(
+            cell_colors(rows[0][2], colors).0,
+            Color32::from_rgb(0, 255, 0)
+        );
     }
 
     #[test]
