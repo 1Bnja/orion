@@ -5,13 +5,16 @@
 mod menu;
 mod render;
 
-use crate::blocks::{Blocks, MarkScanner, Piece};
+use crate::blocks::{
+    Blocks, MarkScanner, Piece, Status, grid_line_of, neighbor_block, scroll_to_show,
+};
 use crate::config::Settings;
 use crate::fonts::{apply_font, is_font_file};
 use crate::grid::term_size;
 use crate::input::{key_bytes, paste_bytes};
 use crate::pty::{Error, Replies, Shell, spawn_reader};
 use alacritty_terminal::Term;
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor};
@@ -52,6 +55,8 @@ pub(crate) struct Orion {
     context_block: Option<usize>,
     /// Aviso breve ("Salida copiada") y desde cuándo se muestra.
     toast: Option<(String, Instant)>,
+    /// Bloque marcado al navegar con Ctrl+↑/↓ (se resalta y Ctrl+C copia su salida).
+    marked_block: Option<usize>,
 }
 
 impl Orion {
@@ -92,6 +97,7 @@ impl Orion {
             blocks: Blocks::default(),
             context_block: None,
             toast: None,
+            marked_block: None,
         })
     }
 }
@@ -109,6 +115,13 @@ impl eframe::App for Orion {
                 }
             }
             self.blocks.after_output(&self.term);
+            // Un `cls` vacía la lista: la marca no puede quedar apuntando a un bloque que ya no existe.
+            if self
+                .marked_block
+                .is_some_and(|i| i >= self.blocks.list.len())
+            {
+                self.marked_block = None;
+            }
         }
     }
 
@@ -169,14 +182,74 @@ impl Orion {
         }
     }
 
+    /// Ctrl+C / Ctrl+Shift+C: copia la selección; si no hay, la salida del bloque marcado.
+    /// Devuelve false si no había nada que copiar.
+    fn copy(&mut self, ctx: &egui::Context) -> bool {
+        if self.copy_selection(ctx) {
+            return true;
+        }
+        let Some(index) = self.marked_block else {
+            return false;
+        };
+        self.apply_block_action(ctx, render::BlockAction::CopyOutput(index));
+        true
+    }
+
+    /// Ctrl+↑ / Ctrl+↓: marca el bloque anterior o el siguiente y mueve la vista para que se vea.
+    /// Pasado el último, se quita la marca y se vuelve abajo, al prompt.
+    fn jump_to_block(&mut self, up: bool) {
+        let done: Vec<usize> = (0..self.blocks.list.len())
+            .filter(|&i| matches!(self.blocks.list[i].status(), Status::Done(..)))
+            .collect();
+        // Si la marca apunta a un bloque que ya no existe (por un `cls`), se empieza de cero.
+        let marked = self.marked_block.filter(|&i| i < self.blocks.list.len());
+        self.marked_block = neighbor_block(&done, marked, up);
+        let Some(index) = self.marked_block else {
+            self.term.scroll_display(Scroll::Bottom);
+            return;
+        };
+        let prompt = self.blocks.list[index].prompt;
+        let Some(line) = grid_line_of(&self.term, prompt) else {
+            return; // ya no está en el historial
+        };
+        let grid = self.term.grid();
+        let (offset, screen) = (grid.display_offset(), grid.screen_lines());
+        if let Some(target) = scroll_to_show(line.0, offset, screen, grid.history_size()) {
+            let delta = target as i32 - offset as i32;
+            self.term.scroll_display(Scroll::Delta(delta));
+        }
+    }
+
     /// Teclado y portapapeles → shell.
     pub(crate) fn send_input(&mut self, ui: &egui::Ui) {
         let bracketed = self.term.mode().contains(TermMode::BRACKETED_PASTE);
         let app_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
         let alt = ui.input(|i| i.modifiers.alt);
+        // En apps de pantalla completa (vim, micro) no hay bloques: Ctrl+↑/↓ siguen yendo a la app.
+        let alt_screen = self.term.mode().contains(TermMode::ALT_SCREEN);
         // El teclado va en ui y no en logic: con la ventana oculta, logic vería otra vez los eventos del último frame.
         for event in ui.input(|i| i.events.clone()) {
             let bytes = match event {
+                // Ctrl+↑ / Ctrl+↓: saltar entre bloques.
+                egui::Event::Key {
+                    key: key @ (egui::Key::ArrowUp | egui::Key::ArrowDown),
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.ctrl && !modifiers.shift && !modifiers.alt && !alt_screen => {
+                    self.jump_to_block(key == egui::Key::ArrowUp);
+                    continue;
+                }
+                // Escape con un bloque marcado: quitar la marca y volver al prompt (no se manda a la shell).
+                egui::Event::Key {
+                    key: egui::Key::Escape,
+                    pressed: true,
+                    ..
+                } if self.marked_block.is_some() => {
+                    self.marked_block = None;
+                    self.term.scroll_display(Scroll::Bottom);
+                    continue;
+                }
                 // Alt+letra también llega como texto; ya la manda key_bytes con su ESC adelante.
                 egui::Event::Text(t)
                     if alt && t.len() == 1 && t.as_bytes()[0].is_ascii_alphabetic() =>
@@ -185,10 +258,10 @@ impl Orion {
                 }
                 egui::Event::Text(t) => t.into_bytes(),
                 egui::Event::Paste(t) => paste_bytes(&t, bracketed),
-                // egui convierte Ctrl+C en Copy. Como en Windows Terminal: si hay selección copia,
-                // si no, es la interrupción de siempre (ETX).
+                // egui convierte Ctrl+C en Copy. Como en Windows Terminal: si hay selección (o un bloque
+                // marcado) copia; si no, es la interrupción de siempre (ETX).
                 egui::Event::Copy => {
-                    if self.copy_selection(ui.ctx()) {
+                    if self.copy(ui.ctx()) {
                         continue;
                     }
                     vec![0x03]
@@ -201,7 +274,7 @@ impl Orion {
                     modifiers,
                     ..
                 } if modifiers.ctrl && modifiers.shift => {
-                    self.copy_selection(ui.ctx());
+                    self.copy(ui.ctx());
                     continue;
                 }
                 egui::Event::Key {
@@ -232,6 +305,7 @@ impl Orion {
             // Si estabas mirando el historial, escribir te devuelve abajo, a donde está el prompt.
             self.term.scroll_display(Scroll::Bottom);
             self.term.selection = None;
+            self.marked_block = None; // escribir vuelve al modo normal
         }
     }
 }

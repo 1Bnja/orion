@@ -145,8 +145,8 @@ struct BlockView {
     output_lines: usize,
 }
 
-/// Algo que se pidió con el mouse sobre un bloque; se aplica al final del frame.
-enum BlockAction {
+/// Algo que se pidió sobre un bloque (con el mouse o el teclado).
+pub(super) enum BlockAction {
     CopyCommand(usize),
     CopyOutput(usize),
     ToggleCollapse(usize),
@@ -188,7 +188,7 @@ impl Orion {
     }
 
     /// Aplica lo que se pidió sobre un bloque: copiar (con aviso) o colapsar/expandir.
-    fn apply_block_action(&mut self, ctx: &egui::Context, action: BlockAction) {
+    pub(super) fn apply_block_action(&mut self, ctx: &egui::Context, action: BlockAction) {
         let (text, what) = match action {
             BlockAction::ToggleCollapse(i) => {
                 if let Some(block) = self.blocks.list.get_mut(i) {
@@ -385,6 +385,7 @@ impl Orion {
                     self.context_block = hovered.map(|v| v.index);
                 }
                 let mut actions = Vec::new();
+                let marked = self.marked_block;
 
                 // Clic derecho: acciones del bloque (si hay uno ahí), copiar, pegar y configuración.
                 if !mouse_mode {
@@ -486,7 +487,13 @@ impl Orion {
                         ..
                     } = *view;
                     let r = rows_rect(first, last);
-                    if hovered.is_some_and(|h| h.index == view.index) {
+                    if marked == Some(view.index) {
+                        // Bloque marcado con Ctrl+↑/↓: fondo un poco más claro y borde azul.
+                        let glow = egui::Color32::from_rgba_unmultiplied(0x7a, 0xa2, 0xf7, 16);
+                        painter.rect_filled(r, 4.0, glow);
+                        let stroke = egui::Stroke::new(1.0, PALETTE[4]);
+                        painter.rect_stroke(r.shrink(1.0), 4.0, stroke, egui::StrokeKind::Inside);
+                    } else if hovered.is_some_and(|h| h.index == view.index) {
                         // El bloque bajo el mouse se ilumina apenas: así se ve a cuál apuntan los botones.
                         let glow = egui::Color32::from_rgba_unmultiplied(0xc0, 0xca, 0xf5, 6);
                         painter.rect_filled(r, 0.0, glow);
@@ -615,8 +622,10 @@ impl Orion {
                         }
                     }
 
-                    // Al pasar el mouse por un bloque terminado: botones para copiar, a la izquierda de la etiqueta.
-                    if done && hovered.is_some_and(|h| h.index == view.index) {
+                    // Bloque terminado bajo el mouse o marcado: botones para copiar, a la izquierda de la etiqueta.
+                    let active = hovered.is_some_and(|h| h.index == view.index)
+                        || marked == Some(view.index);
+                    if done && active {
                         let mut right = pill.min.x - 6.0;
                         let buttons = [
                             (

@@ -315,6 +315,34 @@ pub(crate) fn logical_line<T>(term: &Term<T>, line: Line) -> usize {
         .count()
 }
 
+/// Al navegar con Ctrl+↑/↓: el bloque terminado anterior (`up`) o siguiente al marcado.
+/// `done` son los índices de los bloques terminados, en orden. Sin marca, ↑ va al último.
+/// None = no hay más en esa dirección (con ↓ desde el último se vuelve al prompt).
+pub(crate) fn neighbor_block(done: &[usize], marked: Option<usize>, up: bool) -> Option<usize> {
+    match (marked, up) {
+        (None, true) => done.last().copied(),
+        (None, false) => None,
+        (Some(m), true) => done.iter().rev().find(|&&i| i < m).copied(),
+        (Some(m), false) => done.iter().find(|&&i| i > m).copied(),
+    }
+}
+
+/// Scroll (display_offset) necesario para ver la fila `line` de la grilla, o None si ya se ve.
+/// Si hay que moverse, la fila queda arriba de todo (con una de margen) para que se vea su salida.
+pub(crate) fn scroll_to_show(
+    line: i32,
+    offset: usize,
+    screen: usize,
+    history: usize,
+) -> Option<usize> {
+    let top = -(offset as i32);
+    let bottom = top + screen as i32 - 1;
+    if (top..=bottom).contains(&line) {
+        return None;
+    }
+    Some(((1 - line).max(0) as usize).min(history))
+}
+
 /// Lo inverso de `logical_line`: la primera fila de la grilla donde empieza la línea lógica `logical`.
 pub(crate) fn grid_line_of<T>(term: &Term<T>, logical: usize) -> Option<Line> {
     let grid = term.grid();
@@ -533,6 +561,32 @@ mod tests {
         assert!(matches!(status(&blocks), Status::Running(_)));
         run(&mut term, &mut blocks, &[b"\x1b]133;D;1\x07"]);
         assert!(matches!(status(&blocks), Status::Done(Some(1), _)));
+    }
+
+    #[test]
+    fn navigation_moves_between_finished_blocks() {
+        let done = [0, 2, 3]; // el bloque 1 era un Enter vacío, el 4 es el prompt actual
+        assert_eq!(neighbor_block(&done, None, true), Some(3)); // ↑ sin marca: el último
+        assert_eq!(neighbor_block(&done, Some(3), true), Some(2));
+        assert_eq!(neighbor_block(&done, Some(2), true), Some(0));
+        assert_eq!(neighbor_block(&done, Some(0), true), None); // no hay más arriba
+        assert_eq!(neighbor_block(&done, Some(2), false), Some(3));
+        assert_eq!(neighbor_block(&done, Some(3), false), None); // ↓ desde el último: al prompt
+        assert_eq!(neighbor_block(&done, None, false), None);
+    }
+
+    #[test]
+    fn scrolls_only_when_the_prompt_is_out_of_view() {
+        // Pantalla de 10 filas, sin scroll: se ven las líneas 0 a 9.
+        assert_eq!(scroll_to_show(4, 0, 10, 100), None);
+        // La línea -20 está en el historial: subir hasta dejarla arriba, con una fila de margen.
+        assert_eq!(scroll_to_show(-20, 0, 10, 100), Some(21));
+        // Ya scrolleado 25: se ven -25 a -16; la línea -20 se ve, no hay que moverse.
+        assert_eq!(scroll_to_show(-20, 25, 10, 100), None);
+        // Nunca más allá del historial que existe.
+        assert_eq!(scroll_to_show(-500, 0, 10, 100), Some(100));
+        // Una línea de la pantalla de abajo estando scrolleado: volver abajo del todo.
+        assert_eq!(scroll_to_show(5, 30, 10, 100), Some(0));
     }
 
     #[test]
