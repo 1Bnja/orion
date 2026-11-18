@@ -8,6 +8,7 @@ use crate::fonts::FontChoice;
 use crate::fonts::add_font;
 use crate::fonts::apply_font;
 use crate::fonts::font_choices;
+use crate::pty::{SHELLS, installed_shells};
 use eframe::egui;
 use std::path::Path;
 
@@ -95,6 +96,19 @@ impl Orion {
                             }
                         });
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Shell");
+                    egui::ComboBox::from_id_salt("shell")
+                        .selected_text(&new.shell)
+                        .show_ui(ui, |ui| {
+                            for &i in installed_shells() {
+                                let name = SHELLS[i].name;
+                                ui.selectable_value(&mut new.shell, name.to_string(), name);
+                            }
+                        });
+                })
+                .response
+                .on_hover_text("La de las pestañas nuevas (Ctrl+Shift+T)");
                 ui.separator();
                 ui.heading("Fuente");
                 ui.horizontal(|ui| {

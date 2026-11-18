@@ -69,7 +69,7 @@ impl Orion {
     fn commands(&self) -> Vec<(String, &'static str, Action)> {
         let (n, a) = (self.tabs.len(), self.active);
         let mut list: Vec<(String, &'static str, Action)> = vec![
-            ("Nueva pestaña".into(), "Ctrl+Shift+T", Action::NewTab),
+            ("Nueva pestaña".into(), "Ctrl+Shift+T", Action::NewTab(None)),
             ("Cerrar pestaña".into(), "", Action::CloseTab(a)),
             (
                 "Siguiente pestaña".into(),
@@ -99,6 +99,10 @@ impl Orion {
         const ALT: [&str; 9] = [
             "Alt+1", "Alt+2", "Alt+3", "Alt+4", "Alt+5", "Alt+6", "Alt+7", "Alt+8", "Alt+9",
         ];
+        for &i in crate::pty::installed_shells() {
+            let name = format!("Nueva pestaña: {}", crate::pty::SHELLS[i].name);
+            list.push((name, "", Action::NewTab(Some(i))));
+        }
         for (i, t) in crate::colors::THEMES.iter().enumerate() {
             list.push((format!("Tema: {}", t.name), "", Action::Theme(i)));
         }

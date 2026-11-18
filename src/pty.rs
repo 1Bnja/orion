@@ -12,6 +12,7 @@ use std::ffi::OsStr;
 use std::io::Read;
 use std::io::Write;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 
@@ -46,30 +47,112 @@ pub(crate) fn shell_args(extra: &[&str]) -> Vec<String> {
     args
 }
 
-/// Lanza pwsh (o powershell.exe si no está) con `args` extra.
+/// Una shell que se puede elegir para una pestaña.
+pub(crate) struct ShellKind {
+    pub(crate) name: &'static str,
+    program: &'static str,
+    args: &'static [&'static str],
+    /// Carga la integración de Orion (bloques, título de la pestaña, sugerencias).
+    /// ponytail: solo PowerShell; cmd y WSL andan como terminal normal, sin bloques.
+    powershell: bool,
+}
+
+/// Las shells que conoce Orion. La primera instalada es la de siempre.
+pub(crate) static SHELLS: [ShellKind; 4] = [
+    ShellKind {
+        name: "PowerShell",
+        program: "pwsh.exe",
+        args: &["-NoLogo"],
+        powershell: true,
+    },
+    ShellKind {
+        name: "Windows PowerShell",
+        program: "powershell.exe",
+        args: &["-NoLogo"],
+        powershell: true,
+    },
+    ShellKind {
+        name: "cmd",
+        program: "cmd.exe",
+        args: &[],
+        powershell: false,
+    },
+    ShellKind {
+        name: "WSL",
+        program: "wsl.exe",
+        args: &["--cd", "~"], // tu carpeta de Linux, no /mnt/c/Users/...
+        powershell: false,
+    },
+];
+
+/// Índice de la shell con ese nombre (sin importar mayúsculas).
+pub(crate) fn find_shell(name: &str) -> Option<usize> {
+    SHELLS
+        .iter()
+        .position(|s| s.name.eq_ignore_ascii_case(name.trim()))
+}
+
+/// Índices de las shells instaladas (su programa está en el PATH). Se calcula una vez.
+pub(crate) fn installed_shells() -> &'static [usize] {
+    static INSTALLED: OnceLock<Vec<usize>> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let dirs: Vec<_> = std::env::split_paths(&path).collect();
+        let found = |program: &str| dirs.iter().any(|d| d.join(program).is_file());
+        (0..SHELLS.len())
+            .filter(|&i| found(SHELLS[i].program))
+            .collect()
+    })
+}
+
+/// La shell `index` si está instalada; si no, la primera que sí (ej. sin pwsh, Windows PowerShell).
+pub(crate) fn usable_shell(index: usize) -> usize {
+    let installed = installed_shells();
+    if installed.contains(&index) {
+        index
+    } else {
+        installed.first().copied().unwrap_or(1) // powershell.exe viene con Windows
+    }
+}
+
+impl ShellKind {
+    /// Lanza esta shell en un PTY nuevo.
+    pub(crate) fn spawn(&self, size: PtySize) -> Result<Shell, Error> {
+        let args: Vec<String> = if self.powershell {
+            shell_args(self.args)
+        } else {
+            self.args.iter().map(|s| s.to_string()).collect()
+        };
+        spawn_program(size, self.program, &args)
+    }
+}
+
+/// Lanza `program` con `args` en un PTY nuevo.
 ///
 /// Ojo: ConPTY arranca preguntando la posición del cursor (ESC[6n) y no lanza la shell
 /// hasta recibir respuesta. En la app la responde el Term; quien use esto sin Term debe responderla.
-pub(crate) fn spawn_shell(size: PtySize, args: &[impl AsRef<OsStr>]) -> Result<Shell, Error> {
+pub(crate) fn spawn_program(
+    size: PtySize,
+    program: &str,
+    args: &[impl AsRef<OsStr>],
+) -> Result<Shell, Error> {
     let pair = native_pty_system().openpty(size)?;
-    let mut last_err = None;
-    for program in ["pwsh.exe", "powershell.exe"] {
-        let mut cmd = CommandBuilder::new(program);
-        cmd.args(args);
-        match pair.slave.spawn_command(cmd) {
-            // ponytail: el slave se suelta al salir de la función; la shell ya tiene su copia.
-            Ok(child) => {
-                let writer = Rc::new(RefCell::new(pair.master.take_writer()?));
-                return Ok(Shell {
-                    master: pair.master,
-                    writer,
-                    child,
-                });
-            }
-            Err(e) => last_err = Some(e),
-        }
-    }
-    Err(last_err.unwrap().into())
+    let mut cmd = CommandBuilder::new(program);
+    cmd.args(args);
+    // ponytail: el slave se suelta al salir de la función; la shell ya tiene su copia.
+    let child = pair.slave.spawn_command(cmd)?;
+    let writer = Rc::new(RefCell::new(pair.master.take_writer()?));
+    Ok(Shell {
+        master: pair.master,
+        writer,
+        child,
+    })
+}
+
+/// PowerShell (pwsh, o powershell.exe si no está) con `args`. Para los tests.
+#[cfg(test)]
+pub(crate) fn spawn_shell(size: PtySize, args: &[impl AsRef<OsStr>]) -> Result<Shell, Error> {
+    spawn_program(size, SHELLS[usable_shell(0)].program, args)
 }
 
 /// Lee el PTY en un hilo propio y manda cada trozo de bytes por un canal.
@@ -177,6 +260,19 @@ mod tests {
             "C debe llegar antes que D"
         );
         let _ = shell.child.kill();
+    }
+
+    #[test]
+    fn other_shells_run_too() {
+        // cmd viene con Windows: siempre está.
+        let cmd = find_shell("CMD").unwrap();
+        assert!(installed_shells().contains(&cmd));
+        assert_eq!(find_shell("nada"), None);
+        let shell = spawn_program(pty_size((80, 24)), "cmd.exe", &["/c", "echo orion-cmd"]);
+        let shell = shell.unwrap();
+        shell.writer.borrow_mut().write_all(b"\x1b[1;1R").unwrap();
+        let rx = spawn_reader(&*shell.master, || {}).unwrap();
+        wait_for(&rx, &mut String::new(), "orion-cmd");
     }
 
     #[test]

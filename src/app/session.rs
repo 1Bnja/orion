@@ -9,7 +9,7 @@ use crate::blocks::{
 };
 use crate::grid::term_size;
 use crate::input::{key_bytes, paste_bytes};
-use crate::pty::{Error, Replies, Shell, pty_size, shell_args, spawn_reader, spawn_shell};
+use crate::pty::{Error, Replies, SHELLS, Shell, pty_size, spawn_reader};
 use alacritty_terminal::Term;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, TermMode};
@@ -52,6 +52,8 @@ pub(super) struct Session {
     title: Rc<RefCell<Option<String>>>,
     /// Aviso pendiente ("Salida copiada"); la app lo toma y lo muestra.
     pub(super) toast: Option<String>,
+    /// Qué shell corre (índice en `SHELLS`). Un split del panel abre la misma.
+    pub(super) kind: usize,
     /// Identifica el panel (para el foco entre splits). Único mientras corre la app.
     pub(super) id: u64,
     /// Se pidió dividir este panel desde el menú de clic derecho: Some(true) = a la derecha.
@@ -68,10 +70,10 @@ impl super::panes::Leaf for Session {
 }
 
 impl Session {
-    /// Lanza un PowerShell nuevo con la integración de Orion, del tamaño `grid`.
-    pub(super) fn new(ctx: &egui::Context, grid: (u16, u16)) -> Result<Self, Error> {
-        // La shell arranca con la integración de Orion: marca cada prompt y comando con OSC 133.
-        let shell = spawn_shell(pty_size(grid), &shell_args(&["-NoLogo"]))?;
+    /// Lanza la shell `kind` (índice en `SHELLS`) del tamaño `grid`.
+    /// PowerShell arranca con la integración de Orion: marca cada prompt y comando con OSC 133.
+    pub(super) fn new(ctx: &egui::Context, grid: (u16, u16), kind: usize) -> Result<Self, Error> {
+        let shell = SHELLS[kind].spawn(pty_size(grid))?;
         // El Context de egui se puede clonar y usar desde otro hilo para pedir un repaint.
         let ctx = ctx.clone();
         let rx = spawn_reader(&*shell.master, move || ctx.request_repaint())?;
@@ -105,17 +107,16 @@ impl Session {
             marked_block: None,
             title,
             toast: None,
+            kind,
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             split_request: None,
         })
     }
 
-    /// El nombre que se muestra en la pestaña.
+    /// El nombre que se muestra en la pestaña: el que puso la shell, o el de la shell.
     pub(super) fn title(&self) -> String {
-        self.title
-            .borrow()
-            .clone()
-            .unwrap_or_else(|| "PowerShell".into())
+        let title = self.title.borrow().clone();
+        title.unwrap_or_else(|| SHELLS[self.kind].name.into())
     }
 
     /// Estado para el punto de la pestaña: si algo corre, o cómo terminó el último comando.

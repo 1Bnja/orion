@@ -1,6 +1,7 @@
 //! Configuración del usuario: leer y guardar %APPDATA%\orion\config.toml.
 
 use crate::colors::{THEMES, find_theme};
+use crate::pty::{SHELLS, find_shell};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -12,12 +13,18 @@ pub(crate) fn config_text(settings: &Settings) -> String {
     let theme = toml::Value::String(settings.theme.clone());
     let themes: Vec<&str> = THEMES.iter().map(|t| t.name).collect();
     let themes = themes.join(", ");
+    let shell = toml::Value::String(settings.shell.clone());
+    let shells: Vec<&str> = SHELLS.iter().map(|s| s.name).collect();
+    let shells = shells.join(", ");
     format!(
         r#"# Configuración de Orion. Se puede editar aquí o desde el menú (Ctrl+, o clic derecho).
 # Si editas a mano, los cambios se aplican apenas guardas el archivo.
 
 # Colores. Hay: {themes}.
 theme = {theme}
+# Shell de las pestañas nuevas (Ctrl+Shift+T). Hay: {shells}.
+# Para abrir otra solo una vez: clic derecho en "+ Nueva pestaña", o la paleta (Ctrl+Shift+P).
+shell = {shell}
 
 [font]
 # Nombre de una fuente instalada (igual que en VS Code), o la ruta a un archivo .ttf/.otf.
@@ -44,6 +51,8 @@ pub(crate) fn save_settings(settings: &Settings) -> std::io::Result<()> {
 pub(crate) struct Settings {
     /// Nombre de uno de los temas de `colors::THEMES`.
     pub(crate) theme: String,
+    /// Nombre de una de las shells de `pty::SHELLS`.
+    pub(crate) shell: String,
     pub(crate) font: FontSettings,
 }
 
@@ -51,6 +60,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: THEMES[0].name.into(),
+            shell: SHELLS[0].name.into(),
             font: FontSettings::default(),
         }
     }
@@ -101,6 +111,9 @@ pub(crate) fn parse_settings(text: &str) -> Result<Settings, String> {
     let theme = find_theme(&settings.theme)
         .ok_or_else(|| format!("no hay un tema \"{}\"", settings.theme))?;
     settings.theme = THEMES[theme].name.into();
+    let shell = find_shell(&settings.shell)
+        .ok_or_else(|| format!("no conozco la shell \"{}\"", settings.shell))?;
+    settings.shell = SHELLS[shell].name.into();
     Ok(settings)
 }
 
@@ -171,6 +184,8 @@ mod tests {
         );
         let err = parse_settings("theme = 'Nope'").err().unwrap();
         assert!(err.contains("Nope"), "{err}");
+        assert_eq!(parse_settings("shell = 'wsl'").unwrap().shell, "WSL");
+        assert!(parse_settings("shell = 'fish'").is_err());
     }
 
     #[test]

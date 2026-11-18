@@ -13,7 +13,7 @@ mod session;
 use crate::colors::theme;
 use crate::config::{Settings, config_modified, reload_settings};
 use crate::fonts::{apply_font, is_font_file};
-use crate::pty::Error;
+use crate::pty::{Error, SHELLS, find_shell, installed_shells, usable_shell};
 use alacritty_terminal::term::TermMode;
 use eframe::egui;
 use menu::SettingsMenu;
@@ -79,7 +79,8 @@ const CONFIG_POLL: Duration = Duration::from_secs(1);
 
 /// Algo que se pidió sobre las pestañas o los paneles en este frame.
 enum Action {
-    NewTab,
+    /// Pestaña nueva con esa shell (índice en `pty::SHELLS`), o con la de config.toml.
+    NewTab(Option<usize>),
     CloseTab(usize),
     SelectTab(usize),
     /// Dividir el panel con foco: a la derecha (true) o hacia abajo.
@@ -105,7 +106,7 @@ impl Orion {
     ) -> Result<Self, Error> {
         apply_font(&cc.egui_ctx, &settings.font.family);
         menu::apply_theme(&cc.egui_ctx, &settings.theme);
-        let first = Session::new(&cc.egui_ctx, grid)?;
+        let first = Session::new(&cc.egui_ctx, grid, default_shell(&settings))?;
         Ok(Self {
             tabs: vec![Tab::new(first)],
             active: 0,
@@ -130,9 +131,11 @@ impl Orion {
     }
 
     /// Abre una pestaña nueva del mismo tamaño que la actual, y la deja activa.
-    fn new_tab(&mut self, ctx: &egui::Context) {
+    /// `kind`: qué shell (índice en `pty::SHELLS`); None = la de config.toml.
+    fn new_tab(&mut self, ctx: &egui::Context, kind: Option<usize>) {
         let grid = self.session().grid;
-        match Session::new(ctx, grid) {
+        let kind = kind.unwrap_or_else(|| default_shell(&self.settings));
+        match Session::new(ctx, grid, kind) {
             Ok(session) => {
                 self.tabs.push(Tab::new(session));
                 self.active = self.tabs.len() - 1;
@@ -156,8 +159,9 @@ impl Orion {
 
     /// Divide el panel con foco con una shell nueva, que queda con el foco.
     fn split(&mut self, ctx: &egui::Context, right: bool) {
-        let grid = self.session().grid; // el panel nuevo se ajusta a su tamaño al dibujarse
-        match Session::new(ctx, grid) {
+        // El panel nuevo abre la misma shell, y se ajusta a su tamaño al dibujarse.
+        let (grid, kind) = (self.session().grid, self.session().kind);
+        match Session::new(ctx, grid, kind) {
             Ok(session) => {
                 let id = session.id;
                 let tab = &mut self.tabs[self.active];
@@ -229,8 +233,18 @@ impl Orion {
                 font.clone(),
                 color,
             );
-            if new.on_hover_text("Ctrl+Shift+T").clicked() {
-                action = Some(Action::NewTab);
+            // Clic derecho: elegir con qué shell.
+            new.context_menu(|ui| {
+                for &i in installed_shells() {
+                    if ui.button(SHELLS[i].name).clicked() {
+                        action = Some(Action::NewTab(Some(i)));
+                        ui.close();
+                    }
+                }
+            });
+            let tip = "Ctrl+Shift+T\nClic derecho: elegir la shell";
+            if new.on_hover_text(tip).clicked() {
+                action = Some(Action::NewTab(None));
             }
             ui.add_space(6.0);
 
@@ -327,7 +341,7 @@ impl Orion {
                 return Some(Action::Palette);
             }
             if i.consume_key(ctrl_shift, Key::T) {
-                return Some(Action::NewTab);
+                return Some(Action::NewTab(None));
             }
             // Splits (como en Warp): D = a la derecha, E = hacia abajo. W cierra el panel.
             if i.consume_key(ctrl_shift, Key::D) {
@@ -379,7 +393,7 @@ impl Orion {
 
     fn apply_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
-            Action::NewTab => self.new_tab(ctx),
+            Action::NewTab(kind) => self.new_tab(ctx, kind),
             Action::CloseTab(i) => self.close_tab(ctx, i),
             Action::SelectTab(i) => self.active = i,
             Action::Split(right) => self.split(ctx, right),
@@ -483,6 +497,11 @@ impl Orion {
         }
         open_menu
     }
+}
+
+/// La shell de config.toml, o la primera instalada si esa no está.
+fn default_shell(settings: &Settings) -> usize {
+    usable_shell(find_shell(&settings.shell).unwrap_or(0))
 }
 
 /// Qué pestaña queda activa al cerrar la `closed`, si quedan `left`.
