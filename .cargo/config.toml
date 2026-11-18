@@ -1,0 +1,5 @@
+# El runtime de C de Microsoft (vcruntime140.dll) va *dentro* del .exe.
+# Sin esto, Orion no abre en un Windows sin el "Visual C++ Redistributable" instalado:
+# así el zip portable funciona en cualquier PC con solo descomprimirlo.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
