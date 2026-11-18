@@ -240,12 +240,14 @@ impl Session {
 
     /// Grilla, cursor, selección y menú de clic derecho.
     /// `menu_open`: la ventana de configuración está abierta (el teclado y la rueda son para ella).
+    /// `active`: es el panel con el foco (los otros splits muestran el cursor hueco).
     /// Devuelve true si se pidió abrir la configuración desde el menú de clic derecho.
     pub(super) fn draw(
         &mut self,
         ui: &mut egui::Ui,
         settings: &FontSettings,
         menu_open: bool,
+        active: bool,
     ) -> bool {
         let mut open_menu = false;
         egui::Frame::central_panel(ui.style())
@@ -292,13 +294,14 @@ impl Session {
 
                 // Rueda del mouse: positivo = hacia arriba (historial más viejo).
                 // Con el menú abierto, la rueda es para su lista de fuentes.
-                let delta = if menu_open {
+                // Con splits, la rueda es solo para el panel que está bajo el mouse.
+                let hover = ui.input(|i| i.pointer.hover_pos());
+                let delta = if menu_open || !hover.is_some_and(|p| area.contains(p)) {
                     0.0
                 } else {
                     ui.input(|i| i.smooth_scroll_delta.y)
                 };
                 let lines = scroll_lines(&mut self.scroll_acc, delta, cell.y);
-                let hover = ui.input(|i| i.pointer.hover_pos());
                 if lines != 0 {
                     let alt_scroll = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL;
                     if let (true, Some(pos)) = (mouse_mode, hover) {
@@ -328,7 +331,9 @@ impl Session {
                                 button,
                                 pressed,
                                 ..
-                            } if area.contains(pos) || !pressed => {
+                            } if area.contains(pos)
+                                || (!pressed && self.mouse_button.is_some()) =>
+                            {
                                 let code = match button {
                                     egui::PointerButton::Primary => 0,
                                     egui::PointerButton::Middle => 1,
@@ -446,6 +451,15 @@ impl Session {
                         if ui.button("Pegar").clicked() {
                             ui.ctx()
                                 .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Dividir a la derecha   Ctrl+Shift+D").clicked() {
+                            self.split_request = Some(true);
+                            ui.close();
+                        }
+                        if ui.button("Dividir hacia abajo   Ctrl+Shift+E").clicked() {
+                            self.split_request = Some(false);
                             ui.close();
                         }
                         ui.separator();
@@ -693,7 +707,8 @@ impl Session {
                 // --- Cursor ---
                 let content = self.term.renderable_content();
                 let (cursor, offset) = (content.cursor, content.display_offset);
-                let focused = ui.input(|i| i.focused);
+                // Con splits, solo el panel activo tiene el cursor "vivo".
+                let focused = active && ui.input(|i| i.focused);
                 let blinking = self.term.cursor_style().blinking && focused;
                 let since = self.blink_epoch.elapsed();
                 if blinking {

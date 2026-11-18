@@ -18,6 +18,7 @@ use eframe::egui;
 use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
@@ -51,6 +52,19 @@ pub(super) struct Session {
     title: Rc<RefCell<Option<String>>>,
     /// Aviso pendiente ("Salida copiada"); la app lo toma y lo muestra.
     pub(super) toast: Option<String>,
+    /// Identifica el panel (para el foco entre splits). Único mientras corre la app.
+    pub(super) id: u64,
+    /// Se pidió dividir este panel desde el menú de clic derecho: Some(true) = a la derecha.
+    pub(super) split_request: Option<bool>,
+}
+
+/// Próximo `id` de panel.
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+impl super::panes::Leaf for Session {
+    fn id(&self) -> u64 {
+        self.id
+    }
 }
 
 impl Session {
@@ -91,6 +105,8 @@ impl Session {
             marked_block: None,
             title,
             toast: None,
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            split_request: None,
         })
     }
 

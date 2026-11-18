@@ -1,9 +1,11 @@
 //! La app: las pestañas, la configuración y lo que pasa en cada frame.
 //!
-//! Cada pestaña es una `Session` (su shell, su grilla, sus bloques). `session`, `render` y `menu`
-//! son submódulos: al ser hijos de `app`, pueden usar los campos privados de `Orion`.
+//! Cada pestaña tiene uno o más paneles (splits) y cada panel es una `Session` (su shell, su grilla,
+//! sus bloques). `session`, `panes`, `render` y `menu` son submódulos: al ser hijos de `app`,
+//! pueden usar los campos privados de `Orion`.
 
 mod menu;
+mod panes;
 mod render;
 mod session;
 
@@ -14,6 +16,7 @@ use crate::pty::Error;
 use alacritty_terminal::term::TermMode;
 use eframe::egui;
 use menu::SettingsMenu;
+use panes::Split;
 use session::Session;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -21,9 +24,40 @@ use std::time::Instant;
 /// Fondo de la barra de pestañas: un poco más oscuro que la terminal.
 const TAB_BAR: egui::Color32 = egui::Color32::from_rgb(0x16, 0x16, 0x1e);
 
+/// Una pestaña: sus paneles y cuál tiene el foco.
+struct Tab {
+    panes: Split<Session>,
+    /// El `id` del panel que recibe el teclado.
+    focus: u64,
+    /// Dónde se dibujó cada panel en el último frame (para mover el foco con Ctrl+Alt+flechas).
+    rects: Vec<(u64, egui::Rect)>,
+}
+
+impl Tab {
+    fn new(session: Session) -> Self {
+        Self {
+            focus: session.id,
+            panes: Split::new(session),
+            rects: Vec::new(),
+        }
+    }
+
+    fn focused(&self) -> &Session {
+        self.panes
+            .get(self.focus)
+            .expect("el foco apunta a un panel")
+    }
+
+    fn focused_mut(&mut self) -> &mut Session {
+        self.panes
+            .get_mut(self.focus)
+            .expect("el foco apunta a un panel")
+    }
+}
+
 pub(crate) struct Orion {
-    /// Las pestañas abiertas, de izquierda a derecha.
-    sessions: Vec<Session>,
+    /// Las pestañas abiertas, de arriba abajo.
+    tabs: Vec<Tab>,
     /// La pestaña que se ve.
     active: usize,
     settings: Settings,
@@ -36,11 +70,16 @@ pub(crate) struct Orion {
     window_title: String,
 }
 
-/// Algo que se pidió sobre las pestañas en este frame.
-enum TabAction {
-    New,
-    Close(usize),
-    Select(usize),
+/// Algo que se pidió sobre las pestañas o los paneles en este frame.
+enum Action {
+    NewTab,
+    CloseTab(usize),
+    SelectTab(usize),
+    /// Dividir el panel con foco: a la derecha (true) o hacia abajo.
+    Split(bool),
+    ClosePane,
+    /// Mover el foco al panel de al lado, ej. (1, 0) = el de la derecha.
+    Focus(egui::Vec2),
 }
 
 impl Orion {
@@ -53,7 +92,7 @@ impl Orion {
         apply_font(&cc.egui_ctx, &settings.font.family);
         let first = Session::new(&cc.egui_ctx, grid)?;
         Ok(Self {
-            sessions: vec![first],
+            tabs: vec![Tab::new(first)],
             active: 0,
             settings,
             menu: SettingsMenu::default(),
@@ -63,8 +102,9 @@ impl Orion {
         })
     }
 
+    /// El panel con foco de la pestaña activa.
     fn session(&mut self) -> &mut Session {
-        &mut self.sessions[self.active]
+        self.tabs[self.active].focused_mut()
     }
 
     fn show_toast(&mut self, text: impl Into<String>) {
@@ -76,28 +116,68 @@ impl Orion {
         let grid = self.session().grid;
         match Session::new(ctx, grid) {
             Ok(session) => {
-                self.sessions.push(session);
-                self.active = self.sessions.len() - 1;
+                self.tabs.push(Tab::new(session));
+                self.active = self.tabs.len() - 1;
             }
             Err(e) => self.show_toast(format!("No pude abrir otra pestaña: {e}")),
         }
     }
 
-    /// Cierra una pestaña (y su shell). Si era la última, se cierra la ventana.
+    /// Cierra una pestaña (y las shells de todos sus paneles). Si era la última, se cierra la ventana.
     fn close_tab(&mut self, ctx: &egui::Context, index: usize) {
-        let mut session = self.sessions.remove(index);
-        let _ = session.shell.child.kill();
-        if self.sessions.is_empty() {
+        let mut tab = self.tabs.remove(index);
+        for session in tab.panes.leaves_mut() {
+            let _ = session.shell.child.kill();
+        }
+        if self.tabs.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        self.active = active_after_close(self.active, index, self.sessions.len());
+        self.active = active_after_close(self.active, index, self.tabs.len());
+    }
+
+    /// Divide el panel con foco con una shell nueva, que queda con el foco.
+    fn split(&mut self, ctx: &egui::Context, right: bool) {
+        let grid = self.session().grid; // el panel nuevo se ajusta a su tamaño al dibujarse
+        match Session::new(ctx, grid) {
+            Ok(session) => {
+                let id = session.id;
+                let tab = &mut self.tabs[self.active];
+                if tab.panes.split(tab.focus, right, session).is_ok() {
+                    tab.focus = id;
+                }
+            }
+            Err(e) => self.show_toast(format!("No pude abrir otro panel: {e}")),
+        }
+    }
+
+    /// Cierra el panel `id` de la pestaña `index` (y su shell). Si era el único, se cierra la pestaña.
+    fn close_pane(&mut self, ctx: &egui::Context, index: usize, id: u64) {
+        let tab = &mut self.tabs[index];
+        if tab.panes.leaves().len() == 1 {
+            self.close_tab(ctx, index);
+            return;
+        }
+        // El foco pasa al vecino más cercano: el de la izquierda, arriba, derecha o abajo.
+        let dirs = [(-1.0, 0.0), (0.0, -1.0), (1.0, 0.0), (0.0, 1.0)];
+        let next = dirs
+            .into_iter()
+            .find_map(|(x, y)| panes::neighbor(&tab.rects, id, egui::vec2(x, y)));
+        if let Some(mut session) = tab.panes.remove(id) {
+            let _ = session.shell.child.kill();
+        }
+        if tab.panes.get(tab.focus).is_none() {
+            let first = tab.panes.leaves()[0].id;
+            tab.focus = next
+                .filter(|&n| tab.panes.get(n).is_some())
+                .unwrap_or(first);
+        }
     }
 
     /// Barra lateral de pestañas (como las pestañas verticales de Warp, pero más simple):
     /// "+ Nueva pestaña" arriba y una fila por pestaña con un punto de estado y el nombre de la carpeta.
     /// Se puede ensanchar o angostar arrastrando su borde.
-    fn tab_sidebar(&self, ui: &mut egui::Ui) -> Option<TabAction> {
+    fn tab_sidebar(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         let frame = egui::Frame::new()
             .fill(TAB_BAR)
@@ -128,11 +208,13 @@ impl Orion {
                 color,
             );
             if new.on_hover_text("Ctrl+Shift+T").clicked() {
-                action = Some(TabAction::New);
+                action = Some(Action::NewTab);
             }
             ui.add_space(6.0);
 
-            for (i, session) in self.sessions.iter().enumerate() {
+            for (i, tab) in self.tabs.iter().enumerate() {
+                // Con splits, la fila muestra el panel con foco.
+                let session = tab.focused();
                 let (rect, row) =
                     ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
                 let active = i == self.active;
@@ -185,8 +267,8 @@ impl Orion {
                         x_color,
                     );
                 }
-                if close.on_hover_text("Cerrar  (Ctrl+Shift+W)").clicked() {
-                    action = Some(TabAction::Close(i));
+                if close.on_hover_text("Cerrar pestaña").clicked() {
+                    action = Some(Action::CloseTab(i));
                 }
                 let tip = match session.last_command() {
                     Some(command) => {
@@ -196,10 +278,10 @@ impl Orion {
                 };
                 let row = row.on_hover_text(tip);
                 if row.clicked() {
-                    action = Some(TabAction::Select(i));
+                    action = Some(Action::SelectTab(i));
                 }
                 if row.middle_clicked() {
-                    action = Some(TabAction::Close(i));
+                    action = Some(Action::CloseTab(i));
                 }
                 ui.add_space(2.0);
             }
@@ -207,24 +289,43 @@ impl Orion {
         action
     }
 
-    /// Atajos de pestañas. Se "consumen": así no llegan a la shell.
-    fn tab_shortcuts(&self, ui: &mut egui::Ui) -> Option<TabAction> {
+    /// Atajos de pestañas y paneles. Se "consumen": así no llegan a la shell.
+    fn shortcuts(&self, ui: &mut egui::Ui) -> Option<Action> {
         use egui::{Key, Modifiers};
         let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
-        let count = self.sessions.len();
+        let count = self.tabs.len();
         ui.input_mut(|i| {
             if i.consume_key(ctrl_shift, Key::T) {
-                return Some(TabAction::New);
+                return Some(Action::NewTab);
+            }
+            // Splits (como en Warp): D = a la derecha, E = hacia abajo. W cierra el panel.
+            if i.consume_key(ctrl_shift, Key::D) {
+                return Some(Action::Split(true));
+            }
+            if i.consume_key(ctrl_shift, Key::E) {
+                return Some(Action::Split(false));
             }
             if i.consume_key(ctrl_shift, Key::W) {
-                return Some(TabAction::Close(self.active));
+                return Some(Action::ClosePane);
+            }
+            // Ctrl+Alt+flechas: pasar al panel de al lado.
+            let arrows = [
+                (Key::ArrowLeft, egui::vec2(-1.0, 0.0)),
+                (Key::ArrowRight, egui::vec2(1.0, 0.0)),
+                (Key::ArrowUp, egui::vec2(0.0, -1.0)),
+                (Key::ArrowDown, egui::vec2(0.0, 1.0)),
+            ];
+            for (key, dir) in arrows {
+                if i.consume_key(Modifiers::CTRL | Modifiers::ALT, key) {
+                    return Some(Action::Focus(dir));
+                }
             }
             // Primero Ctrl+Shift+Tab: si no, Ctrl+Tab también lo atraparía.
             if i.consume_key(ctrl_shift, Key::Tab) {
-                return Some(TabAction::Select((self.active + count - 1) % count));
+                return Some(Action::SelectTab((self.active + count - 1) % count));
             }
             if i.consume_key(Modifiers::CTRL, Key::Tab) {
-                return Some(TabAction::Select((self.active + 1) % count));
+                return Some(Action::SelectTab((self.active + 1) % count));
             }
             // Alt+1 … Alt+9: ir a esa pestaña.
             const NUMBERS: [Key; 9] = [
@@ -241,16 +342,77 @@ impl Orion {
             let n = NUMBERS
                 .iter()
                 .position(|&key| i.consume_key(Modifiers::ALT, key))?;
-            (n < count).then_some(TabAction::Select(n))
+            (n < count).then_some(Action::SelectTab(n))
         })
     }
 
-    fn apply_tab_action(&mut self, ctx: &egui::Context, action: TabAction) {
+    fn apply_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
-            TabAction::New => self.new_tab(ctx),
-            TabAction::Close(i) => self.close_tab(ctx, i),
-            TabAction::Select(i) => self.active = i,
+            Action::NewTab => self.new_tab(ctx),
+            Action::CloseTab(i) => self.close_tab(ctx, i),
+            Action::SelectTab(i) => self.active = i,
+            Action::Split(right) => self.split(ctx, right),
+            Action::ClosePane => {
+                let id = self.tabs[self.active].focus;
+                self.close_pane(ctx, self.active, id);
+            }
+            Action::Focus(dir) => {
+                let tab = &mut self.tabs[self.active];
+                if let Some(id) = panes::neighbor(&tab.rects, tab.focus, dir) {
+                    tab.focus = id;
+                }
+            }
         }
+    }
+
+    /// Dibuja los paneles de la pestaña activa en `area`.
+    /// Devuelve true si algún panel pidió abrir la configuración.
+    fn draw_panes(&mut self, ui: &mut egui::Ui, area: egui::Rect) -> bool {
+        let ctx = ui.ctx().clone();
+        let menu_open = self.menu.open;
+        let tab = &mut self.tabs[self.active];
+        // Entre panel y panel queda una línea de 2 px del color de la barra lateral.
+        ui.painter().rect_filled(area, 0.0, TAB_BAR);
+        tab.rects.clear();
+        tab.panes.layout(area, 2.0, &mut tab.rects);
+
+        // Clic en un panel: pasa a tener el foco (si el clic no fue en un menú o ventana de encima).
+        let press = ui.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()));
+        if let Some(pos) = press.flatten()
+            && ctx.layer_id_at(pos) == Some(ui.layer_id())
+            && let Some(&(id, _)) = tab.rects.iter().find(|(_, r)| r.contains(pos))
+        {
+            tab.focus = id;
+        }
+
+        let several = tab.rects.len() > 1;
+        let (mut open_menu, mut split, mut toast) = (false, None, None);
+        for &(id, rect) in &tab.rects {
+            let Some(session) = tab.panes.get_mut(id) else {
+                continue;
+            };
+            // Cada panel dibuja en su pedazo; id_salt separa los ids de egui de un panel y otro.
+            let mut pane_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(id));
+            let active = id == tab.focus;
+            open_menu |= session.draw(&mut pane_ui, &self.settings.font, menu_open, active);
+            if several && !active {
+                // Los paneles sin foco, un poco más oscuros: se ve dónde vas a escribir.
+                let dim = egui::Color32::from_black_alpha(60);
+                ui.painter().rect_filled(rect, 0.0, dim);
+            }
+            if let Some(right) = session.split_request.take() {
+                tab.focus = id;
+                split = Some(right);
+            }
+            toast = session.toast.take().or(toast);
+        }
+        if let Some(right) = split {
+            self.split(&ctx, right);
+        }
+        if let Some(text) = toast {
+            self.show_toast(text);
+        }
+        open_menu
     }
 }
 
@@ -265,18 +427,23 @@ fn active_after_close(active: usize, closed: usize, left: usize) -> usize {
 impl eframe::App for Orion {
     // logic corre antes de cada ui y también con la ventana oculta: así ningún canal se acumula.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Todas las pestañas, no solo la visible: las de atrás siguen recibiendo su salida.
-        for session in &mut self.sessions {
-            session.process_output();
+        // Todos los paneles de todas las pestañas: los de atrás siguen recibiendo su salida.
+        for tab in &mut self.tabs {
+            for session in tab.panes.leaves_mut() {
+                session.process_output();
+            }
         }
-        // Pestañas cuya shell terminó (escribiste `exit`): se cierran solas.
-        while let Some(i) = self.sessions.iter_mut().position(|s| s.exited()) {
-            self.close_tab(ctx, i);
-            if self.sessions.is_empty() {
+        // Paneles cuya shell terminó (escribiste `exit`): se cierran solos.
+        while let Some((t, id)) = self.tabs.iter_mut().enumerate().find_map(|(t, tab)| {
+            let mut sessions = tab.panes.leaves_mut().into_iter();
+            sessions.find_map(|s| s.exited().then_some((t, s.id)))
+        }) {
+            self.close_pane(ctx, t, id);
+            if self.tabs.is_empty() {
                 return;
             }
         }
-        // El título de la ventana sigue al de la pestaña activa.
+        // El título de la ventana sigue al del panel con foco.
         let title = format!("{} — Orion", self.session().title());
         if title != self.window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -285,7 +452,7 @@ impl eframe::App for Orion {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.sessions.is_empty() {
+        if self.tabs.is_empty() {
             return; // la ventana se está cerrando
         }
         let ctx = ui.ctx().clone();
@@ -311,15 +478,15 @@ impl eframe::App for Orion {
             }
         }
 
-        // Pestañas: barra de arriba y atajos.
+        // Pestañas y paneles: barra lateral y atajos.
         let shortcut = if self.menu.open {
             None
         } else {
-            self.tab_shortcuts(ui)
+            self.shortcuts(ui)
         };
         if let Some(action) = self.tab_sidebar(ui).or(shortcut) {
-            self.apply_tab_action(&ctx, action);
-            if self.sessions.is_empty() {
+            self.apply_action(&ctx, action);
+            if self.tabs.is_empty() {
                 return;
             }
         }
@@ -339,13 +506,8 @@ impl eframe::App for Orion {
         // Con el menú abierto, el teclado es para el menú (ej. el buscador), no para la shell.
 
         let area = ui.available_rect_before_wrap();
-        let menu_open = self.menu.open;
-        let open_menu = self.sessions[self.active].draw(ui, &self.settings.font, menu_open);
-        if open_menu {
+        if self.draw_panes(ui, area) {
             self.open_menu();
-        }
-        if let Some(text) = self.session().toast.take() {
-            self.show_toast(text);
         }
         if let Some(toast) = &self.toast {
             render::draw_toast(ui, area, toast, self.settings.font.size);
