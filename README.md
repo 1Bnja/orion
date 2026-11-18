@@ -11,4 +11,4 @@ Terminal para Windows 11 escrita en Rust: rápida y simple como Ghostty, con blo
 
 ## Roadmap
 
-Ver el [Project kanban](../../projects) y los milestones (Fase 0 → Fase 5).
+Ver el [Project kanban](https://github.com/users/1Bnja/projects/6) y los milestones (Fase 0 → Fase 5).
