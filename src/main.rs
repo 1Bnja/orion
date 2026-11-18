@@ -112,14 +112,26 @@ fn key_bytes(key: egui::Key, mods: egui::Modifiers) -> Option<Vec<u8>> {
     Some(seq.to_vec())
 }
 
-fn main() -> Result<(), Error> {
-    let size = PtySize {
-        rows: 24,
-        cols: 80,
+/// ConPTY ignora el tamaño en píxeles; solo importan columnas y filas.
+fn pty_size((cols, rows): (u16, u16)) -> PtySize {
+    PtySize {
+        cols,
+        rows,
         pixel_width: 0,
         pixel_height: 0,
-    };
-    let shell = spawn_shell(size, &["-NoLogo"])?;
+    }
+}
+
+/// Cuántas celdas de tamaño `cell` caben en `area`. Nunca menos de 1x1: un PTY de 0 columnas falla.
+fn grid_size(area: egui::Vec2, cell: egui::Vec2) -> (u16, u16) {
+    let fit = |a: f32, c: f32| (a / c).floor().clamp(1.0, u16::MAX as f32) as u16;
+    (fit(area.x, cell.x), fit(area.y, cell.y))
+}
+
+fn main() -> Result<(), Error> {
+    // Tamaño inicial; se corrige en el primer frame, cuando ya sabemos cuánto mide la ventana.
+    let grid = (80, 24);
+    let shell = spawn_shell(pty_size(grid), &["-NoLogo"])?;
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -139,6 +151,7 @@ fn main() -> Result<(), Error> {
                 rx,
                 parser: vte::Parser::new(),
                 text: PlainText::default(),
+                grid,
             }))
         }),
     )?;
@@ -152,6 +165,8 @@ struct Orion {
     parser: vte::Parser,
     /// ponytail: crece sin límite hasta tener scrollback (#12).
     text: PlainText,
+    /// Columnas y filas que la shell cree tener. Se compara cada frame para avisarle solo si cambia.
+    grid: (u16, u16),
 }
 
 impl eframe::App for Orion {
@@ -189,6 +204,18 @@ impl eframe::App for Orion {
         }
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
+            // Fuente monoespaciada: todas las letras miden lo mismo, así que 'M' sirve de celda.
+            let font = egui::TextStyle::Monospace.resolve(ui.style());
+            let cell = ui
+                .ctx()
+                .fonts_mut(|f| egui::vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
+            let grid = grid_size(ui.available_size(), cell);
+            if grid != self.grid {
+                self.grid = grid;
+                // ConPTY le avisa a la shell, que reacomoda su salida (por ejemplo, dónde corta las líneas).
+                let _ = self.shell.master.resize(pty_size(grid));
+            }
+
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
                 .stick_to_bottom(true)
@@ -206,14 +233,11 @@ mod tests {
 
     #[test]
     fn shell_output_reaches_reader() {
-        let size = PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        };
-        let mut shell =
-            spawn_shell(size, &["-NoProfile", "-Command", "Write-Output orion-ok"]).unwrap();
+        let mut shell = spawn_shell(
+            pty_size((80, 24)),
+            &["-NoProfile", "-Command", "Write-Output orion-ok"],
+        )
+        .unwrap();
         let rx = spawn_reader(&*shell.master, || {}).unwrap();
 
         let mut out = String::new();
@@ -245,5 +269,12 @@ mod tests {
         assert_eq!(key_bytes(Key::D, Modifiers::CTRL).unwrap(), [0x04]);
         assert_eq!(key_bytes(Key::A, none), None); // la 'a' llega como Event::Text
         assert_eq!(key_bytes(Key::Num1, Modifiers::CTRL), None);
+    }
+
+    #[test]
+    fn grid_size_fits_whole_cells() {
+        let cell = egui::vec2(8.0, 16.0);
+        assert_eq!(grid_size(egui::vec2(803.0, 390.0), cell), (100, 24));
+        assert_eq!(grid_size(egui::vec2(0.0, 0.0), cell), (1, 1));
     }
 }
