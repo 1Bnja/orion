@@ -3,8 +3,10 @@
 //! Recorrido de los datos:
 //!   teclado/mouse → `input` → shell (en un `pty`) → bytes → parser VT → `Term` (la grilla)
 //!   → `app::render` la dibuja con egui, usando `colors`, `fonts` y la geometría de `grid`.
+//!   Antes del parser, `blocks` saca las marcas OSC 133 y arma un bloque por comando.
 
 mod app;
+mod blocks;
 mod colors;
 mod config;
 mod fonts;

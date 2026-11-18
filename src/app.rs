@@ -5,6 +5,7 @@
 mod menu;
 mod render;
 
+use crate::blocks::{Blocks, MarkScanner, Piece};
 use crate::config::Settings;
 use crate::fonts::{apply_font, is_font_file};
 use crate::grid::term_size;
@@ -43,6 +44,10 @@ pub(crate) struct Orion {
     mouse_cell: Option<(usize, usize)>,
     /// Si la ventana tenía el foco en el frame anterior (para avisar cambios a la app).
     focused: bool,
+    /// Separa las marcas OSC 133 del resto de la salida.
+    marks: MarkScanner,
+    /// Un bloque por comando: lo que escribiste, dónde está su salida, código y duración.
+    blocks: Blocks,
 }
 
 impl Orion {
@@ -79,6 +84,8 @@ impl Orion {
             mouse_button: None,
             mouse_cell: None,
             focused: true,
+            marks: MarkScanner::default(),
+            blocks: Blocks::default(),
         })
     }
 }
@@ -88,7 +95,14 @@ impl eframe::App for Orion {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // try_iter vacía el canal sin bloquear el frame.
         for chunk in self.rx.try_iter() {
-            self.processor.advance(&mut self.term, &chunk);
+            for piece in self.marks.feed(&chunk) {
+                match piece {
+                    Piece::Data(bytes) => self.processor.advance(&mut self.term, &bytes),
+                    // La marca se aplica al llegar: el cursor está justo donde la shell la puso.
+                    Piece::Mark(mark) => self.blocks.on_mark(mark, &self.term),
+                }
+            }
+            self.blocks.after_output(&self.term);
         }
     }
 
