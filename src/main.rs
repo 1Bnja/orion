@@ -243,32 +243,82 @@ fn push_char(job: &mut LayoutJob, c: char, format: TextFormat) {
 
 /// Traduce una tecla especial a los bytes que espera la shell (convención xterm).
 /// El texto normal no pasa por aquí: llega como `Event::Text`.
-fn key_bytes(key: egui::Key, mods: egui::Modifiers) -> Option<Vec<u8>> {
+/// `app_cursor`: la app pidió "modo cursor de aplicación" (ESC[?1h; vim, less): flechas como ESC O A.
+fn key_bytes(key: egui::Key, mods: egui::Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
     use egui::Key::*;
-    let seq: &[u8] = match key {
-        Enter => b"\r", // las terminales mandan CR, no LF
-        Backspace => b"\x7f",
-        Tab => b"\t",
-        Escape => b"\x1b",
-        ArrowUp => b"\x1b[A",
-        ArrowDown => b"\x1b[B",
-        ArrowRight => b"\x1b[C",
-        ArrowLeft => b"\x1b[D",
-        Home => b"\x1b[H",
-        End => b"\x1b[F",
-        Delete => b"\x1b[3~",
-        PageUp => b"\x1b[5~",
-        PageDown => b"\x1b[6~",
-        // Ctrl+letra = código de control: Ctrl+A = 0x01 ... Ctrl+Z = 0x1A.
-        _ if mods.ctrl => {
+    // Código de modificadores de xterm: 1 + Shift(1) + Alt(2) + Ctrl(4). Ej.: Ctrl+→ = ESC[1;5C.
+    let m = 1 + mods.shift as u8 + 2 * mods.alt as u8 + 4 * mods.ctrl as u8;
+    // Teclas que terminan en letra: flechas, Inicio/Fin, F1–F4.
+    // `ss3` = forma ESC O x (cursor de aplicación, y siempre en F1–F4).
+    let letter = |c: char, ss3: bool| {
+        if m > 1 {
+            format!("\x1b[1;{m}{c}")
+        } else if ss3 {
+            format!("\x1bO{c}")
+        } else {
+            format!("\x1b[{c}")
+        }
+        .into_bytes()
+    };
+    // Teclas "número + ~": Insert, Supr, RePág, AvPág, F5–F12.
+    let tilde = |n: u8| {
+        if m > 1 {
+            format!("\x1b[{n};{m}~")
+        } else {
+            format!("\x1b[{n}~")
+        }
+        .into_bytes()
+    };
+    Some(match key {
+        Enter => b"\r".to_vec(), // las terminales mandan CR, no LF
+        // Ctrl+Backspace = ^H (borrar palabra en PSReadLine, igual que en Windows Terminal).
+        Backspace if mods.ctrl => vec![0x08],
+        Backspace => vec![0x7f],
+        Tab if mods.shift => b"\x1b[Z".to_vec(), // Shift+Tab: completar hacia atrás
+        Tab => b"\t".to_vec(),
+        Escape => vec![0x1b],
+        ArrowUp => letter('A', app_cursor),
+        ArrowDown => letter('B', app_cursor),
+        ArrowRight => letter('C', app_cursor),
+        ArrowLeft => letter('D', app_cursor),
+        Home => letter('H', app_cursor),
+        End => letter('F', app_cursor),
+        F1 => letter('P', true),
+        F2 => letter('Q', true),
+        F3 => letter('R', true),
+        F4 => letter('S', true),
+        Insert => tilde(2),
+        Delete => tilde(3),
+        PageUp => tilde(5),
+        PageDown => tilde(6),
+        F5 => tilde(15),
+        F6 => tilde(17), // los números saltan el 16 y el 22: herencia de terminales viejas
+        F7 => tilde(18),
+        F8 => tilde(19),
+        F9 => tilde(20),
+        F10 => tilde(21),
+        F11 => tilde(23),
+        F12 => tilde(24),
+        // Letras con Ctrl y/o Alt. (AltGr no llega aquí: winit le quita Ctrl y Alt, y escribe como texto.)
+        _ if mods.ctrl || mods.alt => {
             let &[c] = key.name().as_bytes() else {
                 return None;
             };
-            return c.is_ascii_uppercase().then(|| vec![c - b'A' + 1]);
+            if !c.is_ascii_uppercase() {
+                return None;
+            }
+            let c = if mods.ctrl {
+                c - b'A' + 1 // Ctrl+letra = código de control: Ctrl+A = 0x01 … Ctrl+Z = 0x1A
+            } else if mods.shift {
+                c
+            } else {
+                c.to_ascii_lowercase()
+            };
+            // Alt+tecla = ESC antes de la tecla (atajos de readline, lazygit, etc.).
+            if mods.alt { vec![0x1b, c] } else { vec![c] }
         }
         _ => return None,
-    };
-    Some(seq.to_vec())
+    })
 }
 
 /// ConPTY ignora el tamaño en píxeles; solo importan columnas y filas.
@@ -673,6 +723,23 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
+/// Codifica un evento de mouse para apps que lo piden (vim, btop, lazygit…).
+/// `button`: 0 izq., 1 medio, 2 der., 64/65 rueda; +32 si es movimiento; +8 Alt, +16 Ctrl.
+/// `col`/`row` empiezan en 0. `sgr`: la app pidió el formato moderno (ESC[?1006h).
+fn mouse_report(button: u8, col: usize, row: usize, pressed: bool, sgr: bool) -> Vec<u8> {
+    if sgr {
+        // Formato SGR: texto legible, sin límite de tamaño. M = apretar, m = soltar.
+        let end = if pressed { 'M' } else { 'm' };
+        format!("\x1b[<{button};{};{}{end}", col + 1, row + 1).into_bytes()
+    } else {
+        // Formato clásico X10: cada valor es un byte con 32 sumado. Soltar se informa como botón 3.
+        // ponytail: no puede pasar de la columna/fila 223; las apps modernas usan SGR.
+        let button = if pressed { button } else { 3 | (button & !3) };
+        let pos = |v: usize| (33 + v).min(255) as u8;
+        vec![0x1b, b'[', b'M', 32 + button, pos(col), pos(row)]
+    }
+}
+
 /// Convierte píxeles de rueda en líneas enteras. Lo que sobra queda en `acc` para el próximo frame:
 /// un touchpad manda deltas chicos que por sí solos no llegan a una línea.
 fn scroll_lines(acc: &mut f32, delta_px: f32, line_height: f32) -> i32 {
@@ -732,6 +799,9 @@ fn main() -> Result<(), Error> {
                 scroll_acc: 0.0,
                 settings,
                 menu: SettingsMenu::default(),
+                mouse_button: None,
+                mouse_cell: None,
+                focused: true,
             }))
         }),
     )?;
@@ -754,6 +824,12 @@ struct Orion {
     scroll_acc: f32,
     settings: Settings,
     menu: SettingsMenu,
+    /// Botón apretado mientras la app recibe el mouse (para informar arrastres).
+    mouse_button: Option<u8>,
+    /// Última celda informada a la app: solo avisamos movimientos cuando cambia.
+    mouse_cell: Option<(usize, usize)>,
+    /// Si la ventana tenía el foco en el frame anterior (para avisar cambios a la app).
+    focused: bool,
 }
 
 impl Orion {
@@ -871,6 +947,16 @@ impl eframe::App for Orion {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
+        // Si la app lo pidió (ESC[?1004h, ej. vim), avisarle cuando la ventana gana o pierde el foco.
+        let focused = ui.input(|i| i.focused);
+        if focused != self.focused {
+            self.focused = focused;
+            if self.term.mode().contains(TermMode::FOCUS_IN_OUT) {
+                let report: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                let _ = self.shell.writer.borrow_mut().write_all(report);
+            }
+        }
+
         // Archivos de fuente arrastrados a la ventana.
         let dropped: Vec<PathBuf> = ui.input(|i| {
             let files = i.raw.dropped_files.iter();
@@ -905,9 +991,17 @@ impl Orion {
     /// Teclado y portapapeles → shell.
     fn send_input(&mut self, ui: &egui::Ui) {
         let bracketed = self.term.mode().contains(TermMode::BRACKETED_PASTE);
+        let app_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
+        let alt = ui.input(|i| i.modifiers.alt);
         // El teclado va en ui y no en logic: con la ventana oculta, logic vería otra vez los eventos del último frame.
         for event in ui.input(|i| i.events.clone()) {
             let bytes = match event {
+                // Alt+letra también llega como texto; ya la manda key_bytes con su ESC adelante.
+                egui::Event::Text(t)
+                    if alt && t.len() == 1 && t.as_bytes()[0].is_ascii_alphabetic() =>
+                {
+                    continue;
+                }
                 egui::Event::Text(t) => t.into_bytes(),
                 egui::Event::Paste(t) => paste_bytes(&t, bracketed),
                 // egui convierte Ctrl+C en Copy. Como en Windows Terminal: si hay selección copia,
@@ -945,7 +1039,7 @@ impl Orion {
                     pressed: true,
                     modifiers,
                     ..
-                } => match key_bytes(key, modifiers) {
+                } => match key_bytes(key, modifiers, app_cursor) {
                     Some(b) => b,
                     None => continue,
                 },
@@ -980,6 +1074,20 @@ impl Orion {
                     let _ = self.shell.master.resize(pty_size(grid));
                 }
 
+                let (rect, response) =
+                    ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+
+                // ¿La app pidió el mouse? (vim, btop, lazygit…) Shift+mouse sigue seleccionando, como en otras terminales.
+                let mode = *self.term.mode();
+                let shift = ui.input(|i| i.modifiers.shift);
+                let mouse_mode = mode.intersects(TermMode::MOUSE_MODE) && !shift && !self.menu.open;
+                let sgr = mode.contains(TermMode::SGR_MOUSE);
+                let cell_at = |pos| {
+                    let (point, _) = pixel_to_point(pos, rect.min, cell, grid, 0);
+                    (point.column.0, point.line.0 as usize)
+                };
+                let mut report = Vec::new();
+
                 // Rueda del mouse: positivo = hacia arriba (historial más viejo).
                 // Con el menú abierto, la rueda es para su lista de fuentes.
                 let delta = if self.menu.open {
@@ -988,48 +1096,98 @@ impl Orion {
                     ui.input(|i| i.smooth_scroll_delta.y)
                 };
                 let lines = scroll_lines(&mut self.scroll_acc, delta, cell.y);
+                let hover = ui.input(|i| i.pointer.hover_pos());
                 if lines != 0 {
                     let alt_scroll = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL;
-                    if self.term.mode().contains(alt_scroll) {
-                        // Apps de pantalla completa (less, man) no tienen historial: la rueda se vuelve flechas.
-                        // ponytail: apps que piden eventos de mouse (vim, btop) quedan para #15.
+                    if let (true, Some(pos)) = (mouse_mode, hover) {
+                        // La app recibe la rueda como botones 64 (arriba) y 65 (abajo).
+                        let (col, row) = cell_at(pos);
+                        let button = if lines > 0 { 64 } else { 65 };
+                        for _ in 0..lines.unsigned_abs() {
+                            report.extend(mouse_report(button, col, row, true, sgr));
+                        }
+                    } else if mode.contains(alt_scroll) {
+                        // Apps de pantalla completa sin mouse (less, man): la rueda se vuelve flechas.
                         let arrow: &[u8] = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
-                        let keys = arrow.repeat(lines.unsigned_abs() as usize);
-                        let _ = self.shell.writer.borrow_mut().write_all(&keys);
+                        report.extend(arrow.repeat(lines.unsigned_abs() as usize));
                     } else {
                         self.term.scroll_display(Scroll::Delta(lines));
                     }
                 }
 
-                let (rect, response) =
-                    ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                if mouse_mode {
+                    let mods = ui.input(|i| i.modifiers);
+                    let extra = 8 * mods.alt as u8 + 16 * mods.ctrl as u8;
+                    for event in ui.input(|i| i.events.clone()) {
+                        match event {
+                            // Apretar adentro de la terminal; soltar se informa aunque sea afuera.
+                            egui::Event::PointerButton {
+                                pos,
+                                button,
+                                pressed,
+                                ..
+                            } if rect.contains(pos) || !pressed => {
+                                let code = match button {
+                                    egui::PointerButton::Primary => 0,
+                                    egui::PointerButton::Middle => 1,
+                                    egui::PointerButton::Secondary => 2,
+                                    _ => continue,
+                                };
+                                self.mouse_button = pressed.then_some(code);
+                                let (col, row) = cell_at(pos);
+                                report.extend(mouse_report(code + extra, col, row, pressed, sgr));
+                            }
+                            egui::Event::PointerMoved(pos) if rect.contains(pos) => {
+                                let at = cell_at(pos);
+                                // Solo al cambiar de celda: moverse dentro de la misma no le dice nada nuevo a la app.
+                                if self.mouse_cell == Some(at) {
+                                    continue;
+                                }
+                                self.mouse_cell = Some(at);
+                                let drag = TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION;
+                                let code = match self.mouse_button {
+                                    Some(b) if mode.intersects(drag) => b + 32, // arrastrando
+                                    None if mode.contains(TermMode::MOUSE_MOTION) => 3 + 32, // moverse sin botón
+                                    _ => continue,
+                                };
+                                report.extend(mouse_report(code + extra, at.0, at.1, true, sgr));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if !report.is_empty() {
+                    let _ = self.shell.writer.borrow_mut().write_all(&report);
+                }
 
-                // Clic derecho: menú con copiar, pegar y configuración.
-                response.context_menu(|ui| {
-                    let has_selection = self.term.selection.is_some();
-                    if ui
-                        .add_enabled(has_selection, egui::Button::new("Copiar"))
-                        .clicked()
-                    {
-                        self.copy_selection(ui.ctx());
-                        ui.close();
-                    }
-                    if ui.button("Pegar").clicked() {
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Configuración…   Ctrl+,").clicked() {
-                        self.open_menu();
-                        ui.close();
-                    }
-                });
+                // Clic derecho: menú con copiar, pegar y configuración (si la app no pidió el mouse).
+                if !mouse_mode {
+                    response.context_menu(|ui| {
+                        let has_selection = self.term.selection.is_some();
+                        if ui
+                            .add_enabled(has_selection, egui::Button::new("Copiar"))
+                            .clicked()
+                        {
+                            self.copy_selection(ui.ctx());
+                            ui.close();
+                        }
+                        if ui.button("Pegar").clicked() {
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Configuración…   Ctrl+,").clicked() {
+                            self.open_menu();
+                            ui.close();
+                        }
+                    });
+                }
 
                 // --- Selección con el mouse ---
                 let offset = self.term.grid().display_offset();
                 let to_point = |pos| pixel_to_point(pos, rect.min, cell, grid, offset);
-                if let Some(pos) = response.interact_pointer_pos() {
+                if let (false, Some(pos)) = (mouse_mode, response.interact_pointer_pos()) {
                     let (point, side) = to_point(pos);
                     let start = |ty| Some(Selection::new(ty, point, side));
                     if response.triple_clicked() {
@@ -1244,11 +1402,48 @@ mod tests {
     fn keys_map_to_terminal_bytes() {
         use egui::{Key, Modifiers};
         let none = Modifiers::NONE;
-        assert_eq!(key_bytes(Key::Enter, none).unwrap(), b"\r");
-        assert_eq!(key_bytes(Key::ArrowUp, none).unwrap(), b"\x1b[A");
-        assert_eq!(key_bytes(Key::D, Modifiers::CTRL).unwrap(), [0x04]);
-        assert_eq!(key_bytes(Key::A, none), None); // la 'a' llega como Event::Text
-        assert_eq!(key_bytes(Key::Num1, Modifiers::CTRL), None);
+        let key = |k, m| key_bytes(k, m, false).unwrap();
+        assert_eq!(key(Key::Enter, none), b"\r");
+        assert_eq!(key(Key::ArrowUp, none), b"\x1b[A");
+        assert_eq!(key(Key::D, Modifiers::CTRL), [0x04]);
+        assert_eq!(key_bytes(Key::A, none, false), None); // la 'a' llega como Event::Text
+        assert_eq!(key_bytes(Key::Num1, Modifiers::CTRL, false), None);
+        // Cursor de aplicación (vim, less): flechas e Inicio/Fin como ESC O x.
+        assert_eq!(key_bytes(Key::ArrowUp, none, true).unwrap(), b"\x1bOA");
+        assert_eq!(key_bytes(Key::Home, none, true).unwrap(), b"\x1bOH");
+        // Modificadores: Ctrl+→ = ESC[1;5C, Shift+Supr = ESC[3;2~, Ctrl+F5 = ESC[15;5~.
+        assert_eq!(key(Key::ArrowRight, Modifiers::CTRL), b"\x1b[1;5C");
+        assert_eq!(key(Key::Delete, Modifiers::SHIFT), b"\x1b[3;2~");
+        assert_eq!(key(Key::F5, Modifiers::CTRL), b"\x1b[15;5~");
+        // Teclas de función e Insert.
+        assert_eq!(key(Key::F1, none), b"\x1bOP");
+        assert_eq!(key(Key::F12, none), b"\x1b[24~");
+        assert_eq!(key(Key::Insert, none), b"\x1b[2~");
+        // Alt+letra = ESC + letra; con Shift, mayúscula. Ctrl+Alt+letra = ESC + código de control.
+        assert_eq!(key(Key::B, Modifiers::ALT), b"\x1bb");
+        assert_eq!(key(Key::B, Modifiers::ALT | Modifiers::SHIFT), b"\x1bB");
+        assert_eq!(key(Key::C, Modifiers::ALT | Modifiers::CTRL), [0x1b, 0x03]);
+        assert_eq!(key(Key::Tab, Modifiers::SHIFT), b"\x1b[Z");
+        assert_eq!(key(Key::Backspace, Modifiers::CTRL), [0x08]);
+    }
+
+    #[test]
+    fn mouse_reports_in_sgr_and_classic_formats() {
+        // SGR: clic izquierdo en la columna 5, fila 2 (base 0) → base 1 en el mensaje.
+        assert_eq!(mouse_report(0, 4, 1, true, true), b"\x1b[<0;5;2M");
+        assert_eq!(mouse_report(0, 4, 1, false, true), b"\x1b[<0;5;2m"); // soltar
+        assert_eq!(mouse_report(64, 0, 0, true, true), b"\x1b[<64;1;1M"); // rueda arriba
+        // Clásico: bytes con 32 sumado; soltar = botón 3.
+        assert_eq!(
+            mouse_report(0, 4, 1, true, false),
+            [0x1b, b'[', b'M', 32, 37, 34]
+        );
+        assert_eq!(
+            mouse_report(2, 4, 1, false, false),
+            [0x1b, b'[', b'M', 35, 37, 34]
+        );
+        // Arrastre con botón izquierdo (32) + Ctrl (16): el "soltar" conserva los modificadores.
+        assert_eq!(mouse_report(16, 0, 0, false, false)[3], 32 + 16 + 3);
     }
 
     #[test]
