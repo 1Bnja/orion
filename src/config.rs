@@ -137,10 +137,10 @@ impl Default for FontSettings {
 /// Windows: %APPDATA%\orion\config.toml. macOS: ~/Library/Application Support/orion/config.toml.
 pub(crate) fn config_path() -> Option<PathBuf> {
     #[cfg(windows)]
-    let appdata = std::env::var_os("APPDATA")?;
+    let appdata = PathBuf::from(std::env::var_os("APPDATA")?);
     #[cfg(not(windows))]
     let appdata = PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support");
-    Some(PathBuf::from(appdata).join("orion").join("config.toml"))
+    Some(appdata.join("orion").join("config.toml"))
 }
 
 /// Cuándo se modificó config.toml por última vez (para notar que lo guardaste).
