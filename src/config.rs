@@ -134,9 +134,12 @@ impl Default for FontSettings {
     }
 }
 
-/// %APPDATA%\orion\config.toml
+/// Windows: %APPDATA%\orion\config.toml. macOS: ~/Library/Application Support/orion/config.toml.
 pub(crate) fn config_path() -> Option<PathBuf> {
+    #[cfg(windows)]
     let appdata = std::env::var_os("APPDATA")?;
+    #[cfg(not(windows))]
+    let appdata = PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support");
     Some(PathBuf::from(appdata).join("orion").join("config.toml"))
 }
 
@@ -171,7 +174,7 @@ pub(crate) fn parse_settings(text: &str) -> Result<Settings, String> {
 
 /// Vuelve a leer config.toml (lo editaste a mano).
 pub(crate) fn reload_settings() -> Result<Settings, String> {
-    let path = config_path().ok_or("no encuentro %APPDATA%")?;
+    let path = config_path().ok_or("no encuentro la carpeta de configuración")?;
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     parse_settings(&text)
 }
