@@ -7,7 +7,7 @@ use portable_pty::CommandBuilder;
 use portable_pty::MasterPty;
 use portable_pty::PtySize;
 use portable_pty::native_pty_system;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::OsStr;
 use std::io::Read;
 use std::io::Write;
@@ -181,9 +181,12 @@ pub(crate) fn spawn_reader(
 /// - `PtyWrite`: respuestas que la terminal debe mandarle a la shell, como la posición del cursor
 ///   cuando la shell la pregunta (ESC[6n).
 /// - `Title`: el título que pone la shell (OSC 0); lo usa la pestaña.
+/// - `Bell`: la campana (BEL); la pestaña avisa que algo pide atención.
 pub(crate) struct Replies {
     pub(crate) writer: PtyWriter,
     pub(crate) title: Rc<RefCell<Option<String>>>,
+    /// Sonó la campana (BEL): un programa pide atención. La sesión la lee y la apaga.
+    pub(crate) bell: Rc<Cell<bool>>,
 }
 
 impl EventListener for Replies {
@@ -194,6 +197,7 @@ impl EventListener for Replies {
             }
             TermEvent::Title(title) => *self.title.borrow_mut() = Some(title),
             TermEvent::ResetTitle => *self.title.borrow_mut() = None,
+            TermEvent::Bell => self.bell.set(true),
             _ => {}
         }
     }

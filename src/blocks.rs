@@ -11,9 +11,11 @@ use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use std::time::{Duration, Instant};
 
-/// Una marca OSC 133.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Una marca OSC 133 de la shell, o un aviso que manda un programa.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Mark {
+    /// OSC 9;texto u OSC 777;notify;título;texto: un programa (ej. un agente) avisa algo.
+    Notify(String),
     /// A: empieza el prompt.
     PromptStart,
     /// B: termina el prompt; lo que sigue es el comando que escribe el usuario.
@@ -32,7 +34,9 @@ pub(crate) enum Piece {
     Mark(Mark),
 }
 
-const PREFIX: &[u8] = b"\x1b]133;";
+/// Los OSC que separamos de la salida: las marcas de la shell y los avisos de notificación.
+/// alacritty_terminal no usa ninguno de estos (los ignoraría), así que sacarlos no rompe nada.
+const PREFIXES: [&[u8]; 3] = [b"\x1b]133;", b"\x1b]9;", b"\x1b]777;"];
 /// Una marca más larga que esto no es una marca de verdad: se deja pasar como texto.
 const MAX_MARK: usize = 256;
 
@@ -55,8 +59,8 @@ impl MarkScanner {
         let mut i = 0;
         while let Some(esc) = data[i..].iter().position(|&b| b == 0x1b).map(|p| p + i) {
             let rest = &data[esc..];
-            if !rest.starts_with(PREFIX) {
-                if PREFIX.starts_with(rest) {
+            let Some(prefix) = PREFIXES.iter().find(|p| rest.starts_with(p)) else {
+                if PREFIXES.iter().any(|p| p.starts_with(rest)) {
                     // La lectura terminó a mitad del prefijo: esperamos la siguiente.
                     self.pending = rest.to_vec();
                     data.truncate(esc);
@@ -64,9 +68,9 @@ impl MarkScanner {
                 }
                 i = esc + 1;
                 continue;
-            }
+            };
             // Terminador: BEL, o ST (ESC \).
-            let body = &rest[PREFIX.len()..];
+            let body = &rest[prefix.len()..];
             let end = body
                 .iter()
                 .enumerate()
@@ -76,10 +80,16 @@ impl MarkScanner {
                     if esc > plain {
                         pieces.push(Piece::Data(data[plain..esc].to_vec()));
                     }
-                    if let Some(mark) = parse_mark(&body[..j]) {
+                    let body = &body[..j];
+                    let mark = match &prefix[2..] {
+                        b"133;" => parse_mark(body),
+                        b"9;" => parse_osc9(body),
+                        _ => parse_osc777(body),
+                    };
+                    if let Some(mark) = mark {
                         pieces.push(Piece::Mark(mark));
                     }
-                    let len = PREFIX.len() + j + if terminator == 0x07 { 1 } else { 2 };
+                    let len = prefix.len() + j + if terminator == 0x07 { 1 } else { 2 };
                     i = esc + len;
                     plain = i;
                 }
@@ -110,6 +120,32 @@ fn parse_mark(body: &[u8]) -> Option<Mark> {
         "D" => Mark::Finished(parts.next().and_then(|code| code.parse().ok())),
         _ => return None,
     })
+}
+
+/// OSC 9;texto → aviso. Ojo: OSC 9;4;… (barra de progreso) y 9;9;… (carpeta actual) también usan
+/// el 9, pero empiezan con un número y un ';': esos no son avisos.
+fn parse_osc9(body: &[u8]) -> Option<Mark> {
+    let text = std::str::from_utf8(body).ok()?;
+    let (head, _) = text.split_once(';').unwrap_or((text, ""));
+    if text.is_empty() || (text.contains(';') && head.parse::<u32>().is_ok()) {
+        return None;
+    }
+    Some(Mark::Notify(text.to_string()))
+}
+
+/// OSC 777;notify;título;texto → aviso "título: texto".
+fn parse_osc777(body: &[u8]) -> Option<Mark> {
+    let text = std::str::from_utf8(body).ok()?;
+    let mut parts = text.splitn(3, ';');
+    if parts.next()? != "notify" {
+        return None;
+    }
+    let message = match (parts.next(), parts.next()) {
+        (Some(title), Some(body)) if !body.is_empty() => format!("{title}: {body}"),
+        (Some(title), _) => title.to_string(),
+        _ => return None,
+    };
+    Some(Mark::Notify(message))
 }
 
 /// Un comando con su salida. Las posiciones son *líneas lógicas* (ver `logical_line`).
@@ -242,17 +278,22 @@ impl Blocks {
         let cursor = term.grid().cursor.point;
         let line = logical_line(term, cursor.line);
         match mark {
-            Mark::PromptStart => self.list.push(Block {
-                prompt: line,
-                output: None,
-                end: None,
-                command: String::new(),
-                exit_code: None,
-                duration: None,
-                started: None,
-                command_start: None,
-                collapsed: false,
-            }),
+            Mark::PromptStart => {
+                // Un prompt nuevo siempre va debajo de todos los bloques. Si hay bloques en su línea
+                // o más abajo, la pantalla se borró (clear, cls, reset): esos bloques ya no existen.
+                self.list.retain(|b| b.prompt < line);
+                self.list.push(Block {
+                    prompt: line,
+                    output: None,
+                    end: None,
+                    command: String::new(),
+                    exit_code: None,
+                    duration: None,
+                    started: None,
+                    command_start: None,
+                    collapsed: false,
+                })
+            }
             Mark::CommandStart => {
                 if let Some(block) = self.current() {
                     block.command_start = Some((absolute_row(term, cursor.line), cursor.column.0));
@@ -273,8 +314,9 @@ impl Blocks {
             }
             Mark::Finished(code) => {
                 let Some(block) = self.current() else { return };
-                if block.output.is_none() {
-                    // Enter sin comando, o Ctrl+C mientras escribías: no hay bloque que mostrar.
+                // Enter sin comando (la shell no manda código y no hay nada escrito), o Ctrl+C
+                // mientras escribías: no hay bloque que mostrar.
+                if block.output.is_none() || (code.is_none() && block.command.is_empty()) {
                     self.list.pop();
                     return;
                 }
@@ -282,6 +324,7 @@ impl Blocks {
                 block.exit_code = code;
                 block.duration = block.started.map(|t| t.elapsed());
             }
+            Mark::Notify(_) => {} // no es de los bloques: lo atiende la sesión
         }
     }
 
@@ -455,6 +498,19 @@ mod tests {
     }
 
     #[test]
+    fn scanner_extracts_notifications() {
+        let mut s = MarkScanner::default();
+        let notify = |text: &str| [Piece::Mark(Mark::Notify(text.into()))];
+        assert_eq!(s.feed(b"\x1b]9;Listo\x07"), notify("Listo"));
+        assert_eq!(
+            s.feed(b"\x1b]777;notify;Agente;Necesita permiso\x1b\\"),
+            notify("Agente: Necesita permiso")
+        );
+        // OSC 9;4 (barra de progreso) y 9;9 (carpeta actual) no son avisos: se descartan sin avisar.
+        assert_eq!(s.feed(b"\x1b]9;4;1;50\x07\x1b]9;9;C:\\\x07"), []);
+    }
+
+    #[test]
     fn blocks_record_command_output_and_exit_code() {
         let mut term = Term::new(Config::default(), &term_size((40, 10)), VoidListener);
         let mut blocks = Blocks::default();
@@ -488,6 +544,37 @@ mod tests {
         assert_eq!(done[1].exit_code, Some(3));
         // El último prompt queda abierto, esperando un comando.
         assert_eq!(blocks.list.last().unwrap().end, None);
+    }
+
+    #[test]
+    fn empty_enters_and_clear_leave_no_blocks() {
+        let mut term = Term::new(Config::default(), &term_size((40, 10)), VoidListener);
+        let mut blocks = Blocks::default();
+        let prompt: &[u8] = b"\x1b]133;A\x07PS> \x1b]133;B\x07";
+        // Enter vacío real: PSReadLine manda C aunque no escribiste nada, y la shell D sin código.
+        let empty: &[u8] = b"\x1b]133;C\x07\r\n\x1b]133;D\x07";
+        run(
+            &mut term,
+            &mut blocks,
+            &[prompt, empty, prompt, empty, prompt],
+        );
+        assert_eq!(blocks.list.len(), 1, "solo el prompt abierto");
+
+        // Dos comandos y después `clear`: Clear-Host borra la pantalla *y* el historial (ESC[3J),
+        // y el prompt vuelve arriba.
+        let echo: &[u8] = b"echo a\r\n\x1b]133;C\x07a\r\n\x1b]133;D;0\x07";
+        let clear: &[u8] = b"clear\r\n\x1b]133;C\x07\x1b[H\x1b[2J\x1b[3J\x1b]133;D;0\x07";
+        run(
+            &mut term,
+            &mut blocks,
+            &[echo, prompt, echo, prompt, clear, prompt],
+        );
+        assert_eq!(
+            blocks.list.len(),
+            1,
+            "después de clear no quedan bloques viejos"
+        );
+        assert_eq!(blocks.list[0].prompt, 0);
     }
 
     #[test]
@@ -531,9 +618,10 @@ mod tests {
                 match piece {
                     Piece::Data(bytes) => processor.advance(&mut term, &bytes),
                     Piece::Mark(mark) => {
+                        let ready = mark == Mark::CommandStart;
                         blocks.on_mark(mark, &term);
                         // Escribimos el comando recién cuando el primer prompt está listo (marca B).
-                        if mark == Mark::CommandStart && !typed {
+                        if ready && !typed {
                             typed = true;
                             shell
                                 .writer

@@ -5,7 +5,7 @@
 
 use super::render::BlockAction;
 use crate::blocks::{
-    Blocks, MarkScanner, Piece, Status, grid_line_of, neighbor_block, scroll_to_show,
+    Blocks, Mark, MarkScanner, Piece, Status, grid_line_of, neighbor_block, scroll_to_show,
 };
 use crate::grid::term_size;
 use crate::input::{key_bytes, paste_bytes};
@@ -15,7 +15,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor};
 use eframe::egui;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::Write;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -58,7 +58,18 @@ pub(super) struct Session {
     pub(super) id: u64,
     /// Se pidió dividir este panel desde el menú de clic derecho: Some(true) = a la derecha.
     pub(super) split_request: Option<bool>,
+    /// Campana (BEL) del Term; se lee en `process_output`.
+    bell: Rc<Cell<bool>>,
+    /// Algo pidió atención en este frame (un aviso, la campana o un comando largo que terminó).
+    /// La app decide si lo estás mirando; si no, lo pasa a `attention`.
+    pub(super) alert: Option<String>,
+    /// Pide atención y todavía no lo miraste: marca la pestaña y el panel. El texto va en el tooltip.
+    pub(super) attention: Option<String>,
 }
+
+/// Un comando que terminó en una pestaña que no miras avisa solo si tardó al menos esto
+/// (que `dir` termine no es noticia; que termine un build de 2 minutos, sí).
+const LONG_COMMAND: Duration = Duration::from_secs(10);
 
 /// Tiempo máximo por frame para procesar salida de la shell. El resto queda para el próximo frame.
 /// A ~60 MB/s son unos 600 KB por frame: de sobra para cualquier uso normal.
@@ -90,9 +101,11 @@ impl Session {
             ..Config::default()
         };
         let title = Rc::new(RefCell::new(None));
+        let bell = Rc::new(Cell::new(false));
         let replies = Replies {
             writer: shell.writer.clone(),
             title: title.clone(),
+            bell: bell.clone(),
         };
         let term = Term::new(config, &term_size(grid), replies);
         Ok(Self {
@@ -114,6 +127,9 @@ impl Session {
             kind,
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             split_request: None,
+            bell,
+            alert: None,
+            attention: None,
         })
     }
 
@@ -146,9 +162,21 @@ impl Session {
             for piece in self.marks.feed(&chunk) {
                 match piece {
                     Piece::Data(bytes) => self.processor.advance(&mut self.term, &bytes),
+                    Piece::Mark(Mark::Notify(text)) => self.alert = Some(text),
                     // La marca se aplica al llegar: el cursor está justo donde la shell la puso.
-                    Piece::Mark(mark) => self.blocks.on_mark(mark, &self.term),
+                    Piece::Mark(mark) => {
+                        let finished = matches!(mark, Mark::Finished(_));
+                        self.blocks.on_mark(mark, &self.term);
+                        if let Some(block) = self.blocks.list.last().filter(|_| finished)
+                            && block.duration.is_some_and(|d| d >= LONG_COMMAND)
+                        {
+                            self.alert = Some(format!("Terminó: {}", block.command));
+                        }
+                    }
                 }
+            }
+            if self.bell.take() {
+                self.alert.get_or_insert_with(|| "Pide atención".into());
             }
             self.blocks.after_output(&self.term);
             // Un `cls` vacía la lista: la marca no puede quedar apuntando a un bloque que ya no existe.

@@ -323,10 +323,27 @@ impl Orion {
                 }
 
                 // Punto de estado: cómo terminó el último comando (o amarillo si algo corre).
-                let dot = session
-                    .activity()
-                    .map_or(theme().ansi[8], render::status_color);
-                painter.circle_filled(rect.left_center() + egui::vec2(14.0, 0.0), 3.5, dot);
+                // Si un panel de la pestaña pide atención, el punto es azul y late.
+                let center = rect.left_center() + egui::vec2(14.0, 0.0);
+                let alert = tab
+                    .panes
+                    .leaves()
+                    .into_iter()
+                    .find_map(|s| s.attention.clone());
+                if alert.is_some() {
+                    let t = ui.input(|i| i.time) as f32;
+                    let pulse = (t * 4.0).sin() * 0.5 + 0.5; // de 0 a 1 y vuelta
+                    let ring = theme().ansi[4].gamma_multiply(0.35 * (1.0 - pulse));
+                    painter.circle_filled(center, 4.0 + 4.0 * pulse, ring);
+                    painter.circle_filled(center, 4.0, theme().ansi[4]);
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(50));
+                } else {
+                    let dot = session
+                        .activity()
+                        .map_or(theme().ansi[8], render::status_color);
+                    painter.circle_filled(center, 3.5, dot);
+                }
 
                 // × a la derecha, solo al pasar el mouse por la fila.
                 let close_rect = egui::Rect::from_center_size(
@@ -367,12 +384,15 @@ impl Orion {
                 if close.on_hover_text("Cerrar pestaña").clicked() {
                     action = Some(Action::CloseTab(i));
                 }
-                let tip = match session.last_command() {
+                let mut tip = match session.last_command() {
                     Some(command) => {
                         format!("Último comando: {command}\nClic del medio para cerrar")
                     }
                     None => "Clic del medio para cerrar".into(),
                 };
+                if let Some(alert) = &alert {
+                    tip = format!("🔔 {alert}\n{tip}");
+                }
                 let row = row.on_hover_text(tip);
                 if row.clicked() {
                     action = Some(Action::SelectTab(i));
@@ -555,6 +575,33 @@ impl Orion {
         }
     }
 
+    /// Avisos de este frame: los del panel que estás mirando se descartan (ya lo ves);
+    /// los demás marcan su pestaña y panel. Si Orion no está en primer plano, parpadea en la barra de tareas.
+    fn collect_alerts(&mut self, ctx: &egui::Context) {
+        let (active, focused) = (self.active, self.focused);
+        let mut new_alert = false;
+        for (t, tab) in self.tabs.iter_mut().enumerate() {
+            let focus = tab.focus;
+            for session in tab.panes.leaves_mut() {
+                let Some(alert) = session.alert.take() else {
+                    continue;
+                };
+                if !(focused && t == active && session.id == focus) {
+                    session.attention = Some(alert);
+                    new_alert = true;
+                }
+            }
+        }
+        // Lo que estás mirando ya no pide atención.
+        if focused {
+            self.session().attention = None;
+        }
+        if new_alert && !focused {
+            let blink = egui::UserAttentionType::Informational;
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(blink));
+        }
+    }
+
     /// Dibuja los paneles de la pestaña activa en `area`.
     /// Devuelve true si algún panel pidió abrir la configuración.
     fn draw_panes(&mut self, ui: &mut egui::Ui, area: egui::Rect) -> bool {
@@ -593,6 +640,12 @@ impl Orion {
                 // Los paneles sin foco, un poco más oscuros: se ve dónde vas a escribir.
                 let dim = egui::Color32::from_black_alpha(60);
                 ui.painter().rect_filled(rect, 0.0, dim);
+            }
+            if session.attention.is_some() {
+                // Un panel de al lado pide atención: borde azul.
+                let stroke = egui::Stroke::new(2.0, theme().ansi[4]);
+                ui.painter()
+                    .rect_stroke(rect.shrink(1.0), 4.0, stroke, egui::StrokeKind::Inside);
             }
             if let Some(right) = session.split_request.take() {
                 tab.focus = id;
@@ -653,6 +706,7 @@ impl eframe::App for Orion {
             }
         }
         self.watch_config(ctx);
+        self.collect_alerts(ctx);
         // Resultado de buscar actualizaciones a mano.
         match self.updater.state() {
             UpdateState::UpToDate if self.update_asked => {
