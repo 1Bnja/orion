@@ -236,8 +236,11 @@ mod tests {
         );
         let err = parse_settings("theme = 'Nope'").err().unwrap();
         assert!(err.contains("Nope"), "{err}");
-        assert_eq!(parse_settings("shell = 'wsl'").unwrap().shell, "WSL");
-        assert!(parse_settings("shell = 'fish'").is_err());
+        // La shell, escrita como en la lista (las de Windows y Mac son distintas: se usa la última).
+        let last = SHELLS[SHELLS.len() - 1].name;
+        let text = format!("shell = '{}'", last.to_lowercase());
+        assert_eq!(parse_settings(&text).unwrap().shell, last);
+        assert!(parse_settings("shell = 'nada'").is_err());
         assert_eq!(
             parse_settings("backdrop = 'acrilico'").unwrap().backdrop,
             "Acrílico"
