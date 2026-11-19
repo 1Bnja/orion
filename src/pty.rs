@@ -270,6 +270,24 @@ mod tests {
     }
 
     #[test]
+    fn shift_enter_adds_a_line_in_powershell() {
+        let (shell, rx) = start(&shell_args(&["-NoProfile", "-NoLogo"]));
+        let mut out = String::new();
+        wait_for(&rx, &mut out, "\x1b]133;B\x07");
+        // Lo que manda Orion con Shift+Enter (ESC + Enter) entre dos comandos, y después Enter.
+        let typed = b"echo aaa\x1b\recho bbb\r";
+        shell.writer.borrow_mut().write_all(typed).unwrap();
+        wait_for(&rx, &mut out, "\x1b]133;D;0\x07");
+        // ">> " = PSReadLine abrió una segunda línea en vez de ejecutar la primera.
+        assert!(
+            out.contains(">> "),
+            "Shift+Enter no agregó una línea: {out:?}"
+        );
+        let mut shell = shell;
+        let _ = shell.child.kill();
+    }
+
+    #[test]
     fn other_shells_run_too() {
         // cmd viene con Windows: siempre está.
         let cmd = find_shell("CMD").unwrap();

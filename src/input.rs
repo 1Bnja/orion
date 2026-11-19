@@ -35,6 +35,10 @@ pub(crate) fn key_bytes(
         .into_bytes()
     };
     Some(match key {
+        // Shift+Enter (y Alt+Enter) = ESC + CR: "nueva línea sin enviar". Lo entienden los agentes;
+        // PowerShell también, porque la integración le asigna Alt+Enter a AddLine.
+        // (Shift no sirve por sí solo: al pasar por la consola de Windows, las apps de Node lo pierden.)
+        Enter if mods.shift || mods.alt => b"\x1b\r".to_vec(),
         Enter => b"\r".to_vec(), // las terminales mandan CR, no LF
         // Ctrl+Backspace = ^H (borrar palabra en PSReadLine).
         Backspace if mods.ctrl => vec![0x08],
@@ -141,6 +145,7 @@ mod tests {
         let none = Modifiers::NONE;
         let key = |k, m| key_bytes(k, m, false).unwrap();
         assert_eq!(key(Key::Enter, none), b"\r");
+        assert_eq!(key(Key::Enter, egui::Modifiers::SHIFT), b"\x1b\r"); // nueva línea
         assert_eq!(key(Key::ArrowUp, none), b"\x1b[A");
         assert_eq!(key(Key::D, Modifiers::CTRL), [0x04]);
         assert_eq!(key_bytes(Key::A, none, false), None); // la 'a' llega como Event::Text

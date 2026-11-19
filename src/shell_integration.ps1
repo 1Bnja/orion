@@ -57,6 +57,12 @@ if ($readLine -and $readLine.Version -ge [version]'2.1') {
     Set-PSReadLineOption -Colors @{ InlinePrediction = "$([char]27)[90m" }
 }
 
+# Shift+Enter en Orion = nueva línea sin ejecutar. Orion lo manda como Alt+Enter (ESC + Enter), que es
+# lo que entienden también los agentes de código; acá le decimos a PSReadLine que haga lo mismo.
+if ($readLine) {
+    Set-PSReadLineKeyHandler -Chord Alt+Enter -Function AddLine
+}
+
 # PSReadLine lee lo que escribes con esta función. La envolvemos para marcar el momento del Enter.
 if (Test-Path Function:\PSConsoleHostReadLine) {
     $Global:__OrionReadLine = $function:PSConsoleHostReadLine
