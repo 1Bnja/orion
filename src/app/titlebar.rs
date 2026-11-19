@@ -9,6 +9,56 @@ const HEIGHT: f32 = 34.0;
 /// Ancho de cada botón de la ventana (como los de Windows 11).
 const WINDOW_BUTTON: f32 = 46.0;
 
+#[derive(Clone, Copy)]
+enum Icon {
+    Gear,
+    Palette,
+    Split,
+    Theme,
+}
+
+/// Íconos dibujados con líneas, centrados en `c`: con letras de fuentes distintas cada uno
+/// quedaba a otra altura.
+fn draw_icon(painter: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
+    let stroke = Stroke::new(1.3, color);
+    match icon {
+        Icon::Gear => {
+            painter.circle_stroke(c, 3.2, stroke);
+            for i in 0..8 {
+                let angle = i as f32 * std::f32::consts::TAU / 8.0;
+                let dir = vec2(angle.cos(), angle.sin());
+                painter.line_segment([c + dir * 5.0, c + dir * 7.0], Stroke::new(2.0, color));
+            }
+            painter.circle_stroke(c, 5.2, stroke);
+        }
+        Icon::Palette => {
+            // Un prompt dentro de un recuadro: ">_".
+            let r = Rect::from_center_size(c, vec2(14.0, 12.0));
+            painter.rect_stroke(r, 2.5, stroke, egui::StrokeKind::Inside);
+            let o = r.min + vec2(3.5, 3.5);
+            painter.line_segment([o, o + vec2(2.5, 2.5)], stroke);
+            painter.line_segment([o + vec2(2.5, 2.5), o + vec2(0.0, 5.0)], stroke);
+            painter.hline(o.x + 4.5..=o.x + 7.5, o.y + 5.0, stroke);
+        }
+        Icon::Split => {
+            let r = Rect::from_center_size(c, vec2(14.0, 12.0));
+            painter.rect_stroke(r, 2.5, stroke, egui::StrokeKind::Inside);
+            painter.vline(c.x, r.y_range(), stroke);
+        }
+        Icon::Theme => {
+            // Medio círculo lleno: claro / oscuro.
+            painter.circle_stroke(c, 6.0, stroke);
+            let half: Vec<Pos2> = (0..=16)
+                .map(|i| {
+                    let a = std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 16.0;
+                    c + vec2(a.cos(), a.sin()) * 6.0
+                })
+                .collect();
+            painter.add(egui::Shape::convex_polygon(half, color, Stroke::NONE));
+        }
+    }
+}
+
 impl Orion {
     pub(super) fn title_bar(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
@@ -54,32 +104,30 @@ impl Orion {
                 let next_theme = (crate::colors::find_theme(&self.settings.theme).unwrap_or(0) + 1)
                     % crate::colors::THEMES.len();
                 let buttons = [
-                    ("⚙", "Configuración   Ctrl+,", Action::OpenSettings),
-                    ("⌘", "Paleta de comandos   Ctrl+Shift+P", Action::Palette),
+                    (Icon::Gear, "Configuración   Ctrl+,", Action::OpenSettings),
                     (
-                        "◫",
+                        Icon::Palette,
+                        "Paleta de comandos   Ctrl+Shift+P",
+                        Action::Palette,
+                    ),
+                    (
+                        Icon::Split,
                         "Dividir a la derecha   Ctrl+Shift+D",
                         Action::Split(true),
                     ),
-                    ("◐", "Cambiar de tema", Action::Theme(next_theme)),
+                    (Icon::Theme, "Cambiar de tema", Action::Theme(next_theme)),
                 ];
                 let mut x = bar.min.x + 86.0;
                 for (icon, tip, act) in buttons {
                     let r = Rect::from_center_size(Pos2::new(x, mid), vec2(28.0, 26.0));
-                    let button = ui.interact(r, ui.scope_id().with(icon), Sense::click());
+                    let button = ui.interact(r, ui.scope_id().with(tip), Sense::click());
                     let color = if button.hovered() {
                         ui.painter().rect_filled(r, 6.0, theme().hover());
                         theme().fg
                     } else {
                         theme().ansi[7]
                     };
-                    ui.painter().text(
-                        r.center(),
-                        egui::Align2::CENTER_CENTER,
-                        icon,
-                        egui::FontId::proportional(15.0),
-                        color,
-                    );
+                    draw_icon(ui.painter(), icon, r.center(), color);
                     if button.on_hover_text(tip).clicked() {
                         action = Some(act);
                     }
