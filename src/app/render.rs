@@ -276,6 +276,20 @@ impl Session {
                     area.max - egui::vec2(PADDING, PADDING),
                 );
 
+                // El teclado es de la terminal, como en un cuadro de texto. Sin esto, egui usa Tab para
+                // mover el foco entre botones: al autocompletar con Tab, el foco caía en "+ Nueva pestaña"
+                // y el Enter siguiente lo "apretaba". Con el menú o la paleta abiertos, el foco es de ellos.
+                if active && !menu_open {
+                    response.request_focus();
+                    let keys = egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    };
+                    ui.memory_mut(|m| m.set_focus_lock_filter(response.id, keys));
+                }
+
                 // ¿La app pidió el mouse? (vim, btop, lazygit…) Shift+mouse sigue seleccionando, como en otras terminales.
                 let mode = *self.term.mode();
                 let shift = ui.input(|i| i.modifiers.shift);
