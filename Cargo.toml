@@ -1,6 +1,6 @@
 [package]
 name = "orion"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Una terminal simple para Windows 11"
 license = "MIT"
