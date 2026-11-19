@@ -1,4 +1,4 @@
-//! Bloques de comandos (estilo Warp): detectar las marcas OSC 133 que manda la shell
+//! Bloques de comandos: detectar las marcas OSC 133 que manda la shell
 //! y armar, para cada comando, qué se escribió, dónde está su salida, su código y su duración.
 //!
 //! Las marcas las pone `shell_integration.ps1`:

@@ -266,7 +266,7 @@ impl Session {
                 }
                 egui::Event::Text(t) => t.into_bytes(),
                 egui::Event::Paste(t) => paste_bytes(&t, bracketed),
-                // egui convierte Ctrl+C en Copy. Como en Windows Terminal: si hay selección (o un bloque
+                // egui convierte Ctrl+C en Copy. Si hay selección (o un bloque
                 // marcado) copia; si no, es la interrupción de siempre (ETX).
                 egui::Event::Copy => {
                     if self.copy(ui.ctx()) {
@@ -275,7 +275,7 @@ impl Session {
                     vec![0x03]
                 }
                 egui::Event::Cut => vec![0x18],
-                // Ctrl+Shift+C / Ctrl+Shift+V: los atajos de Ghostty/Warp/Linux.
+                // Ctrl+Shift+C / Ctrl+Shift+V: copiar y pegar sin chocar con Ctrl+C (interrumpir).
                 egui::Event::Key {
                     key: egui::Key::C,
                     pressed: true,

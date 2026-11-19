@@ -229,5 +229,6 @@ mod tests {
         std::fs::write("assets/orion.ico", ico).unwrap();
         // Vista previa en grande (RGBA crudo de 512×512) para mirarlo sin abrir la app.
         std::fs::write("target/icon-512.rgba", render(512)).unwrap();
+        // El PNG del README (assets/orion.png) se arma desde ese archivo con scripts/icon-png.ps1.
     }
 }

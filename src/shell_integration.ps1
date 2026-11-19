@@ -1,7 +1,7 @@
 # Integración de Orion con PowerShell.
 #
-# Marca dónde empieza y termina cada comando con secuencias OSC 133 (el estándar "FinalTerm"
-# que usan VS Code, Windows Terminal, WezTerm, Ghostty y Warp). Orion las lee para armar los bloques:
+# Marca dónde empieza y termina cada comando con secuencias OSC 133 (un estándar de las terminales).
+# Orion las lee para armar los bloques:
 #
 #   ESC]133;A BEL   empieza el prompt
 #   ESC]133;B BEL   termina el prompt: lo que sigue es el comando que escribes
@@ -10,7 +10,7 @@
 #
 # Además pone el título (OSC 0) con el nombre de la carpeta actual: es lo que muestra la pestaña.
 #
-# Se carga después de tu perfil, así que envuelve el prompt que ya tengas (oh-my-posh, Starship, etc.).
+# Se carga después de tu perfil, así que envuelve el prompt que ya tengas, aunque sea uno personalizado.
 
 $Global:__OrionPrompt = $function:prompt
 $Global:__OrionLastId = -1  # -1 = todavía no se mostró ningún prompt

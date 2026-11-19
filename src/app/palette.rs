@@ -1,5 +1,5 @@
 //! Paleta de comandos (Ctrl+Shift+P): buscar cualquier acción de Orion por su nombre,
-//! como en VS Code o Warp. Cada entrada muestra su atajo: así se aprenden sin memorizarlos.
+//! Cada entrada muestra su atajo: así se aprenden sin memorizarlos.
 
 use super::{Action, Orion};
 use crate::colors::theme;

@@ -229,7 +229,7 @@ impl Orion {
         }
     }
 
-    /// Barra lateral de pestañas (como las pestañas verticales de Warp, pero más simple):
+    /// Barra lateral de pestañas:
     /// "+ Nueva pestaña" arriba y una fila por pestaña con un punto de estado y el nombre de la carpeta.
     /// Se puede ensanchar o angostar arrastrando su borde.
     fn tab_sidebar(&self, ui: &mut egui::Ui) -> Option<Action> {
@@ -376,7 +376,7 @@ impl Orion {
             if i.consume_key(ctrl_shift, Key::T) {
                 return Some(Action::NewTab(None));
             }
-            // Splits (como en Warp): D = a la derecha, E = hacia abajo. W cierra el panel.
+            // Splits: D = a la derecha, E = hacia abajo. W cierra el panel.
             if i.consume_key(ctrl_shift, Key::D) {
                 return Some(Action::Split(true));
             }
@@ -624,7 +624,7 @@ impl eframe::App for Orion {
             }
         }
 
-        // Ctrl+, abre o cierra la configuración (como en VS Code); Escape la cierra.
+        // Ctrl+, abre o cierra la configuración; Escape la cierra.
         let (toggle, escape) = ui.input(|i| {
             let toggle = i.modifiers.ctrl && i.key_pressed(egui::Key::Comma);
             (toggle, i.key_pressed(egui::Key::Escape))

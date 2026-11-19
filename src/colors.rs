@@ -137,13 +137,13 @@ impl Theme {
     }
 }
 
-/// "Dim" (SGR 2) = el color a 2/3 de intensidad, igual que Alacritty.
+/// "Dim" (SGR 2) = el color a 2/3 de intensidad.
 pub(crate) fn dim(c: Color32) -> Color32 {
     let f = |v: u8| (v as f32 * 2.0 / 3.0) as u8;
     Color32::from_rgb(f(c.r()), f(c.g()), f(c.b()))
 }
 
-/// Color por índice cuando la app no lo redefinió. Numeración de xterm + los extras de Alacritty.
+/// Color por índice cuando la app no lo redefinió. Numeración de xterm + los colores con nombre de alacritty_terminal.
 pub(crate) fn default_color(idx: usize) -> Color32 {
     // El cubo 6x6x6 usa estos 6 niveles por canal.
     let level = |v: usize| if v == 0 { 0 } else { (55 + 40 * v) as u8 };

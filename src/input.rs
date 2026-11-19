@@ -36,7 +36,7 @@ pub(crate) fn key_bytes(
     };
     Some(match key {
         Enter => b"\r".to_vec(), // las terminales mandan CR, no LF
-        // Ctrl+Backspace = ^H (borrar palabra en PSReadLine, igual que en Windows Terminal).
+        // Ctrl+Backspace = ^H (borrar palabra en PSReadLine).
         Backspace if mods.ctrl => vec![0x08],
         Backspace => vec![0x7f],
         Tab if mods.shift => b"\x1b[Z".to_vec(), // Shift+Tab: completar hacia atrás

@@ -42,7 +42,7 @@ pub(crate) const BLINK: Duration = Duration::from_millis(530);
 
 /// Margen a la izquierda del texto: ahí va la barra de color de cada bloque.
 const GUTTER: f32 = 16.0;
-/// Aire entre el texto y los bordes de la ventana (arriba, derecha y abajo), como `window-padding` de Ghostty.
+/// Aire entre el texto y los bordes de la ventana (arriba, derecha y abajo).
 const PADDING: f32 = 10.0;
 
 /// Borde de arriba de cada fila en pantalla. Antes de cada fila de `gap_rows` (prompts de bloques)
@@ -362,7 +362,7 @@ impl Session {
                     let _ = self.shell.writer.borrow_mut().write_all(&report);
                 }
 
-                // --- Dónde va cada fila: con aire antes de cada bloque, como en Warp ---
+                // --- Dónde va cada fila: con aire antes de cada bloque ---
                 let views = self.block_views();
                 let gap = (cell.y * 0.6).round();
                 let gap_rows: Vec<usize> = views
@@ -712,7 +712,7 @@ impl Session {
                         Duration::from_millis((since.as_millis() % BLINK.as_millis()) as u64);
                     ui.ctx().request_repaint_after(BLINK - phase);
                 }
-                // Sin foco, cursor hueco y fijo (como Alacritty/Ghostty): se ve dónde estás, sin distraer.
+                // Sin foco, cursor hueco y fijo: se ve dónde estás, sin distraer.
                 let shape = match cursor.shape {
                     CursorShape::Hidden => CursorShape::Hidden,
                     _ if !focused => CursorShape::HollowBlock,

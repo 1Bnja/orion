@@ -27,7 +27,7 @@ theme = {theme}
 shell = {shell}
 
 [font]
-# Nombre de una fuente instalada (igual que en VS Code), o la ruta a un archivo .ttf/.otf.
+# Nombre de una fuente instalada (como aparece en Windows), o la ruta a un archivo .ttf/.otf.
 # Ejemplos: "Cascadia Mono", "Monocraft", 'C:\fuentes\MiFuente.ttf'
 family = {family}
 # Las fuentes pixeladas se ven nítidas en múltiplos de su grilla (Monocraft: 18, 27…).
