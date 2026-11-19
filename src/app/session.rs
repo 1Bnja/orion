@@ -411,7 +411,10 @@ mod tests {
         let command = "'ok' | Set-Content listo.txt";
         session.write(crate::agents::launch_input(shell, Some(&dir), command).as_bytes());
         let start = Instant::now();
-        while !dir.join("listo.txt").exists() || session.cwd.as_deref() != Some(dir.as_path()) {
+        // Comparadas ya resueltas: TEMP puede venir con nombres cortos (RUNNER~1) y la shell da los largos.
+        let same =
+            |a: &std::path::Path| std::fs::canonicalize(a).ok() == std::fs::canonicalize(&dir).ok();
+        while !dir.join("listo.txt").exists() || !session.cwd.as_deref().is_some_and(same) {
             assert!(
                 start.elapsed() < Duration::from_secs(20),
                 "cwd: {:?}",
