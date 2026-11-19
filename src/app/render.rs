@@ -559,7 +559,8 @@ impl Session {
                     painter.rect_filled(bar, 1.5, status_color(status));
                 }
 
-                for (row, cells) in visible_rows(&self.term).iter().enumerate() {
+                let screen = visible_rows(&self.term);
+                for (row, cells) in screen.iter().enumerate() {
                     if hidden[row] {
                         continue; // salida de un bloque colapsado
                     }
@@ -629,10 +630,19 @@ impl Session {
                     let color = status_color(view.status);
                     let galley = painter.layout_no_wrap(label, small.clone(), color);
                     let row_top = tops[view.first];
-                    let pos = egui::pos2(
+                    let mut pos = egui::pos2(
                         rect.max.x - 4.0 - galley.size().x,
                         row_top + (cell.y - galley.size().y) / 2.0,
                     );
+                    // Si el comando llega hasta donde va la etiqueta, la etiqueta sube al aire entre
+                    // bloques (sobre la línea separadora) para no tapar el texto.
+                    let text_end = screen[view.first]
+                        .iter()
+                        .rposition(|c| c.c != ' ' && !is_spacer(c))
+                        .map_or(rect.min.x, |col| rect.min.x + (col + 1) as f32 * cell.x);
+                    if view.first > 0 && text_end + 12.0 > pos.x {
+                        pos.y = (row_top - gap / 2.0 - galley.size().y / 2.0).round();
+                    }
                     let pill =
                         egui::Rect::from_min_size(pos, galley.size()).expand2(egui::vec2(6.0, 1.0));
                     // Clic en la etiqueta: colapsar o expandir el bloque.
