@@ -20,11 +20,13 @@ mod grid;
 mod icon;
 mod input;
 mod pty;
+mod update;
 
 fn main() -> Result<(), pty::Error> {
     // Tamaño inicial; se corrige en el primer frame, cuando ya sabemos cuánto mide la ventana.
     let grid = (80, 24);
 
+    update::clean_up(); // borra el .exe viejo si venimos de una actualización
     let settings = config::load_settings();
     // Para saber qué se aplicó: útil al probar fuentes nuevas.
     if let Some(path) = config::config_path() {

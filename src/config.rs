@@ -20,6 +20,7 @@ pub(crate) fn config_text(settings: &Settings) -> String {
     let backdrop = toml::Value::String(settings.backdrop.clone());
     let backdrops: Vec<&str> = BACKDROPS.iter().map(|b| b.0).collect();
     let backdrops = backdrops.join(", ");
+    let check_updates = settings.check_updates;
     format!(
         r#"# Configuración de Orion. Se puede editar aquí o desde el menú (Ctrl+, o clic derecho).
 # Si editas a mano, los cambios se aplican apenas guardas el archivo.
@@ -29,6 +30,8 @@ theme = {theme}
 # Fondo de Windows 11 detrás de la terminal. Hay: {backdrops}.
 # Mica toma un tinte suave de tu fondo de pantalla; acrílico desenfoca lo que hay detrás de la ventana.
 backdrop = {backdrop}
+# Al abrir, buscar si hay una versión nueva de Orion (se instala solo si tú lo pides).
+check_updates = {check_updates}
 # Shell de las pestañas nuevas (Ctrl+Shift+T). Hay: {shells}.
 # Para abrir otra solo una vez: clic derecho en "+ Nueva pestaña", o la paleta (Ctrl+Shift+P).
 shell = {shell}
@@ -62,6 +65,8 @@ pub(crate) struct Settings {
     pub(crate) shell: String,
     /// Nombre de uno de los fondos de `backdrop::BACKDROPS`.
     pub(crate) backdrop: String,
+    /// Al abrir, revisar si hay una versión nueva en GitHub.
+    pub(crate) check_updates: bool,
     pub(crate) font: FontSettings,
 }
 
@@ -71,6 +76,7 @@ impl Default for Settings {
             theme: THEMES[0].name.into(),
             shell: SHELLS[0].name.into(),
             backdrop: BACKDROPS[0].0.into(),
+            check_updates: true,
             font: FontSettings::default(),
         }
     }

@@ -14,6 +14,7 @@ use crate::colors::{opaque, surface, theme};
 use crate::config::{Settings, config_modified, reload_settings};
 use crate::fonts::{apply_font, is_font_file};
 use crate::pty::{Error, SHELLS, find_shell, installed_shells, usable_shell};
+use crate::update::{self, State as UpdateState, Updater};
 use alacritty_terminal::term::TermMode;
 use eframe::egui;
 use menu::SettingsMenu;
@@ -75,6 +76,10 @@ pub(crate) struct Orion {
     perf: Option<Perf>,
     /// La ventana para Windows (HWND): para pedirle Mica o acrílico.
     hwnd: Option<isize>,
+    updater: Updater,
+    /// Buscaste actualizaciones a mano: avisar también si está al día o si falló.
+    /// (La revisión automática al abrir es silenciosa: sin internet no hay nada que molestar.)
+    update_asked: bool,
 }
 
 /// Medidor de rendimiento (paleta → "Mostrar rendimiento"): cuánto tarda cada frame y cuántos hay por segundo.
@@ -131,6 +136,10 @@ enum Action {
     TogglePerf,
     /// Usar el fondo con ese índice en `backdrop::BACKDROPS`.
     Backdrop(usize),
+    CheckUpdates,
+    /// Bajar e instalar esa versión.
+    InstallUpdate(String),
+    RestartForUpdate,
 }
 
 impl Orion {
@@ -156,8 +165,14 @@ impl Orion {
             config_checked: Instant::now(),
             perf: None,
             hwnd: crate::backdrop::hwnd_of(cc),
+            updater: Updater::new(),
+            update_asked: false,
         };
         orion.apply_window_look();
+        // Al abrir, revisar si hay una versión nueva. En debug (`cargo run`) no: sería la del .exe de desarrollo.
+        if orion.settings.check_updates && !cfg!(debug_assertions) {
+            orion.updater.check(&cc.egui_ctx);
+        }
         Ok(orion)
     }
 
@@ -367,6 +382,38 @@ impl Orion {
                 }
                 ui.add_space(2.0);
             }
+
+            // Abajo de todo: el aviso de actualización, si hay una.
+            let (text, next) = match self.updater.state() {
+                UpdateState::Available(v) => (
+                    format!("↑  Actualizar a {v}"),
+                    Some(Action::InstallUpdate(v)),
+                ),
+                UpdateState::Installing(v) => (format!("Descargando {v}…"), None),
+                UpdateState::Ready => ("↻  Reiniciar Orion".into(), Some(Action::RestartForUpdate)),
+                _ => return,
+            };
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                let (rect, row) =
+                    ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::CLICK);
+                if row.hovered() && next.is_some() {
+                    ui.painter().rect_filled(rect, 6.0, theme().hover());
+                }
+                let pos = rect.left_center() + egui::vec2(10.0, 0.0);
+                let color = theme().ansi[2];
+                ui.painter()
+                    .text(pos, egui::Align2::LEFT_CENTER, text, font.clone(), color);
+                let tip = match next {
+                    Some(Action::RestartForUpdate) => {
+                        "Se cierran las pestañas y Orion abre la versión nueva"
+                    }
+                    Some(_) => "Descarga la versión nueva, la verifica y la deja lista",
+                    None => "Puedes seguir usando Orion mientras tanto",
+                };
+                if row.on_hover_text(tip).clicked() {
+                    action = next;
+                }
+            });
         });
         action
     }
@@ -461,6 +508,15 @@ impl Orion {
                     Some(Perf::new())
                 };
             }
+            Action::CheckUpdates => {
+                self.update_asked = true;
+                self.updater.check(ctx);
+            }
+            Action::InstallUpdate(version) => self.updater.install(ctx, version),
+            Action::RestartForUpdate => match update::restart() {
+                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => self.show_toast(format!("No pude reiniciar: {e}")),
+            },
             Action::Backdrop(i) => {
                 let mut new = self.settings.clone();
                 new.backdrop = crate::backdrop::BACKDROPS[i].0.into();
@@ -597,6 +653,24 @@ impl eframe::App for Orion {
             }
         }
         self.watch_config(ctx);
+        // Resultado de buscar actualizaciones a mano.
+        match self.updater.state() {
+            UpdateState::UpToDate if self.update_asked => {
+                self.show_toast(format!("Orion está al día ({})", update::CURRENT));
+                self.update_asked = false;
+            }
+            UpdateState::CheckFailed(e) if self.update_asked => {
+                self.show_toast(format!("Actualización: {e}"));
+                self.update_asked = false;
+                self.updater.dismiss();
+            }
+            // Instalar siempre lo pediste con un clic: el error se muestra siempre.
+            UpdateState::Failed(e) => {
+                self.show_toast(format!("Actualización: {e}"));
+                self.updater.dismiss();
+            }
+            _ => {}
+        }
         // El título de la ventana sigue al del panel con foco.
         let title = format!("{} — Orion", self.session().title());
         if title != self.window_title {
