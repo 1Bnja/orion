@@ -2,7 +2,8 @@
 //!
 //! Cada figura es una "función de distancia" (SDF): para cada píxel, cuánto falta para llegar al borde
 //! (negativo = adentro). Con eso el borde sale suave (antialiasing) en cualquier tamaño, de 16 a 256 px.
-//! Se usa para el ícono de la ventana y, con `to_ico`, para generar assets/orion.ico (el del .exe).
+//! Se usa para el ícono de la ventana, con `to_ico` para generar assets/orion.ico (el del .exe) y con
+//! `to_png` para el .icns de Orion.app (lo arma scripts/package-macos.sh).
 
 use std::f32::consts::{PI, TAU};
 
@@ -187,6 +188,70 @@ pub(crate) fn to_ico(sizes: &[u32]) -> Vec<u8> {
     ico
 }
 
+/// El ícono de `size`×`size` px como PNG (RGBA de 8 bits), para el .icns de macOS.
+/// Sin comprimir (bloques "stored" de zlib): `scripts/package-macos.sh` lo recomprime con `sips`.
+#[cfg(test)]
+pub(crate) fn to_png(size: u32) -> Vec<u8> {
+    let rgba = render(size);
+    // Cada fila lleva adelante su tipo de filtro: 0 = ninguno.
+    let mut raw = Vec::with_capacity(rgba.len() + size as usize);
+    for row in rgba.chunks(size as usize * 4) {
+        raw.push(0);
+        raw.extend(row);
+    }
+    // zlib: cabecera, bloques de hasta 65535 bytes tal cual y el checksum Adler-32.
+    let mut zlib = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(65535).collect();
+    for (i, block) in blocks.iter().enumerate() {
+        zlib.push(u8::from(i + 1 == blocks.len())); // 1 = último bloque
+        let len = block.len() as u16;
+        zlib.extend(len.to_le_bytes());
+        zlib.extend((!len).to_le_bytes());
+        zlib.extend(*block);
+    }
+    zlib.extend(adler32(&raw).to_be_bytes());
+
+    let mut ihdr = Vec::new();
+    ihdr.extend(size.to_be_bytes());
+    ihdr.extend(size.to_be_bytes());
+    ihdr.extend([8, 6, 0, 0, 0]); // 8 bits, RGBA, compresión/filtro/entrelazado estándar
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    for (kind, data) in [(b"IHDR", ihdr), (b"IDAT", zlib), (b"IEND", Vec::new())] {
+        png.extend((data.len() as u32).to_be_bytes());
+        let start = png.len();
+        png.extend(kind);
+        png.extend(&data);
+        png.extend(crc32(&png[start..]).to_be_bytes()); // el CRC cubre el tipo y los datos
+    }
+    png
+}
+
+#[cfg(test)]
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                0xEDB8_8320 ^ (crc >> 1)
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+#[cfg(test)]
+fn adler32(data: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in data {
+        a = (a + u32::from(byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +295,29 @@ mod tests {
         // Vista previa en grande (RGBA crudo de 512×512) para mirarlo sin abrir la app.
         std::fs::write("target/icon-512.rgba", render(512)).unwrap();
         // El PNG del README (assets/orion.png) se arma desde ese archivo con scripts/icon-png.ps1.
+    }
+
+    #[test]
+    fn png_is_well_formed() {
+        assert_eq!(crc32(b"IEND"), 0xAE42_6082); // el CRC conocido de un IEND vacío
+        assert_eq!(adler32(b"Wikipedia"), 0x11E6_0398);
+        let png = to_png(4);
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(&png[12..16], b"IHDR");
+        assert_eq!(&png[png.len() - 8..png.len() - 4], b"IEND");
+    }
+
+    /// Arma target/orion.iconset (los PNG que pide `iconutil` para el .icns de macOS):
+    /// `cargo test write_iconset -- --ignored`. Lo usa scripts/package-macos.sh.
+    #[test]
+    #[ignore]
+    fn write_iconset() {
+        let dir = std::path::Path::new("target/orion.iconset");
+        std::fs::create_dir_all(dir).unwrap();
+        for size in [16, 32, 128, 256, 512] {
+            std::fs::write(dir.join(format!("icon_{size}x{size}.png")), to_png(size)).unwrap();
+            let retina = format!("icon_{size}x{size}@2x.png");
+            std::fs::write(dir.join(retina), to_png(size * 2)).unwrap();
+        }
     }
 }
