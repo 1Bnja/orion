@@ -13,8 +13,12 @@ concurrency:
 
 jobs:
   check:
-    # Orion es para Windows (ConPTY, registro de fuentes): probamos en Windows.
-    runs-on: windows-latest
+    # Orion corre en Windows y macOS: se prueba en los dos (macos-latest es un Mac con Apple Silicon).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 

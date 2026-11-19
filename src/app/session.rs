@@ -359,7 +359,8 @@ impl Session {
     }
 }
 
-#[cfg(test)]
+// Usan PowerShell de verdad: por ahora, solo en Windows.
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
     use std::time::Duration;

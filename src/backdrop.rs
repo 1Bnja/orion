@@ -2,8 +2,6 @@
 //! o acrílico (desenfoca lo que hay detrás). Lo pinta Windows (DWM, el compositor de ventanas):
 //! nosotros le pedimos el material y dejamos el fondo de la terminal semitransparente para que se vea.
 
-use std::ffi::c_void;
-
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Backdrop {
     None,
@@ -42,23 +40,28 @@ impl Backdrop {
 #[cfg(windows)]
 #[link(name = "dwmapi")]
 unsafe extern "system" {
-    fn DwmSetWindowAttribute(hwnd: isize, attribute: u32, value: *const c_void, size: u32) -> i32;
+    fn DwmSetWindowAttribute(
+        hwnd: isize,
+        attribute: u32,
+        value: *const std::ffi::c_void,
+        size: u32,
+    ) -> i32;
 }
-
-// Atributos de DwmSetWindowAttribute (dwmapi.h).
-const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
-const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
-// Valores de DWMWA_SYSTEMBACKDROP_TYPE: 1 = ninguno, 2 = Mica, 3 = acrílico.
-const DWMSBT_NONE: u32 = 1;
-const DWMSBT_MAINWINDOW: u32 = 2;
-const DWMSBT_TRANSIENTWINDOW: u32 = 3;
-const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
-const DWMWCP_ROUND: u32 = 2;
 
 /// Le pide a Windows el material `backdrop` para la ventana `hwnd`, y la barra de título
 /// clara u oscura según el tema. En Windows 10 o un Windows 11 viejo no hace nada (DWM ignora el atributo).
 #[cfg(windows)]
 pub(crate) fn apply(hwnd: isize, backdrop: Backdrop, dark: bool) {
+    // Atributos de DwmSetWindowAttribute (dwmapi.h).
+    const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+    const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+    // Valores de DWMWA_SYSTEMBACKDROP_TYPE: 1 = ninguno, 2 = Mica, 3 = acrílico.
+    const DWMSBT_NONE: u32 = 1;
+    const DWMSBT_MAINWINDOW: u32 = 2;
+    const DWMSBT_TRANSIENTWINDOW: u32 = 3;
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWCP_ROUND: u32 = 2;
+
     let set = |attribute: u32, value: u32| {
         // SAFETY: `value` vive durante la llamada y DWM solo lee `size` bytes.
         unsafe {

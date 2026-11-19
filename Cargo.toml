@@ -14,6 +14,9 @@ portable-pty = "0.9.0"
 raw-window-handle = "0.6"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.1"
+
+# Solo en Windows: las fuentes instaladas se leen del registro.
+[target.'cfg(windows)'.dependencies]
 winreg = "0.10"
 
 # `cargo run` (debug): las dependencias (egui, alacritty_terminal, el parser) se compilan optimizadas.

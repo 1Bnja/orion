@@ -3,9 +3,19 @@
 
 use alacritty_terminal::term::cell::Cell;
 use std::ops::Range;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Abre una URL o un archivo con lo que el sistema tenga predeterminado.
+#[cfg(windows)]
+const OPENER: &str = "explorer.exe";
+#[cfg(not(windows))]
+const OPENER: &str = "open";
+/// VS Code desde la línea de comandos (en Windows es un .cmd).
+#[cfg(windows)]
+const CODE: &str = "code.cmd";
+#[cfg(not(windows))]
+const CODE: &str = "code";
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum Link {
@@ -94,11 +104,10 @@ fn split_location(word: &str) -> (&str, Option<u32>, Option<u32>) {
 
 /// Abre el link sin congelar la ventana.
 pub(crate) fn open(link: Link) {
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     std::thread::spawn(move || match link {
-        // explorer abre las URLs con el navegador predeterminado.
+        // explorer (o `open` en Mac) abre las URLs con el navegador predeterminado.
         Link::Url(url) => {
-            let _ = Command::new("explorer.exe").arg(url).spawn();
+            let _ = Command::new(OPENER).arg(url).spawn();
         }
         Link::File { path, line, col } => {
             // El editor: VS Code (`code -g archivo:línea:columna`). Si no está, la app predeterminada.
@@ -107,12 +116,9 @@ pub(crate) fn open(link: Link) {
                 (Some(l), None) => format!("{}:{l}", path.display()),
                 _ => path.display().to_string(),
             };
-            let code = Command::new("code.cmd")
-                .args(["-g", &target])
-                .creation_flags(CREATE_NO_WINDOW)
-                .status();
+            let code = crate::update::quiet(CODE).args(["-g", &target]).status();
             if !code.is_ok_and(|s| s.success()) {
-                let _ = Command::new("explorer.exe").arg(&path).spawn();
+                let _ = Command::new(OPENER).arg(&path).spawn();
             }
         }
     });

@@ -54,10 +54,47 @@ pub(crate) struct ShellKind {
     args: &'static [&'static str],
     /// Carga la integración de Orion (bloques, título de la pestaña, sugerencias).
     /// ponytail: solo PowerShell; cmd y WSL andan como terminal normal, sin bloques.
-    powershell: bool,
+    pub(crate) powershell: bool,
 }
 
-/// Las shells que conoce Orion. La primera instalada es la de siempre.
+/// Las shells que conoce Orion en macOS. La primera instalada es la de siempre.
+/// `-l` (login): carga tu perfil, que es donde se arma el PATH (Homebrew, etc.).
+#[cfg(not(windows))]
+pub(crate) static SHELLS: [ShellKind; 4] = [
+    ShellKind {
+        name: "zsh",
+        program: "zsh",
+        args: &["-l"],
+        powershell: false,
+    },
+    ShellKind {
+        name: "bash",
+        program: "bash",
+        args: &["-l"],
+        powershell: false,
+    },
+    ShellKind {
+        name: "fish",
+        program: "fish",
+        args: &["-l"],
+        powershell: false,
+    },
+    ShellKind {
+        name: "PowerShell",
+        program: "pwsh",
+        args: &["-NoLogo"],
+        powershell: true,
+    },
+];
+
+/// Si no se encuentra ninguna: la que viene con el sistema.
+#[cfg(not(windows))]
+const FALLBACK_SHELL: usize = 0; // zsh viene con macOS
+#[cfg(windows)]
+const FALLBACK_SHELL: usize = 1; // powershell.exe viene con Windows
+
+/// Las shells que conoce Orion en Windows. La primera instalada es la de siempre.
+#[cfg(windows)]
 pub(crate) static SHELLS: [ShellKind; 4] = [
     ShellKind {
         name: "PowerShell",
@@ -111,7 +148,7 @@ pub(crate) fn usable_shell(index: usize) -> usize {
     if installed.contains(&index) {
         index
     } else {
-        installed.first().copied().unwrap_or(1) // powershell.exe viene con Windows
+        installed.first().copied().unwrap_or(FALLBACK_SHELL)
     }
 }
 
@@ -126,8 +163,23 @@ impl ShellKind {
         spawn_program(size, self.program, &args)
     }
 
-    /// Una ruta de Windows lista para escribirla en esta shell: entre comillas si hace falta y,
+    /// Una ruta lista para escribirla en esta shell: entre comillas si hace falta y,
     /// en WSL, como /mnt/c/...
+    #[cfg(not(windows))]
+    pub(crate) fn quote_path(&self, path: &str) -> String {
+        let plain = path
+            .chars()
+            .all(|c| c.is_alphanumeric() || "/._-+".contains(c));
+        if plain {
+            path.to_string()
+        } else if self.powershell {
+            format!("'{}'", path.replace('\'', "''"))
+        } else {
+            format!("'{}'", path.replace('\'', r"'\''")) // zsh, bash y fish
+        }
+    }
+
+    #[cfg(windows)]
     pub(crate) fn quote_path(&self, path: &str) -> String {
         let plain = |p: &str| {
             p.chars()
@@ -166,6 +218,16 @@ pub(crate) fn spawn_program(
     let pair = native_pty_system().openpty(size)?;
     let mut cmd = CommandBuilder::new(program);
     cmd.args(args);
+    // En macOS, una app abierta desde Finder no trae TERM ni LANG: sin ellos no hay colores
+    // y los acentos se ven mal. (En Windows ConPTY no los usa.)
+    #[cfg(not(windows))]
+    {
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        if std::env::var_os("LANG").is_none() {
+            cmd.env("LANG", "en_US.UTF-8");
+        }
+    }
     // ponytail: el slave se suelta al salir de la función; la shell ya tiene su copia.
     let child = pair.slave.spawn_command(cmd)?;
     let writer = Rc::new(RefCell::new(pair.master.take_writer()?));
@@ -177,7 +239,7 @@ pub(crate) fn spawn_program(
 }
 
 /// PowerShell (pwsh, o powershell.exe si no está) con `args`. Para los tests.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn spawn_shell(size: PtySize, args: &[impl AsRef<OsStr>]) -> Result<Shell, Error> {
     spawn_program(size, SHELLS[usable_shell(0)].program, args)
 }
@@ -251,6 +313,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[cfg(windows)]
     #[test]
     fn dropped_paths_are_quoted_per_shell() {
         let (pwsh, cmd, wsl) = (&SHELLS[0], &SHELLS[2], &SHELLS[3]);
@@ -267,6 +330,28 @@ mod tests {
         assert_eq!(wsl.quote_path(r"D:\a b\it's"), r"'/mnt/d/a b/it'\''s'");
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn paths_are_quoted_for_unix_shells() {
+        let (zsh, pwsh) = (&SHELLS[0], &SHELLS[3]);
+        assert_eq!(zsh.quote_path("/Users/ana/app.rs"), "/Users/ana/app.rs");
+        assert_eq!(
+            zsh.quote_path("/Users/ana/Mis fotos/it's.png"),
+            r"'/Users/ana/Mis fotos/it'\''s.png'"
+        );
+        assert_eq!(pwsh.quote_path("/a b/it's"), "'/a b/it''s'");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_shells_run_with_a_terminal_environment() {
+        assert_eq!(find_shell("ZSH"), Some(0));
+        assert!(installed_shells().contains(&0), "zsh viene con macOS");
+        let shell = spawn_program(pty_size((80, 24)), "sh", &["-c", "echo orion-$TERM"]).unwrap();
+        let rx = spawn_reader(&*shell.master, || {}).unwrap();
+        wait_for(&rx, &mut String::new(), "orion-xterm-256color");
+    }
+
     /// Lee la salida de la shell hasta que aparezca `needle` (o falla a los 15 s mostrando lo que llegó).
     fn wait_for(rx: &Receiver<Vec<u8>>, out: &mut String, needle: &str) {
         while !out.contains(needle) {
@@ -277,6 +362,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     /// Lanza la shell sin Term: respondemos nosotros la pregunta inicial de ConPTY (ESC[6n).
     fn start(args: &[impl AsRef<OsStr>]) -> (Shell, Receiver<Vec<u8>>) {
         let shell = spawn_shell(pty_size((80, 24)), args).unwrap();
@@ -285,6 +371,7 @@ mod tests {
         (shell, rx)
     }
 
+    #[cfg(windows)]
     #[test]
     fn shell_output_reaches_reader() {
         let (mut shell, rx) = start(&["-NoProfile", "-Command", "Write-Output orion-ok"]);
@@ -292,6 +379,7 @@ mod tests {
         let _ = shell.child.kill();
     }
 
+    #[cfg(windows)]
     #[test]
     fn shell_integration_marks_prompt_and_commands() {
         let (mut shell, rx) = start(&shell_args(&["-NoProfile", "-NoLogo"]));
@@ -318,6 +406,7 @@ mod tests {
         let _ = shell.child.kill();
     }
 
+    #[cfg(windows)]
     #[test]
     fn shift_enter_adds_a_line_in_powershell() {
         let (shell, rx) = start(&shell_args(&["-NoProfile", "-NoLogo"]));
@@ -356,6 +445,7 @@ mod tests {
         assert_eq!(copied.borrow().as_deref(), Some("hola"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn other_shells_run_too() {
         // cmd viene con Windows: siempre está.
@@ -369,6 +459,7 @@ mod tests {
         wait_for(&rx, &mut String::new(), "orion-cmd");
     }
 
+    #[cfg(windows)]
     #[test]
     fn shell_integration_turns_on_suggestions() {
         let (mut shell, rx) = start(&shell_args(&["-NoProfile", "-NoLogo"]));

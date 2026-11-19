@@ -2,19 +2,14 @@
 //! git worktree propio para que varios agentes trabajen en paralelo sin pisarse.
 
 use crate::pty::ShellKind;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Corre git en `dir` y devuelve lo que imprimió, o su mensaje de error.
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
+    let out = crate::update::quiet("git")
         .arg("-C")
         .arg(dir)
         .args(args)
-        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("no encuentro git ({e})"))?;
     let text = |b: &[u8]| String::from_utf8_lossy(b).trim().to_string();
@@ -66,10 +61,12 @@ pub(crate) fn create_worktree(dir: &Path, agent: &str) -> Result<PathBuf, String
 pub(crate) fn launch_input(shell: &ShellKind, dir: Option<&Path>, command: &str) -> String {
     let cd = dir.map(|d| {
         let quoted = shell.quote_path(&d.to_string_lossy());
-        match shell.name {
-            "cmd" => format!("cd /d {quoted}\r"),
-            "WSL" => format!("cd {quoted}\r"),
-            _ => format!("Set-Location -LiteralPath {quoted}\r"),
+        if shell.powershell {
+            format!("Set-Location -LiteralPath {quoted}\r")
+        } else if shell.name == "cmd" {
+            format!("cd /d {quoted}\r") // /d: también cambia de disco
+        } else {
+            format!("cd {quoted}\r") // WSL, zsh, bash, fish
         }
     });
     format!("{}{command}\r", cd.unwrap_or_default())
@@ -80,6 +77,7 @@ mod tests {
     use super::*;
     use crate::pty::SHELLS;
 
+    #[cfg(windows)]
     #[test]
     fn launch_goes_to_the_folder_first() {
         let dir = Some(Path::new(r"C:\repo agente"));
@@ -96,6 +94,14 @@ mod tests {
             "cd '/mnt/c/repo agente'\ra\r"
         );
         assert_eq!(launch_input(&SHELLS[0], None, "a"), "a\r");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn launch_goes_to_the_folder_first_on_mac() {
+        let dir = Some(Path::new("/Users/ana/mi repo"));
+        let zsh = &SHELLS[0];
+        assert_eq!(launch_input(zsh, dir, "a"), "cd '/Users/ana/mi repo'\ra\r");
     }
 
     #[test]

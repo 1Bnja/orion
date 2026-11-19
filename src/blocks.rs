@@ -602,6 +602,7 @@ mod tests {
         assert_eq!(logical_line(&term, line), 1); // la línea lógica no cambió
     }
 
+    #[cfg(windows)]
     #[test]
     fn real_powershell_produces_a_block() {
         use crate::pty::{pty_size, shell_args, spawn_reader, spawn_shell};

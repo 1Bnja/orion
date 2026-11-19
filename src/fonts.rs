@@ -28,6 +28,12 @@ pub(crate) fn face_weight(entry: &str, family: &str) -> Option<bool> {
 /// Todas las fuentes instaladas: (entrada del registro, archivo).
 /// HKCU = instaladas solo para tu usuario (guardan la ruta completa).
 /// HKLM = del sistema (guardan solo el nombre del archivo, dentro de C:\Windows\Fonts).
+#[cfg(not(windows))]
+pub(crate) fn registry_fonts() -> Vec<(String, PathBuf)> {
+    Vec::new() // ponytail: las fuentes de macOS llegan con el issue #46
+}
+
+#[cfg(windows)]
 pub(crate) fn registry_fonts() -> Vec<(String, PathBuf)> {
     use winreg::{RegKey, enums::*};
     const FONTS_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts";

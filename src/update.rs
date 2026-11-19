@@ -64,6 +64,12 @@ impl Updater {
         if matches!(self.state(), State::Checking | State::Installing(_)) {
             return;
         }
+        // ponytail: el release de macOS (y su actualizador) llega con el issue #48.
+        if cfg!(not(windows)) {
+            return self.set(State::CheckFailed(
+                "en macOS todavía no se actualiza solo".into(),
+            ));
+        }
         self.set(State::Checking);
         let (this, ctx) = (self.clone(), ctx.clone());
         std::thread::spawn(move || {
@@ -92,8 +98,9 @@ impl Updater {
     }
 }
 
-/// Un programa de Windows sin que aparezca una consola negra (Orion es una app de ventana).
-fn quiet(program: &str) -> Command {
+/// Un programa sin que aparezca una consola negra (en Windows; Orion es una app de ventana).
+pub(crate) fn quiet(program: &str) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     {
