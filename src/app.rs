@@ -687,10 +687,23 @@ impl eframe::App for Orion {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Todos los paneles de todas las pestañas: los de atrás siguen recibiendo su salida.
         let mut pending = false;
+        let mut copied = None;
         for tab in &mut self.tabs {
             for session in tab.panes.leaves_mut() {
                 pending |= session.process_output();
+                copied = session.take_copied().or(copied);
             }
+        }
+        // Un programa copió algo (OSC 52, ej. "copiar respuesta" en un agente): al portapapeles.
+        if let Some(text) = copied {
+            let lines = text.lines().count().max(1);
+            ctx.copy_text(text);
+            let what = if lines == 1 {
+                "1 línea".into()
+            } else {
+                format!("{lines} líneas")
+            };
+            self.show_toast(format!("Copiado al portapapeles ({what})"));
         }
         if pending {
             ctx.request_repaint(); // quedó salida: seguir en el próximo frame

@@ -182,11 +182,14 @@ pub(crate) fn spawn_reader(
 ///   cuando la shell la pregunta (ESC[6n).
 /// - `Title`: el título que pone la shell (OSC 0); lo usa la pestaña.
 /// - `Bell`: la campana (BEL); la pestaña avisa que algo pide atención.
+/// - `ClipboardStore`: un programa copia texto (OSC 52).
 pub(crate) struct Replies {
     pub(crate) writer: PtyWriter,
     pub(crate) title: Rc<RefCell<Option<String>>>,
     /// Sonó la campana (BEL): un programa pide atención. La sesión la lee y la apaga.
     pub(crate) bell: Rc<Cell<bool>>,
+    /// Texto que un programa pidió copiar (OSC 52). La sesión lo lleva al portapapeles.
+    pub(crate) copied: Rc<RefCell<Option<String>>>,
 }
 
 impl EventListener for Replies {
@@ -198,6 +201,9 @@ impl EventListener for Replies {
             TermEvent::Title(title) => *self.title.borrow_mut() = Some(title),
             TermEvent::ResetTitle => *self.title.borrow_mut() = None,
             TermEvent::Bell => self.bell.set(true),
+            // Leer el portapapeles (ClipboardLoad) no llega nunca: alacritty solo acepta copiar
+            // (Osc52::OnlyCopy, su valor por defecto), así un programa no puede espiar lo que copiaste.
+            TermEvent::ClipboardStore(_, text) => *self.copied.borrow_mut() = Some(text),
             _ => {}
         }
     }
@@ -285,6 +291,26 @@ mod tests {
         );
         let mut shell = shell;
         let _ = shell.child.kill();
+    }
+
+    #[test]
+    fn programs_can_copy_with_osc52() {
+        use alacritty_terminal::Term;
+        use alacritty_terminal::term::Config;
+        use alacritty_terminal::vte::ansi::Processor;
+        let copied = Rc::new(RefCell::new(None));
+        let writer: Box<dyn Write + Send> = Box::new(Vec::new());
+        let replies = Replies {
+            writer: Rc::new(RefCell::new(writer)),
+            title: Rc::new(RefCell::new(None)),
+            bell: Rc::new(Cell::new(false)),
+            copied: copied.clone(),
+        };
+        let mut term = Term::new(Config::default(), &crate::grid::term_size((10, 2)), replies);
+        // OSC 52: "c" = portapapeles, y el texto en base64 ("aG9sYQ==" = "hola").
+        Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new()
+            .advance(&mut term, b"\x1b]52;c;aG9sYQ==\x07");
+        assert_eq!(copied.borrow().as_deref(), Some("hola"));
     }
 
     #[test]

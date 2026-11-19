@@ -60,6 +60,8 @@ pub(super) struct Session {
     pub(super) split_request: Option<bool>,
     /// Campana (BEL) del Term; se lee en `process_output`.
     bell: Rc<Cell<bool>>,
+    /// Texto que un programa copió (OSC 52); la app lo lleva al portapapeles con `take_copied`.
+    copied: Rc<RefCell<Option<String>>>,
     /// Algo pidió atención en este frame (un aviso, la campana o un comando largo que terminó).
     /// La app decide si lo estás mirando; si no, lo pasa a `attention`.
     pub(super) alert: Option<String>,
@@ -102,10 +104,12 @@ impl Session {
         };
         let title = Rc::new(RefCell::new(None));
         let bell = Rc::new(Cell::new(false));
+        let copied = Rc::new(RefCell::new(None));
         let replies = Replies {
             writer: shell.writer.clone(),
             title: title.clone(),
             bell: bell.clone(),
+            copied: copied.clone(),
         };
         let term = Term::new(config, &term_size(grid), replies);
         Ok(Self {
@@ -128,6 +132,7 @@ impl Session {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             split_request: None,
             bell,
+            copied,
             alert: None,
             attention: None,
         })
@@ -191,6 +196,11 @@ impl Session {
             }
         }
         false
+    }
+
+    /// Lo que un programa copió desde el último frame (OSC 52), si copió algo.
+    pub(super) fn take_copied(&self) -> Option<String> {
+        self.copied.borrow_mut().take()
     }
 
     /// ¿La shell terminó? (escribiste `exit`, o se cerró sola).
