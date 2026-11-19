@@ -464,16 +464,22 @@ impl Session {
                             ui.close();
                         }
                         ui.separator();
-                        if ui.button("Dividir a la derecha   Ctrl+Shift+D").clicked() {
+                        if ui
+                            .button(keys!("Dividir a la derecha   ", "+Shift+D", ""))
+                            .clicked()
+                        {
                             self.split_request = Some(true);
                             ui.close();
                         }
-                        if ui.button("Dividir hacia abajo   Ctrl+Shift+E").clicked() {
+                        if ui
+                            .button(keys!("Dividir hacia abajo   ", "+Shift+E", ""))
+                            .clicked()
+                        {
                             self.split_request = Some(false);
                             ui.close();
                         }
                         ui.separator();
-                        if ui.button("Configuración…   Ctrl+,").clicked() {
+                        if ui.button(keys!("Configuración…   ", "+,", "")).clicked() {
                             open_menu = true;
                             ui.close();
                         }
@@ -488,10 +494,10 @@ impl Session {
                     let even = egui::pos2(pos.x, rect.min.y + row as f32 * cell.y + dy);
                     pixel_to_point(even, rect.min, cell, grid, offset)
                 };
-                // Ctrl + mouse sobre un link o una ruta: se subraya y el clic la abre.
-                let ctrl = ui.input(|i| i.modifiers.ctrl);
+                // Ctrl + mouse (Cmd en Mac) sobre un link o una ruta: se subraya y el clic la abre.
+                let command = ui.input(|i| i.modifiers.command);
                 let link = hover
-                    .filter(|p| ctrl && !mouse_mode && rect.contains(*p))
+                    .filter(|p| command && !mouse_mode && rect.contains(*p))
                     .and_then(|pos| {
                         let row = row_at(&tops, pos.y);
                         let col = ((pos.x - rect.min.x) / cell.x) as usize;

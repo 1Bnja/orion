@@ -3,6 +3,7 @@
 //! Cada pestaña es independiente: tiene su propio PowerShell, su historial y sus bloques.
 //! Las que no se ven siguen recibiendo la salida de su shell (ej. un build que corre en otra pestaña).
 
+use super::MAC;
 use super::render::BlockAction;
 use crate::blocks::{
     Blocks, Mark, MarkScanner, Piece, Status, grid_line_of, neighbor_block, scroll_to_show,
@@ -231,7 +232,7 @@ impl Session {
         }
     }
 
-    /// Ctrl+C / Ctrl+Shift+C: copia la selección; si no hay, la salida del bloque marcado.
+    /// Ctrl+C / Ctrl+Shift+C (Cmd+C en Mac): copia la selección; si no hay, la salida del bloque marcado.
     /// Devuelve false si no había nada que copiar.
     fn copy(&mut self, ctx: &egui::Context) -> bool {
         if self.copy_selection(ctx) {
@@ -279,13 +280,13 @@ impl Session {
         // El teclado va en ui y no en logic: con la ventana oculta, logic vería otra vez los eventos del último frame.
         for event in ui.input(|i| i.events.clone()) {
             let bytes = match event {
-                // Ctrl+↑ / Ctrl+↓: saltar entre bloques.
+                // Ctrl+↑ / Ctrl+↓ (Cmd en Mac): saltar entre bloques.
                 egui::Event::Key {
                     key: key @ (egui::Key::ArrowUp | egui::Key::ArrowDown),
                     pressed: true,
                     modifiers,
                     ..
-                } if modifiers.ctrl && !modifiers.shift && !modifiers.alt && !alt_screen => {
+                } if modifiers.command && !modifiers.shift && !modifiers.alt && !alt_screen => {
                     self.jump_to_block(key == egui::Key::ArrowUp);
                     continue;
                 }
@@ -308,22 +309,26 @@ impl Session {
                 }
                 egui::Event::Text(t) => t.into_bytes(),
                 egui::Event::Paste(t) => paste_bytes(&t, bracketed),
-                // egui convierte Ctrl+C en Copy. Si hay selección (o un bloque
-                // marcado) copia; si no, es la interrupción de siempre (ETX).
+                // egui convierte Ctrl+C (Cmd+C en Mac) en Copy. Si hay selección (o un bloque
+                // marcado) copia; si no, en Windows es la interrupción de siempre (ETX).
+                // En Mac, Cmd+C solo copia: Ctrl+C llega como tecla e interrumpe por key_bytes.
                 egui::Event::Copy => {
-                    if self.copy(ui.ctx()) {
+                    if self.copy(ui.ctx()) || MAC {
                         continue;
                     }
                     vec![0x03]
                 }
+                // Cmd+X en Mac no es nada para la shell (Ctrl+X llega como tecla).
+                egui::Event::Cut if MAC => continue,
                 egui::Event::Cut => vec![0x18],
                 // Ctrl+Shift+C / Ctrl+Shift+V: copiar y pegar sin chocar con Ctrl+C (interrumpir).
+                // En Mac no hace falta (Cmd+C / Cmd+V): ahí Control es todo de la terminal.
                 egui::Event::Key {
                     key: egui::Key::C,
                     pressed: true,
                     modifiers,
                     ..
-                } if modifiers.ctrl && modifiers.shift => {
+                } if !MAC && modifiers.ctrl && modifiers.shift => {
                     self.copy(ui.ctx());
                     continue;
                 }
@@ -332,7 +337,7 @@ impl Session {
                     pressed: true,
                     modifiers,
                     ..
-                } if modifiers.ctrl && modifiers.shift => {
+                } if !MAC && modifiers.ctrl && modifiers.shift => {
                     // egui lee el portapapeles y nos lo devuelve como Event::Paste en un próximo frame.
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::RequestPaste);

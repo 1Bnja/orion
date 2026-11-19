@@ -34,8 +34,14 @@ pub(crate) fn config_text(settings: &Settings) -> String {
             "\n# [[agent]]\n# name = \"Mi agente\"\n# command = \"mi-agente\"\n# worktree = true\n"
                 .into();
     }
+    // El modificador de los atajos de Orion: Cmd en Mac, Ctrl en Windows.
+    let key = if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Ctrl"
+    };
     let text = format!(
-        r#"# Configuración de Orion. Se puede editar aquí o desde el menú (Ctrl+, o clic derecho).
+        r#"# Configuración de Orion. Se puede editar aquí o desde el menú ({key}+, o clic derecho).
 # Si editas a mano, los cambios se aplican apenas guardas el archivo.
 
 # Colores. Hay: {themes}.
@@ -45,8 +51,8 @@ theme = {theme}
 backdrop = {backdrop}
 # Al abrir, buscar si hay una versión nueva de Orion (se instala solo si tú lo pides).
 check_updates = {check_updates}
-# Shell de las pestañas nuevas (Ctrl+Shift+T). Hay: {shells}.
-# Para abrir otra solo una vez: clic derecho en "+ Nueva pestaña", o la paleta (Ctrl+Shift+P).
+# Shell de las pestañas nuevas ({key}+Shift+T). Hay: {shells}.
+# Para abrir otra solo una vez: clic derecho en "+ Nueva pestaña", o la paleta ({key}+Shift+P).
 shell = {shell}
 
 [font]
@@ -58,7 +64,7 @@ size = {:.1}
 # Alto de cada línea respecto de la letra: 1.0 = pegadas, 1.2 = con aire, 1.5 = muy espaciadas.
 line_height = {:.2}
 
-# Agentes: cada [[agent]] aparece en la paleta (Ctrl+Shift+P) y en el clic derecho de
+# Agentes: cada [[agent]] aparece en la paleta ({key}+Shift+P) y en el clic derecho de
 # "+ Nueva pestaña". Abre una pestaña en la carpeta actual y escribe `command`.
 # Con worktree = true, antes crea un git worktree al lado del repo, en una rama nueva
 # (orion/nombre-1, -2…): así varios agentes trabajan en paralelo sin pisarse.

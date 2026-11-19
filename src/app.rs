@@ -4,6 +4,25 @@
 //! sus bloques). `session`, `panes`, `render` y `menu` son submódulos: al ser hijos de `app`,
 //! pueden usar los campos privados de `Orion`.
 
+/// En macOS los atajos de Orion van con Cmd y Control queda para la terminal (Ctrl+C interrumpe).
+const MAC: bool = cfg!(target_os = "macos");
+
+/// Nombre de un atajo para tooltips y la paleta: `keys!("+Shift+P")` es "Ctrl+Shift+P" en
+/// Windows y "Cmd+Shift+P" en Mac. Con texto antes y después:
+/// `keys!("Paleta   ", "+Shift+P", "")` es "Paleta   Ctrl+Shift+P".
+macro_rules! keys {
+    ($rest:literal) => {
+        keys!("", $rest, "")
+    };
+    ($before:literal, $rest:literal, $after:literal) => {
+        if cfg!(target_os = "macos") {
+            concat!($before, "Cmd", $rest, $after)
+        } else {
+            concat!($before, "Ctrl", $rest, $after)
+        }
+    };
+}
+
 mod menu;
 mod palette;
 mod panes;
@@ -342,7 +361,7 @@ impl Orion {
                     }
                 }
             });
-            let tip = "Ctrl+Shift+T\nClic derecho: elegir la shell";
+            let tip = keys!("", "+Shift+T", "\nClic derecho: elegir la shell");
             if new.on_hover_text(tip).clicked() {
                 action = Some(Action::NewTab(None));
             }
@@ -484,28 +503,29 @@ impl Orion {
     }
 
     /// Atajos de pestañas y paneles. Se "consumen": así no llegan a la shell.
+    /// `COMMAND` es Ctrl en Windows y Cmd en Mac.
     fn shortcuts(&self, ui: &mut egui::Ui) -> Option<Action> {
         use egui::{Key, Modifiers};
-        let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
+        let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
         let count = self.tabs.len();
         ui.input_mut(|i| {
-            if i.consume_key(ctrl_shift, Key::P) {
+            if i.consume_key(cmd_shift, Key::P) {
                 return Some(Action::Palette);
             }
-            if i.consume_key(ctrl_shift, Key::T) {
+            if i.consume_key(cmd_shift, Key::T) {
                 return Some(Action::NewTab(None));
             }
             // Splits: D = a la derecha, E = hacia abajo. W cierra el panel.
-            if i.consume_key(ctrl_shift, Key::D) {
+            if i.consume_key(cmd_shift, Key::D) {
                 return Some(Action::Split(true));
             }
-            if i.consume_key(ctrl_shift, Key::E) {
+            if i.consume_key(cmd_shift, Key::E) {
                 return Some(Action::Split(false));
             }
-            if i.consume_key(ctrl_shift, Key::W) {
+            if i.consume_key(cmd_shift, Key::W) {
                 return Some(Action::ClosePane);
             }
-            // Ctrl+Alt+flechas: pasar al panel de al lado.
+            // Ctrl+Alt+flechas (Cmd+Option en Mac): pasar al panel de al lado.
             let arrows = [
                 (Key::ArrowLeft, egui::vec2(-1.0, 0.0)),
                 (Key::ArrowRight, egui::vec2(1.0, 0.0)),
@@ -513,18 +533,19 @@ impl Orion {
                 (Key::ArrowDown, egui::vec2(0.0, 1.0)),
             ];
             for (key, dir) in arrows {
-                if i.consume_key(Modifiers::CTRL | Modifiers::ALT, key) {
+                if i.consume_key(Modifiers::COMMAND | Modifiers::ALT, key) {
                     return Some(Action::Focus(dir));
                 }
             }
+            // Ctrl+Tab también en Mac: Cmd+Tab es del sistema (cambiar de app).
             // Primero Ctrl+Shift+Tab: si no, Ctrl+Tab también lo atraparía.
-            if i.consume_key(ctrl_shift, Key::Tab) {
+            if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab) {
                 return Some(Action::SelectTab((self.active + count - 1) % count));
             }
             if i.consume_key(Modifiers::CTRL, Key::Tab) {
                 return Some(Action::SelectTab((self.active + 1) % count));
             }
-            // Alt+1 … Alt+9: ir a esa pestaña.
+            // Alt+1 … Alt+9 (Cmd+1 … Cmd+9 en Mac): ir a esa pestaña.
             const NUMBERS: [Key; 9] = [
                 Key::Num1,
                 Key::Num2,
@@ -536,9 +557,14 @@ impl Orion {
                 Key::Num8,
                 Key::Num9,
             ];
+            let tab_mod = if MAC {
+                Modifiers::COMMAND
+            } else {
+                Modifiers::ALT
+            };
             let n = NUMBERS
                 .iter()
-                .position(|&key| i.consume_key(Modifiers::ALT, key))?;
+                .position(|&key| i.consume_key(tab_mod, key))?;
             (n < count).then_some(Action::SelectTab(n))
         })
     }
@@ -847,9 +873,9 @@ impl eframe::App for Orion {
             }
         }
 
-        // Ctrl+, abre o cierra la configuración; Escape la cierra.
+        // Ctrl+, (Cmd+, en Mac) abre o cierra la configuración; Escape la cierra.
         let (toggle, escape) = ui.input(|i| {
-            let toggle = i.modifiers.ctrl && i.key_pressed(egui::Key::Comma);
+            let toggle = i.modifiers.command && i.key_pressed(egui::Key::Comma);
             (toggle, i.key_pressed(egui::Key::Escape))
         });
         if toggle && !self.menu.open {
