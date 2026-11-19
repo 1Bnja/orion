@@ -125,6 +125,33 @@ impl ShellKind {
         };
         spawn_program(size, self.program, &args)
     }
+
+    /// Una ruta de Windows lista para escribirla en esta shell: entre comillas si hace falta y,
+    /// en WSL, como /mnt/c/...
+    pub(crate) fn quote_path(&self, path: &str) -> String {
+        let plain = |p: &str| {
+            p.chars()
+                .all(|c| c.is_alphanumeric() || r"\/:._-".contains(c))
+        };
+        if self.program == "wsl.exe" {
+            let mut p = path.replace('\\', "/");
+            if let [drive, b':', ..] = p.as_bytes() {
+                p = format!("/mnt/{}{}", (*drive as char).to_ascii_lowercase(), &p[2..]);
+            }
+            return if plain(&p) {
+                p
+            } else {
+                format!("'{}'", p.replace('\'', r"'\''"))
+            };
+        }
+        if plain(path) {
+            path.to_string()
+        } else if self.powershell {
+            format!("'{}'", path.replace('\'', "''")) // con comillas simples, $ no se expande
+        } else {
+            format!("\"{path}\"") // cmd: una ruta no puede tener comillas dobles
+        }
+    }
 }
 
 /// Lanza `program` con `args` en un PTY nuevo.
@@ -223,6 +250,22 @@ pub(crate) fn pty_size((cols, rows): (u16, u16)) -> PtySize {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn dropped_paths_are_quoted_per_shell() {
+        let (pwsh, cmd, wsl) = (&SHELLS[0], &SHELLS[2], &SHELLS[3]);
+        assert_eq!(pwsh.quote_path(r"C:\src\app.rs"), r"C:\src\app.rs");
+        assert_eq!(
+            pwsh.quote_path(r"C:\Mis fotos\o'k $x.png"),
+            r"'C:\Mis fotos\o''k $x.png'"
+        );
+        assert_eq!(
+            cmd.quote_path(r"C:\Mis fotos\a.png"),
+            r#""C:\Mis fotos\a.png""#
+        );
+        assert_eq!(wsl.quote_path(r"C:\src\app.rs"), "/mnt/c/src/app.rs");
+        assert_eq!(wsl.quote_path(r"D:\a b\it's"), r"'/mnt/d/a b/it'\''s'");
+    }
 
     /// Lee la salida de la shell hasta que aparezca `needle` (o falla a los 15 s mostrando lo que llegó).
     fn wait_for(rx: &Receiver<Vec<u8>>, out: &mut String, needle: &str) {

@@ -762,15 +762,29 @@ impl eframe::App for Orion {
             }
         }
 
-        // Archivos de fuente arrastrados a la ventana.
+        // Archivos arrastrados: las fuentes se instalan; el resto se escribe como rutas, como un pegado.
         let dropped: Vec<PathBuf> = ui.input(|i| {
             let files = i.raw.dropped_files.iter();
             files.map(|f| f.path().to_path_buf()).collect()
         });
-        for path in dropped {
-            if is_font_file(&path.to_string_lossy()) {
-                self.font_dropped(&ctx, &path);
-            }
+        let (fonts, others): (Vec<_>, Vec<_>) = dropped
+            .into_iter()
+            .partition(|p| is_font_file(&p.to_string_lossy()));
+        for path in fonts {
+            self.font_dropped(&ctx, &path);
+        }
+        if !others.is_empty() {
+            let session = self.session();
+            let shell = &crate::pty::SHELLS[session.kind];
+            let paths: Vec<String> = others
+                .iter()
+                .map(|p| shell.quote_path(&p.to_string_lossy()))
+                .collect();
+            let bracketed = session.term.mode().contains(TermMode::BRACKETED_PASTE);
+            session.write(&crate::input::paste_bytes(
+                &format!("{} ", paths.join(" ")),
+                bracketed,
+            ));
         }
 
         // Pestañas y paneles: barra lateral y atajos.
