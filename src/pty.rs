@@ -33,6 +33,10 @@ pub(crate) struct Shell {
 /// Script que marca prompts y comandos con OSC 133 (ver el archivo). Queda dentro del .exe.
 const SHELL_INTEGRATION: &str = include_str!("shell_integration.ps1");
 
+/// Script equivalente para zsh (macOS y Linux). Queda embebido en el binario.
+#[cfg(not(windows))]
+const ZSH_INTEGRATION: &str = include_str!("shell_integration.zsh");
+
 /// Argumentos para PowerShell: los de `extra`, más cargar la integración y quedarse abierta.
 /// `-EncodedCommand` recibe el script en base64 de UTF-16: así no hay que escapar comillas ni saltos de línea.
 pub(crate) fn shell_args(extra: &[&str]) -> Vec<String> {
@@ -55,6 +59,9 @@ pub(crate) struct ShellKind {
     /// Carga la integración de Orion (bloques, título de la pestaña, sugerencias).
     /// ponytail: solo PowerShell; cmd y WSL andan como terminal normal, sin bloques.
     pub(crate) powershell: bool,
+    /// Carga la integración de Orion vía un ZDOTDIR temporal (macOS y Linux).
+    #[cfg(not(windows))]
+    pub(crate) zsh: bool,
 }
 
 /// Las shells que conoce Orion en macOS. La primera instalada es la de siempre.
@@ -66,24 +73,28 @@ pub(crate) static SHELLS: [ShellKind; 4] = [
         program: "zsh",
         args: &["-l"],
         powershell: false,
+        zsh: true,
     },
     ShellKind {
         name: "bash",
         program: "bash",
         args: &["-l"],
         powershell: false,
+        zsh: false,
     },
     ShellKind {
         name: "fish",
         program: "fish",
         args: &["-l"],
         powershell: false,
+        zsh: false,
     },
     ShellKind {
         name: "PowerShell",
         program: "pwsh",
         args: &["-NoLogo"],
         powershell: true,
+        zsh: false,
     },
 ];
 
@@ -121,6 +132,7 @@ pub(crate) static SHELLS: [ShellKind; 4] = [
         powershell: false,
     },
 ];
+// ponytail: el campo `zsh` no existe en Windows; está marcado con #[cfg(not(windows))] en la struct.
 
 /// Índice de la shell con ese nombre (sin importar mayúsculas).
 pub(crate) fn find_shell(name: &str) -> Option<usize> {
@@ -160,6 +172,10 @@ impl ShellKind {
         } else {
             self.args.iter().map(|s| s.to_string()).collect()
         };
+        #[cfg(not(windows))]
+        if self.zsh {
+            return spawn_zsh(size, self.program, &args);
+        }
         spawn_program(size, self.program, &args)
     }
 
@@ -228,6 +244,48 @@ pub(crate) fn spawn_program(
             cmd.env("LANG", "en_US.UTF-8");
         }
     }
+    // ponytail: el slave se suelta al salir de la función; la shell ya tiene su copia.
+    let child = pair.slave.spawn_command(cmd)?;
+    let writer = Rc::new(RefCell::new(pair.master.take_writer()?));
+    Ok(Shell {
+        master: pair.master,
+        writer,
+        child,
+    })
+}
+
+/// Crea un ZDOTDIR temporal para zsh: escribe la integración y un .zshrc que carga primero
+/// la configuración del usuario y después la integración.
+#[cfg(not(windows))]
+fn zsh_zdotdir() -> Result<std::path::PathBuf, Error> {
+    let dir = std::env::temp_dir().join(format!("orion_zsh_{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let integration = dir.join("orion_integration.zsh");
+    std::fs::write(&integration, ZSH_INTEGRATION)?;
+    let zshrc = format!(
+        "# Orion: load your config first, then the integration.\n\
+         unset ZDOTDIR\n\
+         [[ -f \"$HOME/.zshrc\" ]] && source \"$HOME/.zshrc\"\n\
+         source '{}'\n",
+        integration.display()
+    );
+    std::fs::write(dir.join(".zshrc"), zshrc)?;
+    Ok(dir)
+}
+
+/// Lanza zsh con la integración de Orion cargada vía un ZDOTDIR temporal.
+#[cfg(not(windows))]
+fn spawn_zsh(size: PtySize, program: &str, args: &[String]) -> Result<Shell, Error> {
+    let zdotdir = zsh_zdotdir()?;
+    let pair = native_pty_system().openpty(size)?;
+    let mut cmd = CommandBuilder::new(program);
+    cmd.args(args);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    if std::env::var_os("LANG").is_none() {
+        cmd.env("LANG", "en_US.UTF-8");
+    }
+    cmd.env("ZDOTDIR", zdotdir);
     // ponytail: el slave se suelta al salir de la función; la shell ya tiene su copia.
     let child = pair.slave.spawn_command(cmd)?;
     let writer = Rc::new(RefCell::new(pair.master.take_writer()?));
@@ -421,6 +479,85 @@ mod tests {
             out.contains(">> "),
             "Shift+Enter no agregó una línea: {out:?}"
         );
+        let mut shell = shell;
+        let _ = shell.child.kill();
+    }
+
+    /// Lanza zsh con solo la integración de Orion (sin perfil de usuario) para los tests.
+    #[cfg(all(test, target_os = "macos"))]
+    fn start_zsh() -> (Shell, Receiver<Vec<u8>>) {
+        let dir = std::env::temp_dir().join(format!("orion_zsh_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let integration = dir.join("orion_integration.zsh");
+        std::fs::write(&integration, ZSH_INTEGRATION).unwrap();
+        // Minimal .zshrc: just the integration, no user config to keep tests fast and predictable.
+        let zshrc = format!("source '{}'\n", integration.display());
+        std::fs::write(dir.join(".zshrc"), &zshrc).unwrap();
+        let pair = native_pty_system().openpty(pty_size((80, 24))).unwrap();
+        let mut cmd = CommandBuilder::new("zsh");
+        cmd.args(["-i"]);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("LANG", "en_US.UTF-8");
+        cmd.env("ZDOTDIR", &dir);
+        cmd.env("HISTFILE", "");
+        let child = pair.slave.spawn_command(cmd).unwrap();
+        let writer = Rc::new(RefCell::new(pair.master.take_writer().unwrap()));
+        let shell = Shell {
+            master: pair.master,
+            writer,
+            child,
+        };
+        let rx = spawn_reader(&*shell.master, || {}).unwrap();
+        (shell, rx)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn zsh_shell_integration_marks_prompt_and_commands() {
+        let (mut shell, rx) = start_zsh();
+        let mut out = String::new();
+        // First prompt: A (starts) and B (ends, starts input).
+        wait_for(&rx, &mut out, "\x1b]133;B\x07");
+        assert!(out.contains("\x1b]133;A\x07"), "falta A: {out:?}");
+        // Tab title: the last component of the path reported in OSC 9;9.
+        // We derive it from the shell's own OSC 9;9 output so the test doesn't depend
+        // on what directory the shell inherits from the test runner.
+        let osc9_start = out.find("\x1b]9;9;").expect("falta OSC 9;9: {out:?}");
+        let path_start = osc9_start + "\x1b]9;9;".len();
+        let path_end = out[path_start..].find('\x07').unwrap() + path_start;
+        let shell_cwd = &out[path_start..path_end];
+        let expected_name = std::path::Path::new(shell_cwd)
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new(shell_cwd))
+            .to_string_lossy();
+        let title = format!("]0;{expected_name}\x07");
+        assert!(out.contains(&title), "falta el título {title:?}: {out:?}");
+
+        // A command that fails with code 3: after Enter we get C (output) and D;3 (done).
+        out.clear();
+        shell.writer.borrow_mut().write_all(b"(exit 3)\r").unwrap();
+        wait_for(&rx, &mut out, "\x1b]133;D;3\x07");
+        let c = out.find("\x1b]133;C\x07").expect("falta C");
+        assert!(
+            c < out.find("\x1b]133;D;3").unwrap(),
+            "C debe llegar antes que D"
+        );
+        let _ = shell.child.kill();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn zsh_shift_enter_adds_a_line() {
+        let (shell, rx) = start_zsh();
+        let mut out = String::new();
+        wait_for(&rx, &mut out, "\x1b]133;B\x07");
+        // ESC+Enter between two commands, then Enter: both run as a multi-line command.
+        let typed = b"echo aaa\x1b\recho bbb\r";
+        shell.writer.borrow_mut().write_all(typed).unwrap();
+        wait_for(&rx, &mut out, "\x1b]133;D;0\x07");
+        assert!(out.contains("aaa"), "falta 'aaa' en la salida: {out:?}");
+        assert!(out.contains("bbb"), "falta 'bbb' en la salida: {out:?}");
         let mut shell = shell;
         let _ = shell.child.kill();
     }
