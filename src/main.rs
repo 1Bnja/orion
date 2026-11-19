@@ -19,6 +19,7 @@ mod fonts;
 mod grid;
 mod icon;
 mod input;
+mod links;
 mod pty;
 mod update;
 

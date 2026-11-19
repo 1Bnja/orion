@@ -488,7 +488,25 @@ impl Session {
                     let even = egui::pos2(pos.x, rect.min.y + row as f32 * cell.y + dy);
                     pixel_to_point(even, rect.min, cell, grid, offset)
                 };
-                if let (false, Some(pos)) = (mouse_mode, response.interact_pointer_pos()) {
+                // Ctrl + mouse sobre un link o una ruta: se subraya y el clic la abre.
+                let ctrl = ui.input(|i| i.modifiers.ctrl);
+                let link = hover
+                    .filter(|p| ctrl && !mouse_mode && rect.contains(*p))
+                    .and_then(|pos| {
+                        let row = row_at(&tops, pos.y);
+                        let col = ((pos.x - rect.min.x) / cell.x) as usize;
+                        let screen = visible_rows(&self.term);
+                        let cells = screen.get(row).filter(|c| col < c.len())?;
+                        let (cols, link) = crate::links::link_at(cells, col, self.cwd.as_deref())?;
+                        Some((row, cols, link))
+                    });
+                if link.is_some() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let underline = link.as_ref().map(|(row, cols, _)| (*row, cols.clone()));
+                if let (true, Some((_, _, link))) = (response.clicked(), link) {
+                    crate::links::open(link);
+                } else if let (false, Some(pos)) = (mouse_mode, response.interact_pointer_pos()) {
                     let (point, side) = to_point(pos);
                     let start = |ty| Some(Selection::new(ty, point, side));
                     if response.triple_clicked() {
@@ -613,6 +631,15 @@ impl Session {
 
                     let text_pos = origin + egui::vec2(0.0, text_dy);
                     painter.galley(text_pos, painter.layout_job(text), theme().fg);
+                }
+                if let Some((row, cols)) = underline {
+                    let x = |c: usize| rect.min.x + c as f32 * cell.x;
+                    let y = tops[row] + text_dy + text_height;
+                    painter.hline(
+                        x(cols.start)..=x(cols.end),
+                        y,
+                        egui::Stroke::new(1.0, theme().ansi[4]),
+                    );
                 }
 
                 // --- Bloques: encima del texto, la etiqueta con el resultado y lo que tardó ---

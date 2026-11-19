@@ -37,6 +37,8 @@ function Global:prompt {
     $title = Split-Path -Leaf $dir
     if (-not $title) { $title = $dir }  # en la raíz (C:\) no hay "último pedazo"
     $marks += "$e]0;$title$bel"
+    # La carpeta completa (OSC 9;9): con ella Orion abre las rutas relativas al hacer Ctrl+clic.
+    $marks += "$e]9;9;$dir$bel"
 
     $marks += "$e]133;A$bel"
     $marks += & $Global:__OrionPrompt

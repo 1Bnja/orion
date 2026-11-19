@@ -67,6 +67,8 @@ pub(super) struct Session {
     pub(super) alert: Option<String>,
     /// Pide atención y todavía no lo miraste: marca la pestaña y el panel. El texto va en el tooltip.
     pub(super) attention: Option<String>,
+    /// Carpeta actual, si la shell la informa (OSC 9;9). Para abrir rutas relativas.
+    pub(super) cwd: Option<std::path::PathBuf>,
 }
 
 /// Un comando que terminó en una pestaña que no miras avisa solo si tardó al menos esto
@@ -135,6 +137,7 @@ impl Session {
             copied,
             alert: None,
             attention: None,
+            cwd: None,
         })
     }
 
@@ -168,6 +171,7 @@ impl Session {
                 match piece {
                     Piece::Data(bytes) => self.processor.advance(&mut self.term, &bytes),
                     Piece::Mark(Mark::Notify(text)) => self.alert = Some(text),
+                    Piece::Mark(Mark::Cwd(dir)) => self.cwd = Some(dir.into()),
                     // La marca se aplica al llegar: el cursor está justo donde la shell la puso.
                     Piece::Mark(mark) => {
                         let finished = matches!(mark, Mark::Finished(_));

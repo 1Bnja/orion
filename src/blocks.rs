@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 pub(crate) enum Mark {
     /// OSC 9;texto u OSC 777;notify;título;texto: un programa (ej. un agente) avisa algo.
     Notify(String),
+    /// OSC 9;9;ruta: la carpeta actual de la shell (para abrir rutas relativas con Ctrl+clic).
+    Cwd(String),
     /// A: empieza el prompt.
     PromptStart,
     /// B: termina el prompt; lo que sigue es el comando que escribe el usuario.
@@ -126,7 +128,10 @@ fn parse_mark(body: &[u8]) -> Option<Mark> {
 /// el 9, pero empiezan con un número y un ';': esos no son avisos.
 fn parse_osc9(body: &[u8]) -> Option<Mark> {
     let text = std::str::from_utf8(body).ok()?;
-    let (head, _) = text.split_once(';').unwrap_or((text, ""));
+    let (head, rest) = text.split_once(';').unwrap_or((text, ""));
+    if head == "9" {
+        return Some(Mark::Cwd(rest.trim_matches('"').to_string()));
+    }
     if text.is_empty() || (text.contains(';') && head.parse::<u32>().is_ok()) {
         return None;
     }
@@ -324,7 +329,7 @@ impl Blocks {
                 block.exit_code = code;
                 block.duration = block.started.map(|t| t.elapsed());
             }
-            Mark::Notify(_) => {} // no es de los bloques: lo atiende la sesión
+            Mark::Notify(_) | Mark::Cwd(_) => {} // no son de los bloques: los atiende la sesión
         }
     }
 
@@ -506,8 +511,12 @@ mod tests {
             s.feed(b"\x1b]777;notify;Agente;Necesita permiso\x1b\\"),
             notify("Agente: Necesita permiso")
         );
-        // OSC 9;4 (barra de progreso) y 9;9 (carpeta actual) no son avisos: se descartan sin avisar.
-        assert_eq!(s.feed(b"\x1b]9;4;1;50\x07\x1b]9;9;C:\\\x07"), []);
+        // OSC 9;4 (barra de progreso) no es un aviso; 9;9 es la carpeta actual.
+        assert_eq!(s.feed(b"\x1b]9;4;1;50\x07"), []);
+        assert_eq!(
+            s.feed(b"\x1b]9;9;C:\\src\x07"),
+            [Piece::Mark(Mark::Cwd(r"C:\src".into()))]
+        );
     }
 
     #[test]
