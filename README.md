@@ -11,6 +11,10 @@
 Orion ordena tu trabajo en la terminal sin pedirte que aprendas nada nuevo: abres PowerShell como siempre,
 pero cada comando queda en su propio **bloque**, con su resultado y lo que tardó a la vista.
 
+<p align="center">
+  <img src="assets/screenshots/terminal.png" width="720" alt="Orion con la barra lateral de pestañas y un bloque de PowerShell">
+</p>
+
 ## Qué tiene
 
 - **Bloques de comandos.** Cada comando y su salida forman un bloque, con una barra de color
@@ -54,6 +58,10 @@ No instala nada ni necesita otros programas. Para borrarlo, borra la carpeta
 
 Todo se puede cambiar desde `Ctrl+,` o editando `%APPDATA%\orion\config.toml`.
 Los cambios se aplican apenas guardas el archivo, sin reiniciar.
+
+<p align="center">
+  <img src="assets/screenshots/configuracion.png" width="720" alt="Ventana de configuración: tema, shell y fuente">
+</p>
 
 ```toml
 theme = "Tokyo Night"   # Tokyo Night, Catppuccin Mocha, Dracula, Gruvbox, Catppuccin Latte
