@@ -397,4 +397,30 @@ mod tests {
         assert_eq!(copied.as_deref(), Some("hola"));
         let _ = session.shell.child.kill();
     }
+
+    /// Un agente se escribe apenas se abre la pestaña, antes del primer prompt: no se pierde,
+    /// corre en su carpeta y la sesión se entera de la carpeta (OSC 9;9).
+    #[test]
+    fn an_agent_typed_before_the_prompt_runs_in_its_folder() {
+        let dir = std::env::temp_dir().join(format!("orion agente {}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let kind = crate::pty::usable_shell(0);
+        let mut session = Session::new(&ctx, (80, 24), kind).unwrap();
+        let shell = &crate::pty::SHELLS[kind];
+        let command = "'ok' | Set-Content listo.txt";
+        session.write(crate::agents::launch_input(shell, Some(&dir), command).as_bytes());
+        let start = Instant::now();
+        while !dir.join("listo.txt").exists() || session.cwd.as_deref() != Some(dir.as_path()) {
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "cwd: {:?}",
+                session.cwd
+            );
+            session.process_output();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = session.shell.child.kill();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

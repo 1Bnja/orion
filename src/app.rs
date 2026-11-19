@@ -140,6 +140,8 @@ enum Action {
     /// Bajar e instalar esa versión.
     InstallUpdate(String),
     RestartForUpdate,
+    /// Abrir el agente con ese índice en `settings.agents`.
+    Agent(usize),
 }
 
 impl Orion {
@@ -196,6 +198,32 @@ impl Orion {
                 self.active = self.tabs.len() - 1;
             }
             Err(e) => self.show_toast(format!("No pude abrir otra pestaña: {e}")),
+        }
+    }
+
+    /// Pestaña nueva que lanza un agente: en la carpeta actual o, si el perfil lo pide, en un worktree nuevo.
+    fn open_agent(&mut self, ctx: &egui::Context, index: usize) {
+        let Some(agent) = self.settings.agents.get(index).cloned() else {
+            return;
+        };
+        let mut dir = self.session().cwd.clone();
+        if agent.worktree {
+            let Some(cwd) = dir else {
+                let tip = "abre el agente desde una pestaña de PowerShell dentro del repo";
+                return self.show_toast(format!("No sé en qué repo estás: {tip}"));
+            };
+            match crate::agents::create_worktree(&cwd, &agent.name) {
+                Ok(path) => dir = Some(path),
+                Err(e) => return self.show_toast(format!("No pude crear el worktree: {e}")),
+            }
+        }
+        let tabs = self.tabs.len();
+        self.new_tab(ctx, None);
+        if self.tabs.len() > tabs {
+            let session = self.session();
+            let shell = &crate::pty::SHELLS[session.kind];
+            let input = crate::agents::launch_input(shell, dir.as_deref(), &agent.command);
+            session.write(input.as_bytes());
         }
     }
 
@@ -293,6 +321,15 @@ impl Orion {
                 for &i in installed_shells() {
                     if ui.button(SHELLS[i].name).clicked() {
                         action = Some(Action::NewTab(Some(i)));
+                        ui.close();
+                    }
+                }
+                if !self.settings.agents.is_empty() {
+                    ui.separator();
+                }
+                for (i, agent) in self.settings.agents.iter().enumerate() {
+                    if ui.button(format!("Agente: {}", agent.name)).clicked() {
+                        action = Some(Action::Agent(i));
                         ui.close();
                     }
                 }
@@ -501,6 +538,7 @@ impl Orion {
     fn apply_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::NewTab(kind) => self.new_tab(ctx, kind),
+            Action::Agent(i) => self.open_agent(ctx, i),
             Action::CloseTab(i) => self.close_tab(ctx, i),
             Action::SelectTab(i) => self.active = i,
             Action::Split(right) => self.split(ctx, right),

@@ -112,6 +112,9 @@ impl Orion {
             let name = format!("Nueva pestaña: {}", crate::pty::SHELLS[i].name);
             list.push((name, "", Action::NewTab(Some(i))));
         }
+        for (i, agent) in self.settings.agents.iter().enumerate() {
+            list.push((format!("Agente: {}", agent.name), "", Action::Agent(i)));
+        }
         for (i, (name, _)) in crate::backdrop::BACKDROPS.iter().enumerate() {
             list.push((format!("Fondo: {name}"), "", Action::Backdrop(i)));
         }

@@ -21,7 +21,20 @@ pub(crate) fn config_text(settings: &Settings) -> String {
     let backdrops: Vec<&str> = BACKDROPS.iter().map(|b| b.0).collect();
     let backdrops = backdrops.join(", ");
     let check_updates = settings.check_updates;
-    format!(
+    let mut agents = String::new();
+    for agent in &settings.agents {
+        let name = toml::Value::String(agent.name.clone());
+        let command = toml::Value::String(agent.command.clone());
+        let worktree = agent.worktree;
+        agents +=
+            &format!("\n[[agent]]\nname = {name}\ncommand = {command}\nworktree = {worktree}\n");
+    }
+    if agents.is_empty() {
+        agents =
+            "\n# [[agent]]\n# name = \"Mi agente\"\n# command = \"mi-agente\"\n# worktree = true\n"
+                .into();
+    }
+    let text = format!(
         r#"# Configuración de Orion. Se puede editar aquí o desde el menú (Ctrl+, o clic derecho).
 # Si editas a mano, los cambios se aplican apenas guardas el archivo.
 
@@ -44,9 +57,15 @@ family = {family}
 size = {:.1}
 # Alto de cada línea respecto de la letra: 1.0 = pegadas, 1.2 = con aire, 1.5 = muy espaciadas.
 line_height = {:.2}
+
+# Agentes: cada [[agent]] aparece en la paleta (Ctrl+Shift+P) y en el clic derecho de
+# "+ Nueva pestaña". Abre una pestaña en la carpeta actual y escribe `command`.
+# Con worktree = true, antes crea un git worktree al lado del repo, en una rama nueva
+# (orion/nombre-1, -2…): así varios agentes trabajan en paralelo sin pisarse.
 "#,
         settings.font.size, settings.font.line_height
-    )
+    );
+    text + &agents
 }
 
 /// Guarda la configuración en config.toml (creando la carpeta si hace falta).
@@ -68,6 +87,19 @@ pub(crate) struct Settings {
     /// Al abrir, revisar si hay una versión nueva en GitHub.
     pub(crate) check_updates: bool,
     pub(crate) font: FontSettings,
+    /// Perfiles de agente ([[agent]] en el archivo).
+    #[serde(rename = "agent")]
+    pub(crate) agents: Vec<Agent>,
+}
+
+#[derive(serde::Deserialize, Clone, PartialEq, Debug)]
+pub(crate) struct Agent {
+    pub(crate) name: String,
+    /// Lo que se escribe en la shell para lanzarlo.
+    pub(crate) command: String,
+    /// Antes de lanzarlo, crear un git worktree en una rama nueva.
+    #[serde(default)]
+    pub(crate) worktree: bool,
 }
 
 impl Default for Settings {
@@ -78,6 +110,7 @@ impl Default for Settings {
             backdrop: BACKDROPS[0].0.into(),
             check_updates: true,
             font: FontSettings::default(),
+            agents: Vec::new(),
         }
     }
 }
@@ -216,6 +249,13 @@ mod tests {
     fn saved_config_round_trips() {
         // Lo que guarda el menú se vuelve a leer igual, incluidas rutas con '\' y comillas.
         let mut s = Settings::default();
+        let back: Settings = toml::from_str(&config_text(&s)).unwrap();
+        assert!(back.agents.is_empty()); // el ejemplo va comentado
+        s.agents = vec![Agent {
+            name: "Revisor".into(),
+            command: r#"mi-agente --modo "revisar""#.into(),
+            worktree: true,
+        }];
         for family in ["Monocraft", r#"C:\fuentes\Mi "Fuente".otf"#] {
             s.font.family = family.into();
             s.font.size = 18.0;

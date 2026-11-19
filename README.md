@@ -22,6 +22,12 @@ pero cada comando queda en su propio **bloque**, con su resultado y lo que tard�
   Puedes copiar el comando o la salida de un clic, colapsar las salidas largas y saltar entre bloques con `Ctrl+↑` / `Ctrl+↓`.
 - **Pestañas en una barra lateral**, con el nombre de la carpeta y un punto que te dice cómo terminó el último comando.
 - **Paneles divididos** a la derecha o hacia abajo, cada uno con su propia shell.
+- **Hecho para trabajar con agentes de código**:
+  - Perfiles de agente que abren una pestaña con el agente andando, si quieres en su propio `git worktree` y rama, para correr varios en paralelo.
+  - Avisos (un punto azul en la pestaña) cuando un agente termina o pide permiso.
+  - `Shift+Enter` para escribir prompts de varias líneas.
+  - Arrastra archivos o imágenes a la ventana para escribir sus rutas.
+  - `Ctrl+clic` abre links en el navegador y rutas como `src/app.rs:42` en el editor, en esa línea.
 - **Paleta de comandos** (`Ctrl+Shift+P`): busca cualquier acción por su nombre y aprende su atajo.
 - **Sugerencias desde tu historial** mientras escribes; `→` las acepta.
 - **Temas**: Tokyo Night, Catppuccin Mocha, Dracula, Gruvbox y Catppuccin Latte (claro).
@@ -55,6 +61,8 @@ No instala nada ni necesita otros programas. Para borrarlo, borra la carpeta
 | `Ctrl+C` | Copiar la selección o el bloque marcado; si no hay nada, interrumpir |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copiar / pegar |
 | `→` | Aceptar la sugerencia (`F2` muestra varias en una lista) |
+| `Shift+Enter` | Nueva línea sin ejecutar |
+| `Ctrl+clic` | Abrir el link o la ruta bajo el mouse |
 
 ## Configuración
 
@@ -75,7 +83,15 @@ check_updates = true    # al abrir, buscar si hay una versión nueva
 family = "Cascadia Mono"  # una fuente instalada, o la ruta a un .ttf/.otf
 size = 14.0
 line_height = 1.2         # 1.0 = líneas pegadas, 1.5 = muy espaciadas
+
+# Un perfil de agente: aparece en la paleta y en el clic derecho de "+ Nueva pestaña".
+[[agent]]
+name = "Mi agente"
+command = "mi-agente"   # lo que se escribe en la shell para lanzarlo
+worktree = true         # crear antes un git worktree en una rama nueva (orion/mi-agente-1)
 ```
+
+Las rutas en `Ctrl+clic` se abren con el editor (`code`, si está instalado) o con la app predeterminada.
 
 Los bloques, el título por carpeta y las sugerencias funcionan en PowerShell.
 En cmd y WSL Orion es una terminal normal.

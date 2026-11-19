@@ -10,6 +10,7 @@
 // En debug la dejamos: ahí se ven los mensajes de `eprintln!`.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agents;
 mod app;
 mod backdrop;
 mod blocks;
