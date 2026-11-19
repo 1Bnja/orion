@@ -354,3 +354,43 @@ impl Session {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// De punta a punta, como en la app: un PowerShell real copia con OSC 52 y la sesión lo recibe.
+    #[test]
+    fn a_real_shell_can_copy_through_the_session() {
+        let ctx = egui::Context::default();
+        let mut session = Session::new(&ctx, (80, 24), crate::pty::usable_shell(0)).unwrap();
+        let wait = |session: &mut Session, done: &dyn Fn(&Session) -> bool| {
+            let start = Instant::now();
+            while !done(session) {
+                assert!(
+                    start.elapsed() < Duration::from_secs(15),
+                    "se acabó el tiempo"
+                );
+                session.process_output();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        // Esperar el primer prompt (hay un bloque abierto).
+        wait(&mut session, &|s| !s.blocks.list.is_empty());
+        session.write(b"[Console]::Write(\"`e]52;c;aG9sYQ==`a\")\r");
+        let mut copied = None;
+        let start = Instant::now();
+        while copied.is_none() {
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "no llegó lo copiado"
+            );
+            session.process_output();
+            copied = session.take_copied();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(copied.as_deref(), Some("hola"));
+        let _ = session.shell.child.kill();
+    }
+}
