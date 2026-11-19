@@ -11,7 +11,8 @@
 # Also sets the title (OSC 0) with the current folder name: shown in the tab.
 # Sets OSC 9;9 with the full path: Orion uses it to resolve relative paths on Ctrl+click.
 #
-# Loaded after your profile, so it wraps whatever prompt you already have.
+# Loaded after your profile, so it wraps whatever prompt you already have,
+# including themes like Powerlevel10k or oh-my-zsh.
 
 __orion_first_prompt=1  # 1 = no prompt shown yet
 __orion_ran_command=0   # 0 = no command ran since last prompt
@@ -52,14 +53,19 @@ function __orion_preexec {
     printf '%s]133;C%s' "$e" "$bel"
 }
 
+# OSC 133 B: prompt ends (command input starts).
+# Runs LAST in precmd so it appends B to whatever PS1 the theme just set.
+# The idempotency check avoids duplicating B when no theme rewrites PS1.
+function __orion_set_b {
+    [[ $PS1 != *$'\e]133;B\a'* ]] && PS1="${PS1}"$'%{\e]133;B\a%}'
+}
+
 # Prepend so __orion_precmd runs first and captures $? before any other hook changes it.
 precmd_functions=(__orion_precmd $precmd_functions[@])
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec __orion_preexec
-
-# OSC 133 B: prompt ends (command input starts).
-# Appended to PS1 so it appears right after the prompt is drawn.
-PS1="${PS1}"$'%{\e]133;B\a%}'
+# Append so __orion_set_b runs last — after any theme that overwrites PS1.
+add-zsh-hook precmd __orion_set_b
 
 # Shift+Enter in Orion = new line without executing.
 # Orion sends it as ESC+Enter (Meta+Enter), which is what code agents also use.

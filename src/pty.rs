@@ -132,7 +132,6 @@ pub(crate) static SHELLS: [ShellKind; 4] = [
         powershell: false,
     },
 ];
-// ponytail: el campo `zsh` no existe en Windows; está marcado con #[cfg(not(windows))] en la struct.
 
 /// Índice de la shell con ese nombre (sin importar mayúsculas).
 pub(crate) fn find_shell(name: &str) -> Option<usize> {
@@ -176,7 +175,7 @@ impl ShellKind {
         if self.zsh {
             return spawn_zsh(size, self.program, &args);
         }
-        spawn_program(size, self.program, &args)
+        spawn_program(size, self.program, &args, &[])
     }
 
     /// Una ruta lista para escribirla en esta shell: entre comillas si hace falta y,
@@ -223,6 +222,7 @@ impl ShellKind {
 }
 
 /// Lanza `program` con `args` en un PTY nuevo.
+/// `extra_env`: variables de entorno adicionales (ej. ZDOTDIR para zsh).
 ///
 /// Ojo: ConPTY arranca preguntando la posición del cursor (ESC[6n) y no lanza la shell
 /// hasta recibir respuesta. En la app la responde el Term; quien use esto sin Term debe responderla.
@@ -230,6 +230,7 @@ pub(crate) fn spawn_program(
     size: PtySize,
     program: &str,
     args: &[impl AsRef<OsStr>],
+    extra_env: &[(&str, &OsStr)],
 ) -> Result<Shell, Error> {
     let pair = native_pty_system().openpty(size)?;
     let mut cmd = CommandBuilder::new(program);
@@ -244,6 +245,9 @@ pub(crate) fn spawn_program(
             cmd.env("LANG", "en_US.UTF-8");
         }
     }
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
     // ponytail: el slave se suelta al salir de la función; la shell ya tiene su copia.
     let child = pair.slave.spawn_command(cmd)?;
     let writer = Rc::new(RefCell::new(pair.master.take_writer()?));
@@ -254,52 +258,59 @@ pub(crate) fn spawn_program(
     })
 }
 
-/// Crea un ZDOTDIR temporal para zsh: escribe la integración y un .zshrc que carga primero
-/// la configuración del usuario y después la integración.
+/// Escribe los archivos de startup de zsh en `dir`, apuntando al directorio de configuración
+/// original del usuario (`zdotdir_src`). Crea wrappers para .zshenv, .zprofile, .zshrc y .zlogin
+/// para que el PATH de Homebrew, cargo, etc. lleguen correctamente a la sesión.
 #[cfg(not(windows))]
-fn zsh_zdotdir() -> Result<std::path::PathBuf, Error> {
-    let dir = std::env::temp_dir().join(format!("orion_zsh_{}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
+fn zsh_zdotdir(dir: &std::path::Path, zdotdir_src: &std::path::Path) -> Result<(), Error> {
+    std::fs::create_dir_all(dir)?;
     let integration = dir.join("orion_integration.zsh");
     std::fs::write(&integration, ZSH_INTEGRATION)?;
-    let zshrc = format!(
-        "# Orion: load your config first, then the integration.\n\
-         unset ZDOTDIR\n\
-         [[ -f \"$HOME/.zshrc\" ]] && source \"$HOME/.zshrc\"\n\
-         source '{}'\n",
-        integration.display()
-    );
-    std::fs::write(dir.join(".zshrc"), zshrc)?;
-    Ok(dir)
+    let src = zdotdir_src.display();
+    // .zshenv: loaded first, always (login and interactive shells).
+    std::fs::write(
+        dir.join(".zshenv"),
+        format!("[[ -f '{src}/.zshenv' ]] && source '{src}/.zshenv'\n"),
+    )?;
+    // .zprofile: loaded for login shells, before .zshrc (Homebrew, cargo PATH live here).
+    std::fs::write(
+        dir.join(".zprofile"),
+        format!("[[ -f '{src}/.zprofile' ]] && source '{src}/.zprofile'\n"),
+    )?;
+    // .zshrc: unset ZDOTDIR first so the user's config finds its own paths, then load integration.
+    std::fs::write(
+        dir.join(".zshrc"),
+        format!(
+            "unset ZDOTDIR\n\
+             [[ -f '{src}/.zshrc' ]] && source '{src}/.zshrc'\n\
+             source '{}'\n",
+            integration.display()
+        ),
+    )?;
+    // .zlogin: loaded for login shells, after .zshrc.
+    std::fs::write(
+        dir.join(".zlogin"),
+        format!("[[ -f '{src}/.zlogin' ]] && source '{src}/.zlogin'\n"),
+    )?;
+    Ok(())
 }
 
 /// Lanza zsh con la integración de Orion cargada vía un ZDOTDIR temporal.
 #[cfg(not(windows))]
 fn spawn_zsh(size: PtySize, program: &str, args: &[String]) -> Result<Shell, Error> {
-    let zdotdir = zsh_zdotdir()?;
-    let pair = native_pty_system().openpty(size)?;
-    let mut cmd = CommandBuilder::new(program);
-    cmd.args(args);
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-    if std::env::var_os("LANG").is_none() {
-        cmd.env("LANG", "en_US.UTF-8");
-    }
-    cmd.env("ZDOTDIR", zdotdir);
-    // ponytail: el slave se suelta al salir de la función; la shell ya tiene su copia.
-    let child = pair.slave.spawn_command(cmd)?;
-    let writer = Rc::new(RefCell::new(pair.master.take_writer()?));
-    Ok(Shell {
-        master: pair.master,
-        writer,
-        child,
-    })
+    let zdotdir_src = std::env::var_os("ZDOTDIR")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let zdotdir = std::env::temp_dir().join(format!("orion_zsh_{}", std::process::id()));
+    zsh_zdotdir(&zdotdir, &zdotdir_src)?;
+    spawn_program(size, program, args, &[("ZDOTDIR", zdotdir.as_os_str())])
 }
 
 /// PowerShell (pwsh, o powershell.exe si no está) con `args`. Para los tests.
 #[cfg(all(test, windows))]
 pub(crate) fn spawn_shell(size: PtySize, args: &[impl AsRef<OsStr>]) -> Result<Shell, Error> {
-    spawn_program(size, SHELLS[usable_shell(0)].program, args)
+    spawn_program(size, SHELLS[usable_shell(0)].program, args, &[])
 }
 
 /// Lee el PTY en un hilo propio y manda cada trozo de bytes por un canal.
@@ -405,7 +416,8 @@ mod tests {
     fn unix_shells_run_with_a_terminal_environment() {
         assert_eq!(find_shell("ZSH"), Some(0));
         assert!(installed_shells().contains(&0), "zsh viene con macOS");
-        let shell = spawn_program(pty_size((80, 24)), "sh", &["-c", "echo orion-$TERM"]).unwrap();
+        let shell =
+            spawn_program(pty_size((80, 24)), "sh", &["-c", "echo orion-$TERM"], &[]).unwrap();
         let rx = spawn_reader(&*shell.master, || {}).unwrap();
         wait_for(&rx, &mut String::new(), "orion-xterm-256color");
     }
@@ -552,12 +564,66 @@ mod tests {
         let (shell, rx) = start_zsh();
         let mut out = String::new();
         wait_for(&rx, &mut out, "\x1b]133;B\x07");
-        // ESC+Enter between two commands, then Enter: both run as a multi-line command.
+        out.clear();
+        // ESC+Enter between two commands, then Enter: both run as a single multi-line command.
         let typed = b"echo aaa\x1b\recho bbb\r";
         shell.writer.borrow_mut().write_all(typed).unwrap();
         wait_for(&rx, &mut out, "\x1b]133;D;0\x07");
         assert!(out.contains("aaa"), "falta 'aaa' en la salida: {out:?}");
         assert!(out.contains("bbb"), "falta 'bbb' en la salida: {out:?}");
+        // A single C means both commands executed in one go, not two separate runs.
+        let c_count = out.matches("\x1b]133;C\x07").count();
+        assert_eq!(c_count, 1, "se esperaba una sola ejecución (un C): {out:?}");
+        let mut shell = shell;
+        let _ = shell.child.kill();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn zsh_profile_variables_reach_the_shell() {
+        // Create a fake user config dir with a .zprofile that exports a known variable.
+        // This exercises the full ZDOTDIR wrapper chain (.zprofile → .zshrc → integration).
+        let fake_src =
+            std::env::temp_dir().join(format!("orion_zsh_profile_src_{}", std::process::id()));
+        std::fs::create_dir_all(&fake_src).unwrap();
+        std::fs::write(
+            fake_src.join(".zprofile"),
+            "export ORION_TEST_PROFILE=from_zprofile\n",
+        )
+        .unwrap();
+
+        // Build the ZDOTDIR structure the same way Orion does in production.
+        let zdotdir =
+            std::env::temp_dir().join(format!("orion_zsh_profile_zdotdir_{}", std::process::id()));
+        super::zsh_zdotdir(&zdotdir, &fake_src).unwrap();
+
+        // Spawn with -l (login) + PTY, exactly like ShellKind { args: &["-l"] }.
+        let pair = native_pty_system().openpty(pty_size((80, 24))).unwrap();
+        let mut cmd = CommandBuilder::new("zsh");
+        cmd.args(["-l"]);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("LANG", "en_US.UTF-8");
+        cmd.env("ZDOTDIR", &zdotdir);
+        cmd.env("HISTFILE", "");
+        let child = pair.slave.spawn_command(cmd).unwrap();
+        let writer = Rc::new(RefCell::new(pair.master.take_writer().unwrap()));
+        let shell = Shell {
+            master: pair.master,
+            writer,
+            child,
+        };
+        let rx = spawn_reader(&*shell.master, || {}).unwrap();
+
+        let mut out = String::new();
+        wait_for(&rx, &mut out, "\x1b]133;B\x07");
+        out.clear();
+        shell
+            .writer
+            .borrow_mut()
+            .write_all(b"echo \"profile:$ORION_TEST_PROFILE\"\r")
+            .unwrap();
+        wait_for(&rx, &mut out, "profile:from_zprofile");
         let mut shell = shell;
         let _ = shell.child.kill();
     }
@@ -589,8 +655,13 @@ mod tests {
         let cmd = find_shell("CMD").unwrap();
         assert!(installed_shells().contains(&cmd));
         assert_eq!(find_shell("nada"), None);
-        let shell = spawn_program(pty_size((80, 24)), "cmd.exe", &["/c", "echo orion-cmd"]);
-        let shell = shell.unwrap();
+        let shell = spawn_program(
+            pty_size((80, 24)),
+            "cmd.exe",
+            &["/c", "echo orion-cmd"],
+            &[],
+        )
+        .unwrap();
         shell.writer.borrow_mut().write_all(b"\x1b[1;1R").unwrap();
         let rx = spawn_reader(&*shell.master, || {}).unwrap();
         wait_for(&rx, &mut String::new(), "orion-cmd");
