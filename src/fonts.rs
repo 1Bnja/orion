@@ -40,12 +40,34 @@ pub(crate) fn registry_fonts() -> Vec<(String, PathBuf)> {
         };
         for (entry, _) in key.enum_values().flatten() {
             if let Ok(file) = key.get_value::<String, _>(&entry) {
+                // Las .fon (mapas de bits de Windows 3.1, ej. "Courier 10,12,15") no son TrueType/OpenType:
+                // egui no puede usarlas, así que ni las ofrecemos.
+                let lower = file.to_lowercase();
+                if !(is_font_file(&lower) || lower.ends_with(".ttc")) {
+                    continue;
+                }
                 // `join` con una ruta absoluta la deja tal cual, así que sirve para ambos casos.
                 fonts.push((entry, system_fonts.join(file)));
             }
         }
     }
     fonts
+}
+
+/// Lee un archivo de fuente solo si de verdad es TrueType/OpenType: egui *cierra el programa*
+/// (panic) si le pasan otra cosa, en vez de devolver un error. Los primeros 4 bytes lo dicen.
+fn read_font(path: &Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    let magic: [&[u8]; 4] = [&[0, 1, 0, 0], b"OTTO", b"true", b"ttcf"];
+    if magic.iter().any(|m| bytes.starts_with(m)) {
+        Some(bytes)
+    } else {
+        eprintln!(
+            "orion: {} no es una fuente TrueType/OpenType",
+            path.display()
+        );
+        None
+    }
 }
 
 pub(crate) fn is_font_file(path: &str) -> bool {
@@ -223,7 +245,7 @@ pub(crate) fn font_definitions(
     let mut fallback = fonts.families[&FontFamily::Monospace].clone();
     // Segoe UI Symbol (viene con Windows): flechas, figuras y símbolos que muchas fuentes no traen.
     if let Some((symbols, _)) = find_font("Segoe UI Symbol")
-        && let Ok(bytes) = std::fs::read(symbols)
+        && let Some(bytes) = read_font(&symbols)
     {
         let data = Arc::new(FontData::from_owned(bytes));
         fonts.font_data.insert("symbols".into(), data);
@@ -233,7 +255,7 @@ pub(crate) fn font_definitions(
     let mut mono = fallback.clone();
     let mut bold = fallback;
     if let Some((regular_file, bold_file)) = files
-        && let Ok(bytes) = std::fs::read(regular_file)
+        && let Some(bytes) = read_font(regular_file)
     {
         // "wght" es el eje de peso de las fuentes variables (400 normal, 700 negrita).
         // En fuentes no variables se ignora.
@@ -246,7 +268,7 @@ pub(crate) fn font_definitions(
         };
         // Si hay archivo "Bold" aparte, se usa; si no, el mismo archivo con peso 700
         // (una fuente variable como Cascadia engorda; una fija se queda igual).
-        let bold_bytes = bold_file.as_ref().and_then(|f| std::fs::read(f).ok());
+        let bold_bytes = bold_file.as_ref().and_then(|f| read_font(f));
         let bold_data = font(bold_bytes.unwrap_or_else(|| bytes.clone()), 700.0);
         fonts.font_data.insert("mono".into(), font(bytes, 400.0));
         fonts.font_data.insert("mono-bold".into(), bold_data);
@@ -346,5 +368,63 @@ mod tests {
             }
         }
         assert!(!is_monospace(&fonts.join("no-existe.ttf")));
+    }
+}
+
+#[cfg(test)]
+mod font_loading {
+    use super::*;
+
+    /// Carga los archivos en egui y dibuja texto, como al elegir una fuente en el menú.
+    /// Devuelve false si egui se cayó.
+    fn loads(files: Option<(PathBuf, Option<PathBuf>)>) -> bool {
+        std::panic::catch_unwind(|| {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(font_definitions(files.as_ref()));
+            for _ in 0..2 {
+                // Como la app: medir la celda con la fuente monoespaciada y dibujar texto.
+                let mut out = ctx.run_ui(Default::default(), |ui| {
+                    let font = egui::FontId::monospace(14.0);
+                    let bold = egui::FontId::new(14.0, bold_family());
+                    ui.ctx()
+                        .fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+                    ui.label(egui::RichText::new("Mg─│é→ 123").font(font));
+                    ui.label(egui::RichText::new("negrita").font(bold));
+                });
+                out.textures_delta.clear(); // sin ventana, nadie sube las texturas
+            }
+        })
+        .is_ok()
+    }
+
+    /// Las .fon de Windows (mapas de bits, ej. "Courier 10,12,15") hacían caer a Orion al elegirlas.
+    #[test]
+    fn a_bitmap_font_does_not_crash() {
+        let fon = Path::new(r"C:\Windows\Fonts\coure.fon");
+        if fon.exists() {
+            assert!(loads(Some((fon.into(), None))), "Orion se cayó con {fon:?}");
+        }
+        // Y ya no aparecen en la lista del menú.
+        let listed = registry_fonts();
+        assert!(listed.iter().all(|(_, file)| {
+            let ext = file
+                .extension()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase();
+            ext != "fon"
+        }));
+    }
+
+    /// Todas las fuentes de la lista cargan sin caerse: `cargo test every_font -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn every_font_choice_loads() {
+        let broken: Vec<String> = font_choices()
+            .into_iter()
+            .filter(|choice| !loads(find_font(&choice.family)))
+            .map(|choice| choice.family)
+            .collect();
+        assert!(broken.is_empty(), "se caen: {broken:?}");
     }
 }
