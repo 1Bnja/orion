@@ -11,6 +11,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod backdrop;
 mod blocks;
 mod colors;
 mod config;
@@ -39,13 +40,19 @@ fn main() -> Result<(), pty::Error> {
                 rgba: icon::render(64),
                 width: 64,
                 height: 64,
-            }),
+            })
+            // Transparente: deja ver Mica o el acrílico (ver `backdrop`).
+            .with_transparent(true),
+        // OpenGL: en Windows respeta la transparencia de la ventana; el motor por defecto (wgpu) no siempre.
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
     eframe::run_native(
         "Orion",
         options,
         Box::new(|cc| Ok(Box::new(app::Orion::new(cc, settings, grid)?))),
-    )?;
+    )
+    // Con OpenGL, el error de eframe no se puede pasar entre hilos (no es `Send`): lo pasamos a texto.
+    .map_err(|e| e.to_string())?;
     Ok(())
 }

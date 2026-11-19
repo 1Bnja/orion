@@ -1,5 +1,6 @@
 //! Configuración del usuario: leer y guardar %APPDATA%\orion\config.toml.
 
+use crate::backdrop::{BACKDROPS, find_backdrop};
 use crate::colors::{THEMES, find_theme};
 use crate::pty::{SHELLS, find_shell};
 use std::path::PathBuf;
@@ -16,12 +17,18 @@ pub(crate) fn config_text(settings: &Settings) -> String {
     let shell = toml::Value::String(settings.shell.clone());
     let shells: Vec<&str> = SHELLS.iter().map(|s| s.name).collect();
     let shells = shells.join(", ");
+    let backdrop = toml::Value::String(settings.backdrop.clone());
+    let backdrops: Vec<&str> = BACKDROPS.iter().map(|b| b.0).collect();
+    let backdrops = backdrops.join(", ");
     format!(
         r#"# Configuración de Orion. Se puede editar aquí o desde el menú (Ctrl+, o clic derecho).
 # Si editas a mano, los cambios se aplican apenas guardas el archivo.
 
 # Colores. Hay: {themes}.
 theme = {theme}
+# Fondo de Windows 11 detrás de la terminal. Hay: {backdrops}.
+# Mica toma un tinte suave de tu fondo de pantalla; acrílico desenfoca lo que hay detrás de la ventana.
+backdrop = {backdrop}
 # Shell de las pestañas nuevas (Ctrl+Shift+T). Hay: {shells}.
 # Para abrir otra solo una vez: clic derecho en "+ Nueva pestaña", o la paleta (Ctrl+Shift+P).
 shell = {shell}
@@ -53,6 +60,8 @@ pub(crate) struct Settings {
     pub(crate) theme: String,
     /// Nombre de una de las shells de `pty::SHELLS`.
     pub(crate) shell: String,
+    /// Nombre de uno de los fondos de `backdrop::BACKDROPS`.
+    pub(crate) backdrop: String,
     pub(crate) font: FontSettings,
 }
 
@@ -61,6 +70,7 @@ impl Default for Settings {
         Self {
             theme: THEMES[0].name.into(),
             shell: SHELLS[0].name.into(),
+            backdrop: BACKDROPS[0].0.into(),
             font: FontSettings::default(),
         }
     }
@@ -114,6 +124,9 @@ pub(crate) fn parse_settings(text: &str) -> Result<Settings, String> {
     let shell = find_shell(&settings.shell)
         .ok_or_else(|| format!("no conozco la shell \"{}\"", settings.shell))?;
     settings.shell = SHELLS[shell].name.into();
+    let backdrop = find_backdrop(&settings.backdrop)
+        .ok_or_else(|| format!("no hay un fondo \"{}\"", settings.backdrop))?;
+    settings.backdrop = BACKDROPS.iter().find(|b| b.1 == backdrop).unwrap().0.into();
     Ok(settings)
 }
 
@@ -186,6 +199,11 @@ mod tests {
         assert!(err.contains("Nope"), "{err}");
         assert_eq!(parse_settings("shell = 'wsl'").unwrap().shell, "WSL");
         assert!(parse_settings("shell = 'fish'").is_err());
+        assert_eq!(
+            parse_settings("backdrop = 'acrilico'").unwrap().backdrop,
+            "Acrílico"
+        );
+        assert!(parse_settings("backdrop = 'vidrio'").is_err());
     }
 
     #[test]

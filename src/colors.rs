@@ -7,7 +7,7 @@ use alacritty_terminal::vte::ansi::Color;
 use alacritty_terminal::vte::ansi::NamedColor;
 use alacritty_terminal::vte::ansi::Rgb;
 use eframe::egui::Color32;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 /// Un tema: el texto, el fondo, la selección y los 16 colores ANSI (0-7 normales, 8-15 brillantes).
 /// Los colores de la interfaz (barra lateral, separadores) se sacan mezclando el fondo y el texto.
@@ -106,6 +106,24 @@ pub(crate) fn find_theme(name: &str) -> Option<usize> {
 
 pub(crate) fn set_theme(index: usize) {
     CURRENT.store(index.min(THEMES.len() - 1), Ordering::Relaxed);
+}
+
+/// Opacidad de los fondos de Orion (255 = opaco). Menos de 255 deja ver Mica o el acrílico detrás.
+static SURFACE_ALPHA: AtomicU8 = AtomicU8::new(255);
+
+pub(crate) fn set_surface_alpha(alpha: u8) {
+    SURFACE_ALPHA.store(alpha, Ordering::Relaxed);
+}
+
+/// ¿Los fondos son opacos? (sin Mica ni acrílico).
+pub(crate) fn opaque() -> bool {
+    SURFACE_ALPHA.load(Ordering::Relaxed) == 255
+}
+
+/// Un color de fondo (la terminal, la barra lateral) con la opacidad actual.
+pub(crate) fn surface(c: Color32) -> Color32 {
+    let alpha = SURFACE_ALPHA.load(Ordering::Relaxed);
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
 }
 
 /// `a` llevado hacia `b` en una fracción `t` (0 = a, 1 = b).

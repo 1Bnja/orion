@@ -1,7 +1,8 @@
 //! Ventana de configuración (Ctrl+, o clic derecho): el tema y elegir, agrandar y agregar fuentes.
 
 use crate::app::Orion;
-use crate::colors::{THEMES, find_theme, set_theme, theme};
+use crate::backdrop::{BACKDROPS, Backdrop, find_backdrop};
+use crate::colors::{THEMES, find_theme, set_surface_alpha, set_theme, theme};
 use crate::config::Settings;
 use crate::config::save_settings;
 use crate::fonts::FontChoice;
@@ -57,7 +58,21 @@ impl Orion {
         if new.theme != self.settings.theme {
             apply_theme(ctx, &new.theme);
         }
+        let look_changed =
+            new.theme != self.settings.theme || new.backdrop != self.settings.backdrop;
         self.settings = new;
+        if look_changed {
+            self.apply_window_look();
+        }
+    }
+
+    /// El fondo de Windows (Mica o acrílico) y la barra de título clara u oscura según el tema.
+    pub(crate) fn apply_window_look(&self) {
+        let backdrop = find_backdrop(&self.settings.backdrop).unwrap_or(Backdrop::None);
+        set_surface_alpha(backdrop.alpha());
+        if let Some(hwnd) = self.hwnd {
+            crate::backdrop::apply(hwnd, backdrop, !theme().is_light());
+        }
     }
 
     /// Una fuente arrastrada a la ventana: se copia a la carpeta de Orion y se usa.
@@ -96,6 +111,20 @@ impl Orion {
                             }
                         });
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Fondo");
+                    egui::ComboBox::from_id_salt("fondo")
+                        .selected_text(&new.backdrop)
+                        .show_ui(ui, |ui| {
+                            for (name, _) in BACKDROPS {
+                                ui.selectable_value(&mut new.backdrop, name.to_string(), name);
+                            }
+                        });
+                })
+                .response
+                .on_hover_text(
+                    "Mica: tinte suave de tu fondo de pantalla. Acrílico: desenfoca lo de atrás.",
+                );
                 ui.horizontal(|ui| {
                     ui.label("Shell");
                     egui::ComboBox::from_id_salt("shell")

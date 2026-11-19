@@ -10,7 +10,7 @@ mod panes;
 mod render;
 mod session;
 
-use crate::colors::theme;
+use crate::colors::{opaque, surface, theme};
 use crate::config::{Settings, config_modified, reload_settings};
 use crate::fonts::{apply_font, is_font_file};
 use crate::pty::{Error, SHELLS, find_shell, installed_shells, usable_shell};
@@ -73,6 +73,8 @@ pub(crate) struct Orion {
     config_checked: Instant,
     /// Some = se muestra el medidor de rendimiento.
     perf: Option<Perf>,
+    /// La ventana para Windows (HWND): para pedirle Mica o acrílico.
+    hwnd: Option<isize>,
 }
 
 /// Medidor de rendimiento (paleta → "Mostrar rendimiento"): cuánto tarda cada frame y cuántos hay por segundo.
@@ -127,6 +129,8 @@ enum Action {
     /// Usar el tema con ese índice en `colors::THEMES`.
     Theme(usize),
     TogglePerf,
+    /// Usar el fondo con ese índice en `backdrop::BACKDROPS`.
+    Backdrop(usize),
 }
 
 impl Orion {
@@ -139,7 +143,7 @@ impl Orion {
         apply_font(&cc.egui_ctx, &settings.font.family);
         menu::apply_theme(&cc.egui_ctx, &settings.theme);
         let first = Session::new(&cc.egui_ctx, grid, default_shell(&settings))?;
-        Ok(Self {
+        let orion = Self {
             tabs: vec![Tab::new(first)],
             active: 0,
             settings,
@@ -151,7 +155,10 @@ impl Orion {
             config_modified: config_modified(),
             config_checked: Instant::now(),
             perf: None,
-        })
+            hwnd: crate::backdrop::hwnd_of(cc),
+        };
+        orion.apply_window_look();
+        Ok(orion)
     }
 
     /// El panel con foco de la pestaña activa.
@@ -235,7 +242,7 @@ impl Orion {
     fn tab_sidebar(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         let frame = egui::Frame::new()
-            .fill(theme().sidebar())
+            .fill(surface(theme().sidebar()))
             .inner_margin(egui::Margin::symmetric(6, 8));
         let panel = egui::Panel::left("pestañas")
             .resizable(true)
@@ -454,6 +461,11 @@ impl Orion {
                     Some(Perf::new())
                 };
             }
+            Action::Backdrop(i) => {
+                let mut new = self.settings.clone();
+                new.backdrop = crate::backdrop::BACKDROPS[i].0.into();
+                self.change_settings(ctx, new);
+            }
             Action::Theme(i) => {
                 let mut new = self.settings.clone();
                 new.theme = crate::colors::THEMES[i].name.into();
@@ -495,7 +507,10 @@ impl Orion {
         let menu_open = self.menu.open || self.palette.open;
         let tab = &mut self.tabs[self.active];
         // Entre panel y panel queda una línea de 2 px del color de la barra lateral.
-        ui.painter().rect_filled(area, 0.0, theme().sidebar());
+        // Con Mica o acrílico no: los paneles semitransparentes se oscurecerían de más al pintarse encima.
+        if opaque() {
+            ui.painter().rect_filled(area, 0.0, theme().sidebar());
+        }
         tab.rects.clear();
         tab.panes.layout(area, 2.0, &mut tab.rects);
 
@@ -553,6 +568,12 @@ fn active_after_close(active: usize, closed: usize, left: usize) -> usize {
 }
 
 impl eframe::App for Orion {
+    // Lo que no pintamos queda transparente: así se ve Mica o el acrílico.
+    // Sin esos fondos, la barra lateral y los paneles cubren toda la ventana con colores opacos.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
     // logic corre antes de cada ui y también con la ventana oculta: así ningún canal se acumula.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Todos los paneles de todas las pestañas: los de atrás siguen recibiendo su salida.

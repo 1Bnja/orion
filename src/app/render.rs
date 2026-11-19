@@ -7,6 +7,7 @@ use crate::blocks::{
 use crate::colors::cell_colors;
 use crate::colors::readable;
 use crate::colors::resolve;
+use crate::colors::surface;
 use crate::colors::theme;
 use crate::config::FontSettings;
 use crate::fonts::bold_family;
@@ -246,7 +247,7 @@ impl Session {
     ) -> bool {
         let mut open_menu = false;
         egui::Frame::central_panel(ui.style())
-            .fill(theme().bg)
+            .fill(surface(theme().bg)) // semitransparente con Mica o acrílico
             .show(ui, |ui| {
                 let size = settings.size;
                 // Fuente monoespaciada: todas las letras miden lo mismo, así que 'M' sirve de celda.

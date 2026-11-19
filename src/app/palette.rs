@@ -104,6 +104,9 @@ impl Orion {
             let name = format!("Nueva pestaña: {}", crate::pty::SHELLS[i].name);
             list.push((name, "", Action::NewTab(Some(i))));
         }
+        for (i, (name, _)) in crate::backdrop::BACKDROPS.iter().enumerate() {
+            list.push((format!("Fondo: {name}"), "", Action::Backdrop(i)));
+        }
         for (i, t) in crate::colors::THEMES.iter().enumerate() {
             list.push((format!("Tema: {}", t.name), "", Action::Theme(i)));
         }

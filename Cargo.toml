@@ -9,8 +9,9 @@ repository = "https://github.com/1Bnja/orion"
 [dependencies]
 alacritty_terminal = "0.26.0"
 base64 = "0.22"
-eframe = "0.37.0"
+eframe = { version = "0.37.0", features = ["glow"] }
 portable-pty = "0.9.0"
+raw-window-handle = "0.6"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.1"
 winreg = "0.10"
