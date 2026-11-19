@@ -28,6 +28,16 @@ fn main() -> Result<(), pty::Error> {
     // Tamaño inicial; se corrige en el primer frame, cuando ya sabemos cuánto mide la ventana.
     let grid = (80, 24);
 
+    // Una app de ventana no tiene consola: si Orion se cae, el motivo queda en %APPDATA%\orion\crash.log.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = config::config_path().and_then(|p| Some(p.parent()?.to_path_buf())) {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("crash.log"), format!("{info}\n"));
+        }
+        default_hook(info);
+    }));
+
     update::clean_up(); // borra el .exe viejo si venimos de una actualización
     let settings = config::load_settings();
     // Para saber qué se aplicó: útil al probar fuentes nuevas.
