@@ -52,6 +52,8 @@ const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
 const DWMSBT_NONE: u32 = 1;
 const DWMSBT_MAINWINDOW: u32 = 2;
 const DWMSBT_TRANSIENTWINDOW: u32 = 3;
+const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+const DWMWCP_ROUND: u32 = 2;
 
 /// Le pide a Windows el material `backdrop` para la ventana `hwnd`, y la barra de título
 /// clara u oscura según el tema. En Windows 10 o un Windows 11 viejo no hace nada (DWM ignora el atributo).
@@ -75,6 +77,8 @@ pub(crate) fn apply(hwnd: isize, backdrop: Backdrop, dark: bool) {
         Backdrop::Acrylic => DWMSBT_TRANSIENTWINDOW,
     };
     set(DWMWA_SYSTEMBACKDROP_TYPE, kind);
+    // Sin la barra de Windows (Orion dibuja la suya), las esquinas se pedirían rectas: las queremos redondas.
+    set(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND);
 }
 
 #[cfg(not(windows))]

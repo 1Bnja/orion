@@ -56,7 +56,9 @@ fn main() -> Result<(), pty::Error> {
                 height: 64,
             })
             // Transparente: deja ver Mica o el acrílico (ver `backdrop`).
-            .with_transparent(true),
+            .with_transparent(true)
+            // Sin la barra de Windows: Orion dibuja la suya (ver `app::titlebar`).
+            .with_decorations(false),
         // OpenGL: en Windows respeta la transparencia de la ventana; el motor por defecto (wgpu) no siempre.
         renderer: eframe::Renderer::Glow,
         ..Default::default()

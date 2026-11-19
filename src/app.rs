@@ -9,6 +9,7 @@ mod palette;
 mod panes;
 mod render;
 mod session;
+mod titlebar;
 
 use crate::colors::{opaque, surface, theme};
 use crate::config::{Settings, config_modified, reload_settings};
@@ -80,6 +81,8 @@ pub(crate) struct Orion {
     /// Buscaste actualizaciones a mano: avisar también si está al día o si falló.
     /// (La revisión automática al abrir es silenciosa: sin internet no hay nada que molestar.)
     update_asked: bool,
+    /// El ícono de Orion, para la barra de arriba.
+    logo: egui::TextureHandle,
 }
 
 /// Medidor de rendimiento (paleta → "Mostrar rendimiento"): cuánto tarda cada frame y cuántos hay por segundo.
@@ -169,6 +172,11 @@ impl Orion {
             hwnd: crate::backdrop::hwnd_of(cc),
             updater: Updater::new(),
             update_asked: false,
+            logo: cc.egui_ctx.load_texture(
+                "logo",
+                egui::ColorImage::from_rgba_unmultiplied([64, 64], &crate::icon::render(64)),
+                egui::TextureOptions::LINEAR,
+            ),
         };
         orion.apply_window_look();
         // Al abrir, revisar si hay una versión nueva. En debug (`cargo run`) no: sería la del .exe de desarrollo.
@@ -831,7 +839,8 @@ impl eframe::App for Orion {
         } else {
             self.shortcuts(ui)
         };
-        if let Some(action) = self.tab_sidebar(ui).or(shortcut) {
+        let bar = self.title_bar(ui);
+        if let Some(action) = self.tab_sidebar(ui).or(bar).or(shortcut) {
             self.apply_action(&ctx, action);
             if self.tabs.is_empty() {
                 return;
