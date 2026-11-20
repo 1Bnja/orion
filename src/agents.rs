@@ -20,10 +20,15 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// La carpeta raíz del repo git que contiene a `dir` (error si no está en uno).
+pub(crate) fn repo_root(dir: &Path) -> Result<PathBuf, String> {
+    git(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+}
+
 /// Crea un worktree al lado del repo de `dir`, en una rama nueva: `../repo-agente-N` en `orion/agente-N`.
 /// ponytail: corre en el hilo de la ventana (git tarda poco); en repos enormes convendría un hilo aparte.
 pub(crate) fn create_worktree(dir: &Path, agent: &str) -> Result<PathBuf, String> {
-    let root = PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"])?);
+    let root = repo_root(dir)?;
     let repo = root
         .file_name()
         .ok_or("el repo no tiene nombre")?

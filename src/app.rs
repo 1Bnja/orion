@@ -26,6 +26,7 @@ macro_rules! keys {
 #[cfg(target_os = "macos")]
 mod macmenu;
 mod menu;
+mod orchestrate;
 mod palette;
 mod panes;
 mod render;
@@ -85,6 +86,7 @@ pub(crate) struct Orion {
     settings: Settings,
     menu: SettingsMenu,
     palette: Palette,
+    orchestrate: orchestrate::Orchestrate,
     /// Si la ventana tenía el foco en el frame anterior (para avisar cambios a la app de la pestaña).
     focused: bool,
     /// Aviso breve ("Salida copiada") y desde cuándo se muestra.
@@ -169,6 +171,8 @@ enum Action {
     RestartForUpdate,
     /// Abrir el agente con ese índice en `settings.agents`.
     Agent(usize),
+    /// Abrir la ventana del orquestador (una tarea → varios agentes, cada uno con su modelo).
+    Orchestrate,
 }
 
 impl Orion {
@@ -187,6 +191,7 @@ impl Orion {
             settings,
             menu: SettingsMenu::default(),
             palette: Palette::default(),
+            orchestrate: Default::default(),
             focused: true,
             toast: None,
             window_title: String::new(),
@@ -280,25 +285,47 @@ impl Orion {
         let Some(agent) = self.settings.agents.get(index).cloned() else {
             return;
         };
-        let mut dir = self.session().cwd.clone();
-        if agent.worktree {
+        let cwd = self.session().cwd.clone();
+        self.launch_agent(ctx, cwd, &agent.name, agent.worktree, |_| {
+            agent.command.clone()
+        });
+    }
+
+    /// Pestaña nueva que corre `command` (armado para su shell) en `cwd` o, con `worktree`, en un
+    /// worktree nuevo de ese repo. Devuelve false si no se pudo (y ya avisó por qué).
+    fn launch_agent(
+        &mut self,
+        ctx: &egui::Context,
+        cwd: Option<PathBuf>,
+        name: &str,
+        worktree: bool,
+        command: impl Fn(&crate::pty::ShellKind) -> String,
+    ) -> bool {
+        let mut dir = cwd;
+        if worktree {
             let Some(cwd) = dir else {
                 let tip = "abre el agente desde una pestaña de PowerShell dentro del repo";
-                return self.show_toast(format!("No sé en qué repo estás: {tip}"));
+                self.show_toast(format!("No sé en qué repo estás: {tip}"));
+                return false;
             };
-            match crate::agents::create_worktree(&cwd, &agent.name) {
+            match crate::agents::create_worktree(&cwd, name) {
                 Ok(path) => dir = Some(path),
-                Err(e) => return self.show_toast(format!("No pude crear el worktree: {e}")),
+                Err(e) => {
+                    self.show_toast(format!("No pude crear el worktree: {e}"));
+                    return false;
+                }
             }
         }
         let tabs = self.tabs.len();
         self.new_tab(ctx, None);
-        if self.tabs.len() > tabs {
-            let session = self.session();
-            let shell = &crate::pty::SHELLS[session.kind];
-            let input = crate::agents::launch_input(shell, dir.as_deref(), &agent.command);
-            session.write(input.as_bytes());
+        if self.tabs.len() == tabs {
+            return false;
         }
+        let session = self.session();
+        let shell = &crate::pty::SHELLS[session.kind];
+        let input = crate::agents::launch_input(shell, dir.as_deref(), &command(shell));
+        session.write(input.as_bytes());
+        true
     }
 
     /// Cierra una pestaña (y las shells de todos sus paneles). Si era la última, se cierra la ventana.
@@ -623,6 +650,7 @@ impl Orion {
         match action {
             Action::NewTab(kind) => self.new_tab(ctx, kind),
             Action::Agent(i) => self.open_agent(ctx, i),
+            Action::Orchestrate => self.open_orchestrate(),
             Action::CloseTab(i) => self.close_tab(ctx, i),
             Action::SelectTab(i) => self.active = i,
             Action::Split(right) => self.split(ctx, right),
@@ -729,7 +757,7 @@ impl Orion {
     fn draw_panes(&mut self, ui: &mut egui::Ui, area: egui::Rect) -> bool {
         let ctx = ui.ctx().clone();
         // Con el menú o la paleta abiertos, la rueda y el mouse son para ellos.
-        let menu_open = self.menu.open || self.palette.open;
+        let menu_open = self.menu.open || self.palette.open || self.orchestrate.open;
         let tab = &mut self.tabs[self.active];
         // Entre panel y panel queda una línea de 2 px del color de la barra lateral.
         // Con Mica o acrílico no: los paneles semitransparentes se oscurecerían de más al pintarse encima.
@@ -934,10 +962,10 @@ impl eframe::App for Orion {
             self.open_menu();
         } else if self.menu.open && (toggle || escape) {
             self.menu.open = false;
-        } else if !self.menu.open && !self.palette.open && !toggle {
+        } else if !self.menu.open && !self.palette.open && !self.orchestrate.open && !toggle {
             self.session().send_input(ui);
         }
-        // Con el menú o la paleta abiertos, el teclado es para ellos (sus buscadores), no para la shell.
+        // Con el menú, la paleta o el orquestador abiertos, el teclado es para ellos, no para la shell.
 
         let area = ui.available_rect_before_wrap();
         if self.draw_panes(ui, area) {
@@ -959,6 +987,9 @@ impl eframe::App for Orion {
             ui.ctx().request_repaint_after(Duration::from_millis(500));
         }
         self.settings_window(&ctx);
+        if let Some(subtasks) = self.orchestrate_window(&ctx) {
+            self.launch_plan(&ctx, subtasks);
+        }
         // Al final: una acción de la paleta (ej. cerrar la última pestaña) puede cerrar la ventana.
         if let Some(action) = self.palette_window(&ctx) {
             self.apply_action(&ctx, action);

@@ -188,7 +188,7 @@ impl ShellKind {
         if plain {
             path.to_string()
         } else if self.powershell {
-            format!("'{}'", path.replace('\'', "''"))
+            powershell_quote(path)
         } else {
             format!("'{}'", path.replace('\'', r"'\''")) // zsh, bash y fish
         }
@@ -214,11 +214,26 @@ impl ShellKind {
         if plain(path) {
             path.to_string()
         } else if self.powershell {
-            format!("'{}'", path.replace('\'', "''")) // con comillas simples, $ no se expande
+            powershell_quote(path) // con comillas simples, $ no se expande
         } else {
             format!("\"{path}\"") // cmd: una ruta no puede tener comillas dobles
         }
     }
+}
+
+/// Texto entre comillas simples para PowerShell. Ojo: PowerShell también toma como comilla simple
+/// las tipográficas (‘ ’ ‚ ‛), que los modelos escriben seguido ("l’app"). Sin duplicarlas, una de
+/// ellas cerraría el texto y lo que sigue se ejecutaría como comando.
+fn powershell_quote(text: &str) -> String {
+    let mut quoted = String::from("'");
+    for c in text.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            quoted.push(c); // duplicada, PowerShell la lee como una comilla literal
+        }
+        quoted.push(c);
+    }
+    quoted.push('\'');
+    quoted
 }
 
 /// Lanza `program` con `args` en un PTY nuevo.
@@ -420,6 +435,43 @@ mod tests {
             spawn_program(pty_size((80, 24)), "sh", &["-c", "echo orion-$TERM"], &[]).unwrap();
         let rx = spawn_reader(&*shell.master, || {}).unwrap();
         wait_for(&rx, &mut String::new(), "orion-xterm-256color");
+    }
+
+    #[test]
+    fn powershell_quotes_typographic_apostrophes_too() {
+        assert_eq!(powershell_quote("l'app"), "'l''app'");
+        assert_eq!(powershell_quote("l’app ‘x’"), "'l’’app ‘‘x’’'");
+        assert_eq!(powershell_quote("$x; rm"), "'$x; rm'"); // con comillas simples nada se expande
+    }
+
+    /// Lo que arma `powershell_quote` vuelve igual de un PowerShell real: ninguna comilla
+    /// (recta o tipográfica) corta el texto ni deja ejecutar lo que sigue.
+    #[cfg(windows)]
+    #[test]
+    fn powershell_reads_quoted_text_back_unchanged() {
+        let text = "l’app 'x' ‘y’ ‚z‛; Write-Output INYECTADO; # $env:PATH";
+        let script = std::env::temp_dir().join(format!("orion-quote-{}.ps1", std::process::id()));
+        // Con BOM: así Windows PowerShell también lee el archivo como UTF-8.
+        let body = format!(
+            "\u{feff}[Console]::OutputEncoding = [Text.Encoding]::UTF8\n[Console]::Out.Write({})",
+            powershell_quote(text)
+        );
+        std::fs::write(&script, body).unwrap();
+        let program = SHELLS[usable_shell(0)].program;
+        let out = std::process::Command::new(program)
+            .args(["-NoProfile", "-NonInteractive", "-File"])
+            .arg(&script)
+            .env("PSModulePath", "") // más rápido: sin cargar módulos
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&script);
+        let printed = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            printed,
+            text,
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// Lee la salida de la shell hasta que aparezca `needle` (o falla a los 15 s mostrando lo que llegó).

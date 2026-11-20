@@ -21,6 +21,7 @@ mod grid;
 mod icon;
 mod input;
 mod links;
+mod orchestrator;
 mod pty;
 mod update;
 

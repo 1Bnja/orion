@@ -121,6 +121,11 @@ impl Orion {
             let name = format!("Nueva pestaña: {}", crate::pty::SHELLS[i].name);
             list.push((name, "", Action::NewTab(Some(i))));
         }
+        list.push((
+            "Orquestar tarea con agentes…".into(),
+            "",
+            Action::Orchestrate,
+        ));
         for (i, agent) in self.settings.agents.iter().enumerate() {
             list.push((format!("Agente: {}", agent.name), "", Action::Agent(i)));
         }

@@ -24,6 +24,10 @@ pero cada comando queda en su propio **bloque**, con su resultado y lo que tard�
 - **Paneles divididos** a la derecha o hacia abajo, cada uno con su propia shell.
 - **Hecho para trabajar con agentes de código**:
   - Perfiles de agente que abren una pestaña con el agente andando, si quieres en su propio `git worktree` y rama, para correr varios en paralelo.
+  - **Orquestador** (paleta → "Orquestar tarea con agentes…"): escribes una tarea, Claude Code la divide
+    en subtareas y elige un modelo para cada una (Opus para diseño, Sonnet para programar, Haiku para lo mecánico).
+    Revisas el plan y Orion abre un agente por subtarea, cada uno en su worktree y rama. Necesita
+    [Claude Code](https://code.claude.com) instalado y con tu sesión iniciada; se abre desde una pestaña dentro del repo.
   - Avisos (un punto azul en la pestaña) cuando un agente termina o pide permiso.
   - `Shift+Enter` para escribir prompts de varias líneas.
   - Arrastra archivos o imágenes a la ventana para escribir sus rutas.
