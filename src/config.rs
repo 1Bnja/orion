@@ -133,7 +133,7 @@ pub(crate) struct FontSettings {
 impl Default for FontSettings {
     fn default() -> Self {
         Self {
-            family: "Cascadia Mono".into(),
+            family: crate::fonts::default_family().into(),
             size: 14.0,
             line_height: 1.2,
         }
@@ -218,7 +218,7 @@ mod tests {
         let s: Settings = toml::from_str(&config_text(&Settings::default())).unwrap();
         assert_eq!(
             (s.font.family.as_str(), s.font.size),
-            ("Cascadia Mono", 14.0)
+            (crate::fonts::default_family(), 14.0)
         );
         // Lo que falta toma el valor por defecto; un entero sirve como tamaño.
         let s: Settings = toml::from_str("[font]\nfamily = \"Monocraft\"").unwrap();
