@@ -39,11 +39,32 @@ pero cada comando queda en su propio **bloque**, con su resultado y lo que tard�
 
 ## Instalar
 
+### Windows
+
 1. Descarga `orion-<versión>-windows-x64.zip` desde [Releases](https://github.com/1Bnja/orion/releases/latest).
 2. Descomprímelo donde quieras y abre `orion.exe`.
 
 No instala nada ni necesita otros programas. Para borrarlo, borra la carpeta
 (y si quieres, tu configuración en `%APPDATA%\orion`).
+
+### macOS
+
+1. Descarga `orion-<versión>-macos.zip` desde [Releases](https://github.com/1Bnja/orion/releases/latest).
+   Es una sola app para Apple Silicon e Intel (macOS 11 o más nuevo).
+2. Descomprímelo y arrastra `Orion.app` a **Aplicaciones**. Desde ahí se puede actualizar sola.
+3. La primera vez, ábrela con **clic derecho → Abrir** y confirma con **Abrir**.
+
+Ese paso extra es por Gatekeeper: Orion no está firmado con un certificado de Apple, así que macOS
+avisa que no puede verificar al desarrollador. Se hace una sola vez; las actualizaciones no vuelven a preguntar.
+
+En macOS 15 (Sequoia) o más nuevo, el clic derecho ya no alcanza: intenta abrirla una vez, ve a
+**Configuración del Sistema → Privacidad y seguridad** y toca **Abrir igualmente**. También sirve, desde la Terminal:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Orion.app
+```
+
+Para borrarla, manda `Orion.app` a la papelera (y si quieres, tu configuración en `~/Library/Application Support/orion`).
 
 ## Atajos
 
