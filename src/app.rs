@@ -23,6 +23,8 @@ macro_rules! keys {
     };
 }
 
+#[cfg(target_os = "macos")]
+mod macmenu;
 mod menu;
 mod palette;
 mod panes;
@@ -102,6 +104,9 @@ pub(crate) struct Orion {
     update_asked: bool,
     /// El ícono de Orion, para la barra de arriba.
     logo: egui::TextureHandle,
+    /// Mac: la barra de menú del sistema, con las opciones de Orion.
+    #[cfg(target_os = "macos")]
+    mac_menu: macmenu::MacMenu,
 }
 
 /// Medidor de rendimiento (paleta → "Mostrar rendimiento"): cuánto tarda cada frame y cuántos hay por segundo.
@@ -196,6 +201,8 @@ impl Orion {
                 egui::ColorImage::from_rgba_unmultiplied([64, 64], &crate::icon::render(64)),
                 egui::TextureOptions::LINEAR,
             ),
+            #[cfg(target_os = "macos")]
+            mac_menu: macmenu::MacMenu::install(&cc.egui_ctx),
         };
         orion.apply_window_look();
         // Al abrir, revisar si hay una versión nueva. En debug (`cargo run`) no: sería la del .exe de desarrollo.
@@ -203,6 +210,46 @@ impl Orion {
             orion.updater.check(&cc.egui_ctx);
         }
         Ok(orion)
+    }
+
+    /// El tema que sigue al actual (botón de la barra y menú de Mac).
+    fn next_theme(&self) -> usize {
+        let current = crate::colors::find_theme(&self.settings.theme).unwrap_or(0);
+        (current + 1) % crate::colors::THEMES.len()
+    }
+
+    /// Mac: lo elegido en la barra de menú del sistema. El `bool` es Configuración, que abre o
+    /// cierra la ventana como Cmd+, (macOS se queda con esa tecla para el menú).
+    #[cfg(target_os = "macos")]
+    fn menu_bar(&self, ctx: &egui::Context) -> (Option<Action>, bool) {
+        use macmenu::Command;
+        let Some(command) = self.mac_menu.next() else {
+            return (None, false);
+        };
+        ctx.request_repaint(); // por si hay otro comando en la cola
+        let action = match command {
+            Command::Settings => return (None, true),
+            Command::Quit => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return (None, false);
+            }
+            Command::CheckUpdates => Action::CheckUpdates,
+            Command::NewTab => Action::NewTab(None),
+            Command::SplitRight => Action::Split(true),
+            Command::SplitDown => Action::Split(false),
+            Command::ClosePane => Action::ClosePane,
+            Command::Palette => Action::Palette,
+            Command::NextTheme => Action::Theme(self.next_theme()),
+            Command::FontBigger => Action::FontSize(1.0),
+            Command::FontSmaller => Action::FontSize(-1.0),
+        };
+        (Some(action), false)
+    }
+
+    /// Fuera de Mac no hay barra de menú del sistema: todo está en la ventana.
+    #[cfg(not(target_os = "macos"))]
+    fn menu_bar(&self, _ctx: &egui::Context) -> (Option<Action>, bool) {
+        (None, false)
     }
 
     /// El panel con foco de la pestaña activa.
@@ -509,21 +556,24 @@ impl Orion {
         let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
         let count = self.tabs.len();
         ui.input_mut(|i| {
-            if i.consume_key(cmd_shift, Key::P) {
-                return Some(Action::Palette);
-            }
-            if i.consume_key(cmd_shift, Key::T) {
-                return Some(Action::NewTab(None));
-            }
-            // Splits: D = a la derecha, E = hacia abajo. W cierra el panel.
-            if i.consume_key(cmd_shift, Key::D) {
-                return Some(Action::Split(true));
-            }
-            if i.consume_key(cmd_shift, Key::E) {
-                return Some(Action::Split(false));
-            }
-            if i.consume_key(cmd_shift, Key::W) {
-                return Some(Action::ClosePane);
+            // En Mac estos cinco son del menú del sistema (ver `macmenu`): un solo camino.
+            if !MAC {
+                if i.consume_key(cmd_shift, Key::P) {
+                    return Some(Action::Palette);
+                }
+                if i.consume_key(cmd_shift, Key::T) {
+                    return Some(Action::NewTab(None));
+                }
+                // Splits: D = a la derecha, E = hacia abajo. W cierra el panel.
+                if i.consume_key(cmd_shift, Key::D) {
+                    return Some(Action::Split(true));
+                }
+                if i.consume_key(cmd_shift, Key::E) {
+                    return Some(Action::Split(false));
+                }
+                if i.consume_key(cmd_shift, Key::W) {
+                    return Some(Action::ClosePane);
+                }
             }
             // Ctrl+Alt+flechas (Cmd+Option en Mac): pasar al panel de al lado.
             let arrows = [
@@ -866,7 +916,8 @@ impl eframe::App for Orion {
             self.shortcuts(ui)
         };
         let bar = self.title_bar(ui);
-        if let Some(action) = self.tab_sidebar(ui).or(bar).or(shortcut) {
+        let (menu_bar, menu_toggle) = self.menu_bar(&ctx);
+        if let Some(action) = menu_bar.or(self.tab_sidebar(ui)).or(bar).or(shortcut) {
             self.apply_action(&ctx, action);
             if self.tabs.is_empty() {
                 return;
@@ -878,6 +929,7 @@ impl eframe::App for Orion {
             let toggle = i.modifiers.command && i.key_pressed(egui::Key::Comma);
             (toggle, i.key_pressed(egui::Key::Escape))
         });
+        let toggle = toggle || menu_toggle;
         if toggle && !self.menu.open {
             self.open_menu();
         } else if self.menu.open && (toggle || escape) {

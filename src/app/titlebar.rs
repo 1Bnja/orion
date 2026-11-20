@@ -1,6 +1,7 @@
 //! La barra de arriba: Orion dibuja la suya en vez de la del sistema. Logo, botones, el título
 //! de la pestaña y minimizar / maximizar / cerrar a la derecha (Windows). En Mac los tres círculos
-//! son los nativos de macOS: la barra solo les deja lugar a la izquierda.
+//! son los nativos de macOS (la barra solo les deja lugar a la izquierda) y los botones de
+//! Orion pasan a la barra de menú del sistema.
 //! Arrastrarla mueve la ventana; doble clic maximiza.
 
 use super::{Action, MAC, Orion};
@@ -107,8 +108,7 @@ impl Orion {
                 );
 
                 // Botones de Orion.
-                let next_theme = (crate::colors::find_theme(&self.settings.theme).unwrap_or(0) + 1)
-                    % crate::colors::THEMES.len();
+                let next_theme = self.next_theme();
                 let buttons = [
                     (
                         Icon::Gear,
@@ -128,7 +128,8 @@ impl Orion {
                     (Icon::Theme, "Cambiar de tema", Action::Theme(next_theme)),
                 ];
                 let mut x = start + 86.0;
-                for (icon, tip, act) in buttons {
+                // En Mac estas opciones están en la barra de menú del sistema (ver `macmenu`).
+                for (icon, tip, act) in buttons.into_iter().filter(|_| !MAC) {
                     let r = Rect::from_center_size(Pos2::new(x, mid), vec2(28.0, 26.0));
                     let button = ui.interact(r, ui.scope_id().with(tip), Sense::click());
                     let color = if button.hovered() {
