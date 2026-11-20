@@ -5,9 +5,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# La versión sale de Cargo.toml: `cargo pkgid` imprime "path+file:///…#orion@0.4.0".
+# La versión sale de Cargo.toml: `cargo pkgid` imprime ".../repo#orion@0.4.0", o ".../orion#0.4.0" si la
+# carpeta se llama igual que el paquete (como en CI).
 pkgid=$(cargo pkgid)
-version=${pkgid##*@}
+version=${pkgid##*[#@]}
 
 targets=(aarch64-apple-darwin x86_64-apple-darwin)
 rustup target add "${targets[@]}"
