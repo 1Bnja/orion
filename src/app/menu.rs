@@ -1,4 +1,4 @@
-//! Ventana de configuración (Ctrl+, o clic derecho): el tema y elegir, agrandar y agregar fuentes.
+//! Ventana de configuración (Ctrl+, o Cmd+, en Mac, o clic derecho): el tema y elegir, agrandar y agregar fuentes.
 
 use crate::app::Orion;
 use crate::backdrop::{BACKDROPS, Backdrop, find_backdrop};
@@ -89,7 +89,7 @@ impl Orion {
         }
     }
 
-    /// Ventana de configuración (Ctrl+, o clic derecho → Configuración…).
+    /// Ventana de configuración (Ctrl+, o Cmd+, en Mac, o clic derecho → Configuración…).
     pub(crate) fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.menu.open;
         let mut new = self.settings.clone();
@@ -137,7 +137,11 @@ impl Orion {
                         });
                 })
                 .response
-                .on_hover_text("La de las pestañas nuevas (Ctrl+Shift+T)");
+                .on_hover_text(keys!(
+                    "La de las pestañas nuevas (",
+                    "+Shift+T",
+                    ")"
+                ));
                 ui.separator();
                 ui.heading("Fuente");
                 ui.horizontal(|ui| {

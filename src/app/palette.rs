@@ -1,4 +1,4 @@
-//! Paleta de comandos (Ctrl+Shift+P): buscar cualquier acción de Orion por su nombre,
+//! Paleta de comandos (Ctrl+Shift+P; Cmd+Shift+P en Mac): buscar cualquier acción de Orion por su nombre,
 //! Cada entrada muestra su atajo: así se aprenden sin memorizarlos.
 
 use super::{Action, Orion};
@@ -69,7 +69,11 @@ impl Orion {
     fn commands(&self) -> Vec<(String, &'static str, Action)> {
         let (n, a) = (self.tabs.len(), self.active);
         let mut list: Vec<(String, &'static str, Action)> = vec![
-            ("Nueva pestaña".into(), "Ctrl+Shift+T", Action::NewTab(None)),
+            (
+                "Nueva pestaña".into(),
+                keys!("+Shift+T"),
+                Action::NewTab(None),
+            ),
             ("Cerrar pestaña".into(), "", Action::CloseTab(a)),
             (
                 "Siguiente pestaña".into(),
@@ -83,16 +87,16 @@ impl Orion {
             ),
             (
                 "Dividir a la derecha".into(),
-                "Ctrl+Shift+D",
+                keys!("+Shift+D"),
                 Action::Split(true),
             ),
             (
                 "Dividir hacia abajo".into(),
-                "Ctrl+Shift+E",
+                keys!("+Shift+E"),
                 Action::Split(false),
             ),
-            ("Cerrar panel".into(), "Ctrl+Shift+W", Action::ClosePane),
-            ("Configuración".into(), "Ctrl+,", Action::OpenSettings),
+            ("Cerrar panel".into(), keys!("+Shift+W"), Action::ClosePane),
+            ("Configuración".into(), keys!("+,"), Action::OpenSettings),
             ("Agrandar letra".into(), "", Action::FontSize(1.0)),
             ("Achicar letra".into(), "", Action::FontSize(-1.0)),
             ("Mostrar rendimiento".into(), "", Action::TogglePerf),
@@ -105,9 +109,14 @@ impl Orion {
                 Action::CheckUpdates,
             ),
         ];
+        // Alt+número en Windows, Cmd+número en Mac (ver `shortcuts`).
         const ALT: [&str; 9] = [
             "Alt+1", "Alt+2", "Alt+3", "Alt+4", "Alt+5", "Alt+6", "Alt+7", "Alt+8", "Alt+9",
         ];
+        const CMD: [&str; 9] = [
+            "Cmd+1", "Cmd+2", "Cmd+3", "Cmd+4", "Cmd+5", "Cmd+6", "Cmd+7", "Cmd+8", "Cmd+9",
+        ];
+        let numbers = if super::MAC { CMD } else { ALT };
         for &i in crate::pty::installed_shells() {
             let name = format!("Nueva pestaña: {}", crate::pty::SHELLS[i].name);
             list.push((name, "", Action::NewTab(Some(i))));
@@ -125,7 +134,7 @@ impl Orion {
             let name = format!("Ir a pestaña: {}", tab.focused().title());
             list.push((
                 name,
-                ALT.get(i).copied().unwrap_or(""),
+                numbers.get(i).copied().unwrap_or(""),
                 Action::SelectTab(i),
             ));
         }

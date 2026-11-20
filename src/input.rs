@@ -11,6 +11,10 @@ pub(crate) fn key_bytes(
     app_cursor: bool,
 ) -> Option<Vec<u8>> {
     use egui::Key::*;
+    // Cmd (solo existe en Mac) es de Orion: sus atajos nunca se mandan a la shell.
+    if mods.mac_cmd {
+        return None;
+    }
     // Código de modificadores de xterm: 1 + Shift(1) + Alt(2) + Ctrl(4). Ej.: Ctrl+→ = ESC[1;5C.
     let m = 1 + mods.shift as u8 + 2 * mods.alt as u8 + 4 * mods.ctrl as u8;
     // Teclas que terminan en letra: flechas, Inicio/Fin, F1–F4.
@@ -149,6 +153,10 @@ mod tests {
         assert_eq!(key(Key::ArrowUp, none), b"\x1b[A");
         assert_eq!(key(Key::D, Modifiers::CTRL), [0x04]);
         assert_eq!(key_bytes(Key::A, none, false), None); // la 'a' llega como Event::Text
+        // Cmd (Mac) es de Orion: nada llega a la shell. Control sigue siendo de la terminal.
+        assert_eq!(key_bytes(Key::C, Modifiers::MAC_CMD, false), None);
+        assert_eq!(key_bytes(Key::ArrowUp, Modifiers::MAC_CMD, false), None);
+        assert_eq!(key(Key::C, Modifiers::CTRL), [0x03]);
         assert_eq!(key_bytes(Key::Num1, Modifiers::CTRL, false), None);
         // Cursor de aplicación (vim, less): flechas e Inicio/Fin como ESC O x.
         assert_eq!(key_bytes(Key::ArrowUp, none, true).unwrap(), b"\x1bOA");

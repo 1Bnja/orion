@@ -1,13 +1,18 @@
-//! La barra de arriba: Orion dibuja la suya en vez de la de Windows. Logo, botones, el título
-//! de la pestaña y minimizar / maximizar / cerrar. Arrastrarla mueve la ventana; doble clic maximiza.
+//! La barra de arriba: Orion dibuja la suya en vez de la del sistema. Logo, botones, el título
+//! de la pestaña y minimizar / maximizar / cerrar a la derecha (Windows). En Mac los tres círculos
+//! son los nativos de macOS (la barra solo les deja lugar a la izquierda) y los botones de
+//! Orion pasan a la barra de menú del sistema.
+//! Arrastrarla mueve la ventana; doble clic maximiza.
 
-use super::{Action, Orion};
+use super::{Action, MAC, Orion};
 use crate::colors::{surface, theme};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, ViewportCommand, vec2};
 
 const HEIGHT: f32 = 34.0;
 /// Ancho de cada botón de la ventana (como los de Windows 11).
 const WINDOW_BUTTON: f32 = 46.0;
+/// Mac: lugar libre a la izquierda para los círculos nativos de macOS; el logo va después.
+const LIGHTS_WIDTH: f32 = 72.0;
 
 #[derive(Clone, Copy)]
 enum Icon {
@@ -84,16 +89,18 @@ impl Orion {
                     ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
                 }
 
+                // En Mac, los círculos nativos ocupan la izquierda: el logo empieza después.
+                let start = bar.min.x + if MAC { LIGHTS_WIDTH } else { 0.0 };
+
                 // Logo: el ícono de Orion y el nombre.
                 let painter = ui.painter();
                 let mid = bar.center().y;
                 let font = egui::FontId::proportional(13.0);
-                let logo =
-                    Rect::from_center_size(Pos2::new(bar.min.x + 20.0, mid), vec2(18.0, 18.0));
+                let logo = Rect::from_center_size(Pos2::new(start + 20.0, mid), vec2(18.0, 18.0));
                 let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
                 painter.image(self.logo.id(), logo, uv, Color32::WHITE);
                 painter.text(
-                    Pos2::new(bar.min.x + 32.0, mid),
+                    Pos2::new(start + 32.0, mid),
                     egui::Align2::LEFT_CENTER,
                     "Orion",
                     font.clone(),
@@ -101,24 +108,28 @@ impl Orion {
                 );
 
                 // Botones de Orion.
-                let next_theme = (crate::colors::find_theme(&self.settings.theme).unwrap_or(0) + 1)
-                    % crate::colors::THEMES.len();
+                let next_theme = self.next_theme();
                 let buttons = [
-                    (Icon::Gear, "Configuración   Ctrl+,", Action::OpenSettings),
+                    (
+                        Icon::Gear,
+                        keys!("Configuración   ", "+,", ""),
+                        Action::OpenSettings,
+                    ),
                     (
                         Icon::Palette,
-                        "Paleta de comandos   Ctrl+Shift+P",
+                        keys!("Paleta de comandos   ", "+Shift+P", ""),
                         Action::Palette,
                     ),
                     (
                         Icon::Split,
-                        "Dividir a la derecha   Ctrl+Shift+D",
+                        keys!("Dividir a la derecha   ", "+Shift+D", ""),
                         Action::Split(true),
                     ),
                     (Icon::Theme, "Cambiar de tema", Action::Theme(next_theme)),
                 ];
-                let mut x = bar.min.x + 86.0;
-                for (icon, tip, act) in buttons {
+                let mut x = start + 86.0;
+                // En Mac estas opciones están en la barra de menú del sistema (ver `macmenu`).
+                for (icon, tip, act) in buttons.into_iter().filter(|_| !MAC) {
                     let r = Rect::from_center_size(Pos2::new(x, mid), vec2(28.0, 26.0));
                     let button = ui.interact(r, ui.scope_id().with(tip), Sense::click());
                     let color = if button.hovered() {
@@ -141,7 +152,11 @@ impl Orion {
                     .map(|t| t.focused().title())
                     .unwrap_or_default();
                 let left = x;
-                let right = bar.max.x - 3.0 * WINDOW_BUTTON - 8.0;
+                let right = if MAC {
+                    bar.max.x - 8.0
+                } else {
+                    bar.max.x - 3.0 * WINDOW_BUTTON - 8.0
+                };
                 let galley = ui.painter().layout_no_wrap(title, font, theme().ansi[7]);
                 let center = bar.center().x.clamp(
                     left + galley.size().x / 2.0,
@@ -154,89 +169,95 @@ impl Orion {
                     theme().ansi[7],
                 );
 
-                // Minimizar, maximizar y cerrar: dibujados con líneas, nítidos en cualquier escala.
-                let stroke = |hovered: bool| {
-                    Stroke::new(1.0, if hovered { theme().fg } else { theme().ansi[7] })
-                };
-                let window_button = |ui: &egui::Ui, i: f32, id: &str| {
-                    let r = Rect::from_min_size(
-                        Pos2::new(bar.max.x - (3.0 - i) * WINDOW_BUTTON, bar.min.y),
-                        vec2(WINDOW_BUTTON, HEIGHT),
-                    );
-                    (r, ui.interact(r, ui.scope_id().with(id), Sense::click()))
-                };
-                let (r, minimize) = window_button(ui, 0.0, "minimizar");
-                if minimize.hovered() {
-                    ui.painter().rect_filled(r, 0.0, theme().hover());
-                }
-                ui.painter().hline(
-                    r.center().x - 5.0..=r.center().x + 5.0,
-                    r.center().y,
-                    stroke(minimize.hovered()),
-                );
-                if minimize.clicked() {
-                    ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
-                }
-
-                let (r, maximize) = window_button(ui, 1.0, "maximizar");
-                if maximize.hovered() {
-                    ui.painter().rect_filled(r, 0.0, theme().hover());
-                }
-                let square = Rect::from_center_size(r.center(), vec2(10.0, 10.0));
-                if maximized {
-                    // Restaurar: dos cuadrados encimados.
-                    ui.painter().rect_stroke(
-                        square.translate(vec2(2.0, -2.0)),
-                        1.0,
-                        stroke(maximize.hovered()),
-                        egui::StrokeKind::Inside,
-                    );
-                    ui.painter().rect_filled(
-                        square.translate(vec2(-1.0, 1.0)),
-                        1.0,
-                        surface(theme().sidebar()),
-                    );
-                    ui.painter().rect_stroke(
-                        square.translate(vec2(-1.0, 1.0)),
-                        1.0,
-                        stroke(maximize.hovered()),
-                        egui::StrokeKind::Inside,
-                    );
-                } else {
-                    ui.painter().rect_stroke(
-                        square,
-                        1.0,
-                        stroke(maximize.hovered()),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-                let tip = if maximized { "Restaurar" } else { "Maximizar" };
-                if maximize.on_hover_text(tip).clicked() {
-                    ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
-                }
-
-                let (r, close) = window_button(ui, 2.0, "cerrar");
-                let red = Color32::from_rgb(0xc4, 0x2b, 0x1c); // el rojo de cerrar de Windows 11
-                if close.hovered() {
-                    ui.painter().rect_filled(r, 0.0, red);
-                }
-                let x_stroke = Stroke::new(
-                    1.0,
-                    if close.hovered() {
-                        Color32::WHITE
-                    } else {
-                        theme().ansi[7]
-                    },
-                );
-                let c = r.center();
-                ui.painter()
-                    .line_segment([c - vec2(5.0, 5.0), c + vec2(5.0, 5.0)], x_stroke);
-                ui.painter()
-                    .line_segment([c + vec2(-5.0, 5.0), c + vec2(5.0, -5.0)], x_stroke);
-                if close.clicked() {
-                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                if !MAC {
+                    windows_buttons(ui, bar, maximized);
                 }
             });
         action
+    }
+}
+
+/// Windows: minimizar, maximizar y cerrar a la derecha, dibujados con líneas (nítidos en cualquier escala).
+fn windows_buttons(ui: &egui::Ui, bar: Rect, maximized: bool) {
+    let ctx = ui.ctx();
+    let stroke =
+        |hovered: bool| Stroke::new(1.0, if hovered { theme().fg } else { theme().ansi[7] });
+    let window_button = |ui: &egui::Ui, i: f32, id: &str| {
+        let r = Rect::from_min_size(
+            Pos2::new(bar.max.x - (3.0 - i) * WINDOW_BUTTON, bar.min.y),
+            vec2(WINDOW_BUTTON, HEIGHT),
+        );
+        (r, ui.interact(r, ui.scope_id().with(id), Sense::click()))
+    };
+    let (r, minimize) = window_button(ui, 0.0, "minimizar");
+    if minimize.hovered() {
+        ui.painter().rect_filled(r, 0.0, theme().hover());
+    }
+    ui.painter().hline(
+        r.center().x - 5.0..=r.center().x + 5.0,
+        r.center().y,
+        stroke(minimize.hovered()),
+    );
+    if minimize.clicked() {
+        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+    }
+
+    let (r, maximize) = window_button(ui, 1.0, "maximizar");
+    if maximize.hovered() {
+        ui.painter().rect_filled(r, 0.0, theme().hover());
+    }
+    let square = Rect::from_center_size(r.center(), vec2(10.0, 10.0));
+    if maximized {
+        // Restaurar: dos cuadrados encimados.
+        ui.painter().rect_stroke(
+            square.translate(vec2(2.0, -2.0)),
+            1.0,
+            stroke(maximize.hovered()),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().rect_filled(
+            square.translate(vec2(-1.0, 1.0)),
+            1.0,
+            surface(theme().sidebar()),
+        );
+        ui.painter().rect_stroke(
+            square.translate(vec2(-1.0, 1.0)),
+            1.0,
+            stroke(maximize.hovered()),
+            egui::StrokeKind::Inside,
+        );
+    } else {
+        ui.painter().rect_stroke(
+            square,
+            1.0,
+            stroke(maximize.hovered()),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let tip = if maximized { "Restaurar" } else { "Maximizar" };
+    if maximize.on_hover_text(tip).clicked() {
+        ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+    }
+
+    let (r, close) = window_button(ui, 2.0, "cerrar");
+    let red = Color32::from_rgb(0xc4, 0x2b, 0x1c); // el rojo de cerrar de Windows 11
+    if close.hovered() {
+        ui.painter().rect_filled(r, 0.0, red);
+    }
+    let x_stroke = Stroke::new(
+        1.0,
+        if close.hovered() {
+            Color32::WHITE
+        } else {
+            theme().ansi[7]
+        },
+    );
+    let c = r.center();
+    ui.painter()
+        .line_segment([c - vec2(5.0, 5.0), c + vec2(5.0, 5.0)], x_stroke);
+    ui.painter()
+        .line_segment([c + vec2(-5.0, 5.0), c + vec2(5.0, -5.0)], x_stroke);
+    if close.clicked() {
+        ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 }

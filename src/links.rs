@@ -1,4 +1,4 @@
-//! Links y rutas en la salida: Ctrl+clic abre las URLs en el navegador y las rutas
+//! Links y rutas en la salida: Ctrl+clic (Cmd+clic en Mac) abre las URLs en el navegador y las rutas
 //! (`src/app.rs:42:5`, `app.ts(12,5)`) en el editor, en esa línea.
 
 use alacritty_terminal::term::cell::Cell;

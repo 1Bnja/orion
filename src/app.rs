@@ -4,6 +4,27 @@
 //! sus bloques). `session`, `panes`, `render` y `menu` son submódulos: al ser hijos de `app`,
 //! pueden usar los campos privados de `Orion`.
 
+/// En macOS los atajos de Orion van con Cmd y Control queda para la terminal (Ctrl+C interrumpe).
+const MAC: bool = cfg!(target_os = "macos");
+
+/// Nombre de un atajo para tooltips y la paleta: `keys!("+Shift+P")` es "Ctrl+Shift+P" en
+/// Windows y "Cmd+Shift+P" en Mac. Con texto antes y después:
+/// `keys!("Paleta   ", "+Shift+P", "")` es "Paleta   Ctrl+Shift+P".
+macro_rules! keys {
+    ($rest:literal) => {
+        keys!("", $rest, "")
+    };
+    ($before:literal, $rest:literal, $after:literal) => {
+        if cfg!(target_os = "macos") {
+            concat!($before, "Cmd", $rest, $after)
+        } else {
+            concat!($before, "Ctrl", $rest, $after)
+        }
+    };
+}
+
+#[cfg(target_os = "macos")]
+mod macmenu;
 mod menu;
 mod palette;
 mod panes;
@@ -83,6 +104,9 @@ pub(crate) struct Orion {
     update_asked: bool,
     /// El ícono de Orion, para la barra de arriba.
     logo: egui::TextureHandle,
+    /// Mac: la barra de menú del sistema, con las opciones de Orion.
+    #[cfg(target_os = "macos")]
+    mac_menu: macmenu::MacMenu,
 }
 
 /// Medidor de rendimiento (paleta → "Mostrar rendimiento"): cuánto tarda cada frame y cuántos hay por segundo.
@@ -177,6 +201,8 @@ impl Orion {
                 egui::ColorImage::from_rgba_unmultiplied([64, 64], &crate::icon::render(64)),
                 egui::TextureOptions::LINEAR,
             ),
+            #[cfg(target_os = "macos")]
+            mac_menu: macmenu::MacMenu::install(&cc.egui_ctx),
         };
         orion.apply_window_look();
         // Al abrir, revisar si hay una versión nueva. En debug (`cargo run`) no: sería la del .exe de desarrollo.
@@ -184,6 +210,46 @@ impl Orion {
             orion.updater.check(&cc.egui_ctx);
         }
         Ok(orion)
+    }
+
+    /// El tema que sigue al actual (botón de la barra y menú de Mac).
+    fn next_theme(&self) -> usize {
+        let current = crate::colors::find_theme(&self.settings.theme).unwrap_or(0);
+        (current + 1) % crate::colors::THEMES.len()
+    }
+
+    /// Mac: lo elegido en la barra de menú del sistema. El `bool` es Configuración, que abre o
+    /// cierra la ventana como Cmd+, (macOS se queda con esa tecla para el menú).
+    #[cfg(target_os = "macos")]
+    fn menu_bar(&self, ctx: &egui::Context) -> (Option<Action>, bool) {
+        use macmenu::Command;
+        let Some(command) = self.mac_menu.next() else {
+            return (None, false);
+        };
+        ctx.request_repaint(); // por si hay otro comando en la cola
+        let action = match command {
+            Command::Settings => return (None, true),
+            Command::Quit => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return (None, false);
+            }
+            Command::CheckUpdates => Action::CheckUpdates,
+            Command::NewTab => Action::NewTab(None),
+            Command::SplitRight => Action::Split(true),
+            Command::SplitDown => Action::Split(false),
+            Command::ClosePane => Action::ClosePane,
+            Command::Palette => Action::Palette,
+            Command::NextTheme => Action::Theme(self.next_theme()),
+            Command::FontBigger => Action::FontSize(1.0),
+            Command::FontSmaller => Action::FontSize(-1.0),
+        };
+        (Some(action), false)
+    }
+
+    /// Fuera de Mac no hay barra de menú del sistema: todo está en la ventana.
+    #[cfg(not(target_os = "macos"))]
+    fn menu_bar(&self, _ctx: &egui::Context) -> (Option<Action>, bool) {
+        (None, false)
     }
 
     /// El panel con foco de la pestaña activa.
@@ -342,7 +408,7 @@ impl Orion {
                     }
                 }
             });
-            let tip = "Ctrl+Shift+T\nClic derecho: elegir la shell";
+            let tip = keys!("", "+Shift+T", "\nClic derecho: elegir la shell");
             if new.on_hover_text(tip).clicked() {
                 action = Some(Action::NewTab(None));
             }
@@ -484,28 +550,32 @@ impl Orion {
     }
 
     /// Atajos de pestañas y paneles. Se "consumen": así no llegan a la shell.
+    /// `COMMAND` es Ctrl en Windows y Cmd en Mac.
     fn shortcuts(&self, ui: &mut egui::Ui) -> Option<Action> {
         use egui::{Key, Modifiers};
-        let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
+        let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
         let count = self.tabs.len();
         ui.input_mut(|i| {
-            if i.consume_key(ctrl_shift, Key::P) {
-                return Some(Action::Palette);
+            // En Mac estos cinco son del menú del sistema (ver `macmenu`): un solo camino.
+            if !MAC {
+                if i.consume_key(cmd_shift, Key::P) {
+                    return Some(Action::Palette);
+                }
+                if i.consume_key(cmd_shift, Key::T) {
+                    return Some(Action::NewTab(None));
+                }
+                // Splits: D = a la derecha, E = hacia abajo. W cierra el panel.
+                if i.consume_key(cmd_shift, Key::D) {
+                    return Some(Action::Split(true));
+                }
+                if i.consume_key(cmd_shift, Key::E) {
+                    return Some(Action::Split(false));
+                }
+                if i.consume_key(cmd_shift, Key::W) {
+                    return Some(Action::ClosePane);
+                }
             }
-            if i.consume_key(ctrl_shift, Key::T) {
-                return Some(Action::NewTab(None));
-            }
-            // Splits: D = a la derecha, E = hacia abajo. W cierra el panel.
-            if i.consume_key(ctrl_shift, Key::D) {
-                return Some(Action::Split(true));
-            }
-            if i.consume_key(ctrl_shift, Key::E) {
-                return Some(Action::Split(false));
-            }
-            if i.consume_key(ctrl_shift, Key::W) {
-                return Some(Action::ClosePane);
-            }
-            // Ctrl+Alt+flechas: pasar al panel de al lado.
+            // Ctrl+Alt+flechas (Cmd+Option en Mac): pasar al panel de al lado.
             let arrows = [
                 (Key::ArrowLeft, egui::vec2(-1.0, 0.0)),
                 (Key::ArrowRight, egui::vec2(1.0, 0.0)),
@@ -513,18 +583,19 @@ impl Orion {
                 (Key::ArrowDown, egui::vec2(0.0, 1.0)),
             ];
             for (key, dir) in arrows {
-                if i.consume_key(Modifiers::CTRL | Modifiers::ALT, key) {
+                if i.consume_key(Modifiers::COMMAND | Modifiers::ALT, key) {
                     return Some(Action::Focus(dir));
                 }
             }
+            // Ctrl+Tab también en Mac: Cmd+Tab es del sistema (cambiar de app).
             // Primero Ctrl+Shift+Tab: si no, Ctrl+Tab también lo atraparía.
-            if i.consume_key(ctrl_shift, Key::Tab) {
+            if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab) {
                 return Some(Action::SelectTab((self.active + count - 1) % count));
             }
             if i.consume_key(Modifiers::CTRL, Key::Tab) {
                 return Some(Action::SelectTab((self.active + 1) % count));
             }
-            // Alt+1 … Alt+9: ir a esa pestaña.
+            // Alt+1 … Alt+9 (Cmd+1 … Cmd+9 en Mac): ir a esa pestaña.
             const NUMBERS: [Key; 9] = [
                 Key::Num1,
                 Key::Num2,
@@ -536,9 +607,14 @@ impl Orion {
                 Key::Num8,
                 Key::Num9,
             ];
+            let tab_mod = if MAC {
+                Modifiers::COMMAND
+            } else {
+                Modifiers::ALT
+            };
             let n = NUMBERS
                 .iter()
-                .position(|&key| i.consume_key(Modifiers::ALT, key))?;
+                .position(|&key| i.consume_key(tab_mod, key))?;
             (n < count).then_some(Action::SelectTab(n))
         })
     }
@@ -840,18 +916,20 @@ impl eframe::App for Orion {
             self.shortcuts(ui)
         };
         let bar = self.title_bar(ui);
-        if let Some(action) = self.tab_sidebar(ui).or(bar).or(shortcut) {
+        let (menu_bar, menu_toggle) = self.menu_bar(&ctx);
+        if let Some(action) = menu_bar.or(self.tab_sidebar(ui)).or(bar).or(shortcut) {
             self.apply_action(&ctx, action);
             if self.tabs.is_empty() {
                 return;
             }
         }
 
-        // Ctrl+, abre o cierra la configuración; Escape la cierra.
+        // Ctrl+, (Cmd+, en Mac) abre o cierra la configuración; Escape la cierra.
         let (toggle, escape) = ui.input(|i| {
-            let toggle = i.modifiers.ctrl && i.key_pressed(egui::Key::Comma);
+            let toggle = i.modifiers.command && i.key_pressed(egui::Key::Comma);
             (toggle, i.key_pressed(egui::Key::Escape))
         });
+        let toggle = toggle || menu_toggle;
         if toggle && !self.menu.open {
             self.open_menu();
         } else if self.menu.open && (toggle || escape) {
