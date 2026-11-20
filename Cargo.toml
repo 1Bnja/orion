@@ -19,6 +19,18 @@ toml = "1.2.1"
 # macOS: la barra de menú del sistema (la de la manzana), con las opciones de Orion.
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.21", default-features = false }
+# macOS: el material (vibrancy) detrás de la ventana, ver `backdrop`. Las mismas versiones que usa winit.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSAppearance",
+    "NSColor",
+    "NSGraphics",
+    "NSResponder",
+    "NSView",
+    "NSVisualEffectView",
+    "NSWindow",
+] }
 
 # Solo en Windows: las fuentes instaladas se leen del registro.
 [target.'cfg(windows)'.dependencies]

@@ -66,12 +66,12 @@ impl Orion {
         }
     }
 
-    /// El fondo de Windows (Mica o acrílico) y la barra de título clara u oscura según el tema.
+    /// El material de la ventana (Mica o acrílico) y la barra de título clara u oscura según el tema.
     pub(crate) fn apply_window_look(&self) {
         let backdrop = find_backdrop(&self.settings.backdrop).unwrap_or(Backdrop::None);
         set_surface_alpha(backdrop.alpha());
-        if let Some(hwnd) = self.hwnd {
-            crate::backdrop::apply(hwnd, backdrop, !theme().is_light());
+        if let Some(window) = self.window {
+            crate::backdrop::apply(window, backdrop, !theme().is_light());
         }
     }
 
@@ -123,7 +123,7 @@ impl Orion {
                 })
                 .response
                 .on_hover_text(
-                    "Mica: tinte suave de tu fondo de pantalla. Acrílico: desenfoca lo de atrás.",
+                    "Mica: tinte suave y casi sólido. Acrílico: desenfoca lo de atrás. En Windows 11 y macOS.",
                 );
                 ui.horizontal(|ui| {
                     ui.label("Shell");

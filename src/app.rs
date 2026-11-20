@@ -98,8 +98,8 @@ pub(crate) struct Orion {
     config_checked: Instant,
     /// Some = se muestra el medidor de rendimiento.
     perf: Option<Perf>,
-    /// La ventana para Windows (HWND): para pedirle Mica o acrílico.
-    hwnd: Option<isize>,
+    /// La ventana nativa (HWND en Windows, NSView en macOS): para pedirle Mica o acrílico.
+    window: Option<crate::backdrop::Window>,
     updater: Updater,
     /// Buscaste actualizaciones a mano: avisar también si está al día o si falló.
     /// (La revisión automática al abrir es silenciosa: sin internet no hay nada que molestar.)
@@ -198,7 +198,7 @@ impl Orion {
             config_modified: config_modified(),
             config_checked: Instant::now(),
             perf: None,
-            hwnd: crate::backdrop::hwnd_of(cc),
+            window: crate::backdrop::Window::of(cc),
             updater: Updater::new(),
             update_asked: false,
             logo: cc.egui_ctx.load_texture(

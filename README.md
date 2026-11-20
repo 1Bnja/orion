@@ -35,7 +35,7 @@ pero cada comando queda en su propio **bloque**, con su resultado y lo que tard�
 - **Paleta de comandos** (`Ctrl+Shift+P`): busca cualquier acción por su nombre y aprende su atajo.
 - **Sugerencias desde tu historial** mientras escribes; `→` las acepta.
 - **Temas**: Tokyo Night, Catppuccin Mocha, Dracula, Gruvbox y Catppuccin Latte (claro).
-- **Fondos de Windows 11**: Mica o acrílico detrás de la terminal.
+- **Fondos translúcidos**: Mica o acrílico detrás de la terminal (Windows 11 y vibrancy nativa en macOS).
 - **Se actualiza solo**: avisa cuando hay una versión nueva y la instala con un clic.
 - **Cualquier fuente**: las instaladas o un archivo `.ttf`/`.otf` arrastrado a la ventana.
 - **Varias shells**: PowerShell, Windows PowerShell, cmd y WSL.

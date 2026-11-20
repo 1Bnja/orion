@@ -46,8 +46,8 @@ pub(crate) fn config_text(settings: &Settings) -> String {
 
 # Colores. Hay: {themes}.
 theme = {theme}
-# Fondo de Windows 11 detrás de la terminal. Hay: {backdrops}.
-# Mica toma un tinte suave de tu fondo de pantalla; acrílico desenfoca lo que hay detrás de la ventana.
+# Material detrás de la terminal (Windows 11 y macOS). Hay: {backdrops}.
+# Mica es un tinte suave y casi sólido; acrílico desenfoca lo que hay detrás de la ventana.
 backdrop = {backdrop}
 # Al abrir, buscar si hay una versión nueva de Orion (se instala solo si tú lo pides).
 check_updates = {check_updates}
