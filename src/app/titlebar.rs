@@ -1,6 +1,7 @@
 //! La barra de arriba: Orion dibuja la suya en vez de la del sistema. Logo, botones, el título
-//! de la pestaña y minimizar / maximizar / cerrar: a la derecha como en Windows, o los tres
-//! círculos de colores a la izquierda en Mac. Arrastrarla mueve la ventana; doble clic maximiza.
+//! de la pestaña y minimizar / maximizar / cerrar a la derecha (Windows). En Mac los tres círculos
+//! son los nativos de macOS: la barra solo les deja lugar a la izquierda.
+//! Arrastrarla mueve la ventana; doble clic maximiza.
 
 use super::{Action, MAC, Orion};
 use crate::colors::{surface, theme};
@@ -9,12 +10,8 @@ use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, ViewportCommand, ve
 const HEIGHT: f32 = 34.0;
 /// Ancho de cada botón de la ventana (como los de Windows 11).
 const WINDOW_BUTTON: f32 = 46.0;
-/// Mac: diámetro de cada círculo, distancia entre centros y margen izquierdo (como en Finder).
-const LIGHT: f32 = 12.0;
-const LIGHT_GAP: f32 = 20.0;
-const LIGHTS_MARGIN: f32 = 14.0;
-/// Mac: lo que ocupan los tres círculos; el logo va después.
-const LIGHTS_WIDTH: f32 = LIGHTS_MARGIN + 2.0 * LIGHT_GAP + LIGHT + 8.0;
+/// Mac: lugar libre a la izquierda para los círculos nativos de macOS; el logo va después.
+const LIGHTS_WIDTH: f32 = 72.0;
 
 #[derive(Clone, Copy)]
 enum Icon {
@@ -91,10 +88,7 @@ impl Orion {
                     ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
                 }
 
-                // En Mac, los círculos de la ventana van primero, a la izquierda.
-                if MAC {
-                    mac_buttons(ui, bar, maximized);
-                }
+                // En Mac, los círculos nativos ocupan la izquierda: el logo empieza después.
                 let start = bar.min.x + if MAC { LIGHTS_WIDTH } else { 0.0 };
 
                 // Logo: el ícono de Orion y el nombre.
@@ -264,71 +258,5 @@ fn windows_buttons(ui: &egui::Ui, bar: Rect, maximized: bool) {
         .line_segment([c + vec2(-5.0, 5.0), c + vec2(5.0, -5.0)], x_stroke);
     if close.clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Close);
-    }
-}
-
-/// Mac: los tres círculos de la ventana (cerrar, minimizar, maximizar) a la izquierda.
-/// Al pasar el mouse por encima aparecen sus símbolos; sin foco quedan grises, como en macOS.
-fn mac_buttons(ui: &egui::Ui, bar: Rect, maximized: bool) {
-    let ctx = ui.ctx();
-    let mid = bar.center().y;
-    let first = bar.min.x + LIGHTS_MARGIN + LIGHT / 2.0;
-    let group = Rect::from_min_max(
-        Pos2::new(first - LIGHT / 2.0, mid - LIGHT / 2.0),
-        Pos2::new(first + 2.0 * LIGHT_GAP + LIGHT / 2.0, mid + LIGHT / 2.0),
-    );
-    let hovered = ui.rect_contains_pointer(group.expand(2.0));
-    let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-    let lights = [
-        ("cerrar", Color32::from_rgb(0xff, 0x5f, 0x57), "Cerrar"),
-        (
-            "minimizar",
-            Color32::from_rgb(0xfe, 0xbc, 0x2e),
-            "Minimizar",
-        ),
-        (
-            "maximizar",
-            Color32::from_rgb(0x28, 0xc8, 0x40),
-            if maximized { "Restaurar" } else { "Maximizar" },
-        ),
-    ];
-    for (i, (id, color, tip)) in lights.into_iter().enumerate() {
-        let c = Pos2::new(first + i as f32 * LIGHT_GAP, mid);
-        let r = Rect::from_center_size(c, vec2(LIGHT, LIGHT));
-        let button = ui.interact(r, ui.scope_id().with(id), Sense::click());
-        let fill = if focused || hovered {
-            color
-        } else {
-            Color32::from_gray(0x55)
-        };
-        ui.painter().circle_filled(c, LIGHT / 2.0, fill);
-        if hovered {
-            // Los símbolos, en un tono oscuro del mismo color.
-            let mark = Stroke::new(1.2, Color32::from_black_alpha(150));
-            let d = 2.8;
-            match i {
-                0 => {
-                    ui.painter()
-                        .line_segment([c - vec2(d, d), c + vec2(d, d)], mark);
-                    ui.painter()
-                        .line_segment([c + vec2(-d, d), c + vec2(d, -d)], mark);
-                }
-                1 => {
-                    ui.painter().hline(c.x - d..=c.x + d, c.y, mark);
-                }
-                _ => {
-                    ui.painter().hline(c.x - d..=c.x + d, c.y, mark);
-                    ui.painter().vline(c.x, c.y - d..=c.y + d, mark);
-                }
-            }
-        }
-        if button.on_hover_text(tip).clicked() {
-            let cmd = match i {
-                0 => ViewportCommand::Close,
-                1 => ViewportCommand::Minimized(true),
-                _ => ViewportCommand::Maximized(!maximized),
-            };
-            ctx.send_viewport_cmd(cmd);
-        }
     }
 }

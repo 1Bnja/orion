@@ -45,20 +45,30 @@ fn main() -> Result<(), pty::Error> {
         eprintln!("orion: config {}", path.display());
     }
 
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("Orion")
+        .with_inner_size([900.0, 560.0])
+        // El de la barra de tareas y la esquina de la ventana (el del .exe lo pone build.rs).
+        .with_icon(eframe::egui::IconData {
+            rgba: icon::render(64),
+            width: 64,
+            height: 64,
+        })
+        // Transparente: deja ver Mica o el acrílico (ver `backdrop`).
+        .with_transparent(true);
+    // Sin la barra del sistema: Orion dibuja la suya (ver `app::titlebar`).
+    let viewport = if cfg!(target_os = "macos") {
+        // En Mac la ventana conserva sus bordes (esquinas redondeadas, los círculos nativos,
+        // el verde a pantalla completa) y el contenido de Orion ocupa también la barra de título.
+        viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
+    } else {
+        viewport.with_decorations(false)
+    };
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Orion")
-            .with_inner_size([900.0, 560.0])
-            // El de la barra de tareas y la esquina de la ventana (el del .exe lo pone build.rs).
-            .with_icon(eframe::egui::IconData {
-                rgba: icon::render(64),
-                width: 64,
-                height: 64,
-            })
-            // Transparente: deja ver Mica o el acrílico (ver `backdrop`).
-            .with_transparent(true)
-            // Sin la barra de Windows: Orion dibuja la suya (ver `app::titlebar`).
-            .with_decorations(false),
+        viewport,
         // OpenGL: en Windows respeta la transparencia de la ventana; el motor por defecto (wgpu) no siempre.
         renderer: eframe::Renderer::Glow,
         ..Default::default()
