@@ -1,11 +1,10 @@
-//! El ícono de Orion, dibujado con código: una órbita abierta (la "O" de Orion) que termina en una estrella.
+//! El ícono de Orion, dibujado con código: la cara de un gato (Orion se llama por un gato) hecha
+//! con rectas, que guiña: un ojo cerrado (^) y el otro es el `>` del prompt de una terminal.
 //!
 //! Cada figura es una "función de distancia" (SDF): para cada píxel, cuánto falta para llegar al borde
-//! (negativo = adentro). Con eso el borde sale suave (antialiasing) en cualquier tamaño, de 16 a 256 px.
+//! (negativo = adentro). Con eso el borde sale suave (antialiasing) en cualquier tamaño, de 16 a 1024 px.
 //! Se usa para el ícono de la ventana, con `to_ico` para generar assets/orion.ico (el del .exe) y con
 //! `to_png` para el .icns de Orion.app (lo arma scripts/package-macos.sh).
-
-use std::f32::consts::{PI, TAU};
 
 /// RGBA lineal entre 0 y 1, con el alfa sin premultiplicar.
 type Rgba = [f32; 4];
@@ -13,10 +12,6 @@ type Rgba = [f32; 4];
 fn hex(v: u32, a: f32) -> Rgba {
     let c = |s: u32| ((v >> s) & 0xff) as f32 / 255.0;
     [c(16), c(8), c(0), a]
-}
-
-fn lerp(a: Rgba, b: Rgba, t: f32) -> Rgba {
-    std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
 }
 
 /// Pinta `top` encima de `bottom` ("over"), con `coverage` = cuánto del píxel cubre la figura.
@@ -39,87 +34,74 @@ fn rounded_square(x: f32, y: f32, half: f32, r: f32) -> f32 {
     qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
 }
 
-/// Distancia a una estrella de 5 puntas de radio `r` (puntas) y `inner` (entrantes), con una punta hacia arriba.
-fn star(x: f32, y: f32, r: f32, inner: f32) -> f32 {
-    // Doblamos el plano en una de las 10 "porciones" de la estrella y medimos contra un solo segmento.
-    let slice = TAU / 10.0;
-    let angle = x.atan2(-y).rem_euclid(TAU); // 0 = arriba
-    let a = (angle % (2.0 * slice) - slice).abs(); // 0 en una punta, slice en un entrante
-    let d = x.hypot(y);
-    let (px, py) = (d * a.cos(), d * a.sin());
-    // Segmento de la punta (r, 0) al entrante (inner·cos, inner·sin).
-    let (bx, by) = (inner * slice.cos(), inner * slice.sin());
-    let (ex, ey) = (bx - r, by);
-    let t = (((px - r) * ex + py * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
-    let dist = (px - r - ex * t).hypot(py - ey * t);
-    // ¿Adentro? Del lado del centro respecto del segmento.
-    let side = (px - r) * ey - py * ex;
-    if side < 0.0 { -dist } else { dist }
-}
-
-// Geometría, en unidades del ícono (0..1, y hacia abajo).
-const CENTER: (f32, f32) = (0.47, 0.53);
-const RADIUS: f32 = 0.29;
-/// La órbita empieza arriba (ángulo de 80°, medido como en matemática) y gira hacia la izquierda
-/// hasta la estrella, a la derecha (20°): una vuelta casi entera.
-const ARC_START: f32 = 80.0 * PI / 180.0;
-const ARC_END: f32 = (360.0 + 12.0) * PI / 180.0;
-const STAR_ANGLE: f32 = 22.0 * PI / 180.0;
-
-/// Punto de la órbita en el ángulo `a`.
-fn orbit_point(a: f32) -> (f32, f32) {
-    (CENTER.0 + RADIUS * a.cos(), CENTER.1 - RADIUS * a.sin())
-}
-
-/// Ancho del trazo en la fracción `t` de la órbita: fino al empezar, como la cola de un cometa.
-fn orbit_width(t: f32) -> f32 {
-    0.022 + 0.052 * t
-}
-
-/// Distancia a la órbita y en qué fracción del recorrido (0 = inicio, 1 = estrella) está lo más cercano.
-fn orbit(x: f32, y: f32) -> (f32, f32) {
-    let (dx, dy) = (x - CENTER.0, CENTER.1 - y);
-    let span = ARC_END - ARC_START;
-    // Ángulo del píxel, llevado al rango del arco.
-    let mut a = dy.atan2(dx);
-    while a < ARC_START {
-        a += TAU;
+/// Distancia a un polígono cerrado (negativa adentro): la más corta a sus lados, con el signo
+/// según si el punto está adentro (regla par-impar).
+fn polygon(x: f32, y: f32, points: &[(f32, f32)]) -> f32 {
+    let mut dist = f32::MAX;
+    let mut inside = false;
+    for (i, &(ax, ay)) in points.iter().enumerate() {
+        let (bx, by) = points[(i + 1) % points.len()];
+        let (ex, ey) = (bx - ax, by - ay);
+        let t = (((x - ax) * ex + (y - ay) * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
+        dist = dist.min((x - ax - ex * t).hypot(y - ay - ey * t));
+        if (ay > y) != (by > y) && x < ax + (y - ay) / ey * ex {
+            inside = !inside;
+        }
     }
-    let t = (a - ARC_START) / span;
-    let ring = dx.hypot(dy) - RADIUS;
-    if t <= 1.0 {
-        return (ring.abs() - orbit_width(t) / 2.0, t);
-    }
-    // Fuera del arco: la distancia a la punta más cercana (puntas redondas).
-    let cap = |angle: f32, t: f32| {
-        let (px, py) = orbit_point(angle);
-        ((x - px).hypot(y - py) - orbit_width(t) / 2.0, t)
-    };
-    let (start, end) = (cap(ARC_START, 0.0), cap(ARC_END, 1.0));
-    if start.0 < end.0 { start } else { end }
+    if inside { -dist } else { dist }
 }
+
+// Geometría, en las unidades del diseño: un cuadrado de 120 × 120 (y hacia abajo).
+/// La cara: orejas en punta, mejillas rectas y el mentón en punta.
+const FACE: [(f32, f32); 9] = [
+    (24.0, 50.0),
+    (26.0, 16.0),
+    (48.0, 34.0),
+    (72.0, 34.0),
+    (94.0, 16.0),
+    (96.0, 50.0),
+    (88.0, 80.0),
+    (60.0, 100.0),
+    (32.0, 80.0),
+];
+/// Ojo derecho, cerrado: una "^" de 20 × 10 con centro en (74, 59).
+const CLOSED_EYE: [(f32, f32); 6] = [
+    (64.0, 64.0),
+    (74.0, 54.0),
+    (84.0, 64.0),
+    (80.0, 64.0),
+    (74.0, 58.0),
+    (68.0, 64.0),
+];
+/// Ojo izquierdo, el guiño: la misma "^" girada 90° (un ">"), con centro en (46, 59).
+/// Mismo largo y mismo grosor que el otro ojo.
+const PROMPT_EYE: [(f32, f32); 6] = [
+    (41.0, 49.0),
+    (51.0, 59.0),
+    (41.0, 69.0),
+    (41.0, 65.0),
+    (47.0, 59.0),
+    (41.0, 53.0),
+];
+
+/// Dónde va el diseño dentro del ícono (0..1): ocupa el cuadrado redondeado del fondo.
+const MARGIN: f32 = 0.04;
+const SCALE: f32 = (1.0 - 2.0 * MARGIN) / 120.0;
 
 /// Color de un punto del ícono (x, y en 0..1). `px` = tamaño de un píxel, para el antialiasing.
 fn color_at(x: f32, y: f32, px: f32) -> Rgba {
-    let coverage = |d: f32| (0.5 - d / px).clamp(0.0, 1.0);
+    let coverage = |d: f32, px: f32| (0.5 - d / px).clamp(0.0, 1.0);
     let mut c: Rgba = [0.0; 4];
 
-    // Fondo: cuadrado redondeado del color de Tokyo Night, con un degradé apenas más claro arriba.
-    let bg = lerp(hex(0x24283b, 1.0), hex(0x16161e, 1.0), y);
-    let inside = coverage(rounded_square(x - 0.5, y - 0.5, 0.46, 0.2));
-    c = over(c, bg, inside);
+    // Fondo: cuadrado redondeado oscuro, plano.
+    let tile = rounded_square(x - 0.5, y - 0.5, 0.5 - MARGIN, 0.2);
+    c = over(c, hex(0x0d1117, 1.0), coverage(tile, px));
 
-    // Órbita: de cian a violeta, como la estela que deja la estrella.
-    let (d, t) = orbit(x, y);
-    let trail = lerp(hex(0x7dcfff, 0.55), hex(0xbb9af7, 1.0), t.clamp(0.0, 1.0));
-    c = over(c, trail, coverage(d));
-
-    // Estrella al final de la órbita, con un brillo suave alrededor.
-    let (sx, sy) = orbit_point(STAR_ANGLE);
-    let glow_d = (x - sx).hypot(y - sy);
-    c = over(c, hex(0xffd479, 0.45 * (-glow_d / 0.07).exp()), inside);
-    let s = star(x - sx, y - sy, 0.115, 0.05);
-    c = over(c, hex(0xffe7a8, 1.0), coverage(s));
+    // La cara, con los ojos recortados (se ve el fondo a través de ellos).
+    let (dx, dy, dpx) = ((x - MARGIN) / SCALE, (y - MARGIN) / SCALE, px / SCALE);
+    let eyes = polygon(dx, dy, &CLOSED_EYE).min(polygon(dx, dy, &PROMPT_EYE));
+    let face = polygon(dx, dy, &FACE).max(-eyes);
+    c = over(c, hex(0xe6edf3, 1.0), coverage(face, dpx));
     c
 }
 
@@ -258,25 +240,50 @@ mod tests {
 
     #[test]
     fn icon_has_its_shapes() {
-        let size = 64;
+        let size = 120; // una unidad del diseño ≈ un píxel
         let img = render(size);
+        // Punto del diseño (0..120) → píxel del ícono.
         let pixel = |x: f32, y: f32| {
-            let i = (((y * size as f32) as u32 * size + (x * size as f32) as u32) * 4) as usize;
+            let to_px = |v: f32| ((MARGIN + v * SCALE) * size as f32) as u32;
+            let i = ((to_px(y) * size + to_px(x)) * 4) as usize;
             [img[i], img[i + 1], img[i + 2], img[i + 3]]
         };
-        assert_eq!(pixel(0.01, 0.01)[3], 0); // esquina: transparente (fuera del cuadrado redondeado)
-        let (sx, sy) = orbit_point(STAR_ANGLE);
-        let star = pixel(sx, sy);
-        assert!(
-            star[0] > 240 && star[2] < 200,
-            "la estrella es dorada: {star:?}"
+        let is_face = |p: [u8; 4]| p[0] > 200 && p[3] == 255;
+        let is_background = |p: [u8; 4]| p[0] < 40 && p[3] == 255;
+        assert_eq!(
+            render(size)[3],
+            0,
+            "la esquina es transparente (fuera del cuadrado)"
         );
-        let (lx, ly) = orbit_point(PI); // lado izquierdo de la órbita
-        let trail = pixel(lx, ly);
+        assert!(is_face(pixel(60.0, 80.0)), "la cara es clara");
         assert!(
-            trail[2] > trail[0] + 40,
-            "la órbita es azul/violeta: {trail:?}"
+            is_background(pixel(60.0, 20.0)),
+            "entre las orejas se ve el fondo"
         );
+        assert!(
+            is_background(pixel(74.0, 56.0)),
+            "el ojo cerrado (^) es un recorte"
+        );
+        assert!(
+            is_background(pixel(49.0, 59.0)),
+            "el ojo de prompt (>) es un recorte"
+        );
+        assert!(
+            is_face(pixel(43.0, 59.0)),
+            "dentro de la abertura del > sigue la cara"
+        );
+        assert!(is_face(pixel(46.0, 66.0)), "debajo del > vuelve la cara");
+
+        // Los dos ojos miden lo mismo: el > es la ^ girada.
+        let span = |eye: &[(f32, f32)], axis: fn(&(f32, f32)) -> f32| {
+            let values: Vec<f32> = eye.iter().map(axis).collect();
+            let max = values.iter().cloned().fold(f32::MIN, f32::max);
+            let min = values.iter().cloned().fold(f32::MAX, f32::min);
+            max - min
+        };
+        let (w, h) = (|p: &(f32, f32)| p.0, |p: &(f32, f32)| p.1);
+        assert_eq!(span(&CLOSED_EYE, w), span(&PROMPT_EYE, h));
+        assert_eq!(span(&CLOSED_EYE, h), span(&PROMPT_EYE, w));
 
         // El .ico: cabecera con la cantidad de imágenes y el primer tamaño.
         let ico = to_ico(&[16, 256]);
