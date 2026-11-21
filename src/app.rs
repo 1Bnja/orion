@@ -393,7 +393,8 @@ impl Orion {
             .default_size(190.0)
             .min_size(120.0)
             .max_size(360.0)
-            .show_separator_line(false)
+            // Monocromo (Vercel): una línea fina separa la barra de la terminal.
+            .show_separator_line(theme().mono)
             .frame(frame);
         panel.show(ui, |ui| {
             let width = ui.available_width();
@@ -449,13 +450,13 @@ impl Orion {
                 let active = i == self.active;
                 let painter = ui.painter();
                 if active {
-                    // La activa: fondo como el de la terminal y una línea azul a la izquierda.
+                    // La activa: fondo como el de la terminal y una línea del acento a la izquierda.
                     painter.rect_filled(rect, 6.0, theme().bg);
                     let accent = egui::Rect::from_min_size(
                         rect.min + egui::vec2(0.0, 7.0),
                         egui::vec2(3.0, 16.0),
                     );
-                    painter.rect_filled(accent, 1.5, theme().ansi[4]);
+                    painter.rect_filled(accent, 1.5, theme().accent());
                 } else if row.hovered() {
                     painter.rect_filled(rect, 6.0, theme().hover());
                 }
@@ -471,9 +472,9 @@ impl Orion {
                 if alert.is_some() {
                     let t = ui.input(|i| i.time) as f32;
                     let pulse = (t * 4.0).sin() * 0.5 + 0.5; // de 0 a 1 y vuelta
-                    let ring = theme().ansi[4].gamma_multiply(0.35 * (1.0 - pulse));
+                    let ring = theme().accent().gamma_multiply(0.35 * (1.0 - pulse));
                     painter.circle_filled(center, 4.0 + 4.0 * pulse, ring);
-                    painter.circle_filled(center, 4.0, theme().ansi[4]);
+                    painter.circle_filled(center, 4.0, theme().accent());
                     ui.ctx()
                         .request_repaint_after(std::time::Duration::from_millis(50));
                 } else {
@@ -792,8 +793,8 @@ impl Orion {
                 ui.painter().rect_filled(rect, 0.0, dim);
             }
             if session.attention.is_some() {
-                // Un panel de al lado pide atención: borde azul.
-                let stroke = egui::Stroke::new(2.0, theme().ansi[4]);
+                // Un panel de al lado pide atención: borde del acento.
+                let stroke = egui::Stroke::new(2.0, theme().accent());
                 ui.painter()
                     .rect_stroke(rect.shrink(1.0), 4.0, stroke, egui::StrokeKind::Inside);
             }

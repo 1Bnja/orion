@@ -86,9 +86,12 @@ fn row_at(tops: &[f32], y: f32) -> usize {
 
 /// Color de un bloque según su estado: verde bien, rojo error, amarillo corriendo, gris escribiendo.
 pub(super) fn status_color(status: Status) -> egui::Color32 {
+    let mono = theme().mono; // monocromo: solo un fallo lleva color
     match status {
         Status::Editing => theme().ansi[8],
+        Status::Running(_) if mono => theme().fg,
         Status::Running(_) => theme().ansi[3],
+        Status::Done(Some(0), _) | Status::Done(None, _) if mono => theme().ansi[8],
         Status::Done(Some(0), _) | Status::Done(None, _) => theme().ansi[2],
         Status::Done(Some(_), _) => theme().ansi[1],
     }
@@ -555,6 +558,34 @@ impl Session {
                         ..
                     } = *view;
                     let r = rows_rect(first, last);
+                    let failed = matches!(status, Status::Done(Some(code), _) if code != 0);
+                    if theme().mono {
+                        // Monocromo: cada bloque es una tarjeta con borde fino. Un fallo, en rojo.
+                        let card = egui::Rect::from_x_y_ranges(
+                            area.min.x + 4.0..=area.max.x - 4.0,
+                            r.min.y - 2.0..=r.max.y + 2.0,
+                        );
+                        let red = theme().ansi[1];
+                        let (fill, border) = if marked == Some(view.index) {
+                            (theme().hover(), theme().fg)
+                        } else if failed {
+                            let tint = egui::Color32::from_rgba_unmultiplied(
+                                red.r(),
+                                red.g(),
+                                red.b(),
+                                12,
+                            );
+                            (tint, red.gamma_multiply(0.45))
+                        } else if hovered.is_some_and(|h| h.index == view.index) {
+                            (theme().hover(), theme().line())
+                        } else {
+                            (egui::Color32::TRANSPARENT, theme().line())
+                        };
+                        painter.rect_filled(card, 6.0, fill);
+                        let stroke = egui::Stroke::new(1.0, border);
+                        painter.rect_stroke(card, 6.0, stroke, egui::StrokeKind::Inside);
+                        continue;
+                    }
                     if marked == Some(view.index) {
                         // Bloque marcado con Ctrl+↑/↓: fondo un poco más claro y borde azul.
                         let glow = egui::Color32::from_rgba_unmultiplied(0x7a, 0xa2, 0xf7, 16);

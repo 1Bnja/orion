@@ -17,6 +17,9 @@ pub(crate) struct Theme {
     pub(crate) bg: Color32,
     pub(crate) selection: Color32,
     pub(crate) ansi: [Color32; 16],
+    /// Estilo monocromo (como Vercel): los bloques van en grises con un borde fino, y el color
+    /// queda solo para lo que importa (un comando que falló). Si no, la barra de color de siempre.
+    pub(crate) mono: bool,
 }
 
 /// 0xRRGGBB → Color32 (const: así los temas se escriben como en sus sitios oficiales).
@@ -35,12 +38,25 @@ const fn ansi(c: [u32; 16]) -> [Color32; 16] {
 }
 
 /// Los temas incluidos. El primero es el de siempre.
-pub(crate) static THEMES: [Theme; 5] = [
+pub(crate) static THEMES: [Theme; 6] = [
+    // Inspirado en Vercel (Geist): negro puro, grises y el color solo cuando significa algo.
+    Theme {
+        name: "Vercel",
+        fg: hex(0xededed),
+        bg: hex(0x000000),
+        selection: hex(0x333333),
+        mono: true,
+        ansi: ansi([
+            0x242424, 0xff6166, 0x4cc38a, 0xffb224, 0x52a8ff, 0xbf7af0, 0x0ac7b4, 0xa1a1a1, //
+            0x8f8f8f, 0xff8a8e, 0x6fdba3, 0xffc53d, 0x75bfff, 0xd09cf6, 0x2fd8c5, 0xededed,
+        ]),
+    },
     Theme {
         name: "Tokyo Night",
         fg: hex(0xc0caf5),
         bg: hex(0x1a1b26),
         selection: hex(0x33467c),
+        mono: false,
         ansi: ansi([
             0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6, //
             0x414868, 0xff899d, 0x9fe044, 0xfaba4a, 0x8db0ff, 0xc7a9ff, 0xa4daff, 0xc0caf5,
@@ -51,6 +67,7 @@ pub(crate) static THEMES: [Theme; 5] = [
         fg: hex(0xcdd6f4),
         bg: hex(0x1e1e2e),
         selection: hex(0x45475a),
+        mono: false,
         ansi: ansi([
             0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, //
             0x585b70, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xa6adc8,
@@ -61,6 +78,7 @@ pub(crate) static THEMES: [Theme; 5] = [
         fg: hex(0xf8f8f2),
         bg: hex(0x282a36),
         selection: hex(0x44475a),
+        mono: false,
         ansi: ansi([
             0x21222c, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd, 0xf8f8f2, //
             0x6272a4, 0xff6e6e, 0x69ff94, 0xffffa5, 0xd6acff, 0xff92df, 0xa4ffff, 0xffffff,
@@ -71,6 +89,7 @@ pub(crate) static THEMES: [Theme; 5] = [
         fg: hex(0xebdbb2),
         bg: hex(0x282828),
         selection: hex(0x504945),
+        mono: false,
         ansi: ansi([
             0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984, //
             0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
@@ -81,6 +100,7 @@ pub(crate) static THEMES: [Theme; 5] = [
         fg: hex(0x4c4f69),
         bg: hex(0xeff1f5),
         selection: hex(0xacb0be),
+        mono: false,
         ansi: ansi([
             0x5c5f77, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xacb0be, //
             0x6c6f85, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xbcc0cc,
@@ -139,14 +159,23 @@ impl Theme {
         0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32 > 128.0
     }
 
-    /// Barra lateral: un poco más oscura que la terminal.
+    /// Barra lateral: un poco más oscura que la terminal (con fondo negro, apenas más clara).
     pub(crate) fn sidebar(&self) -> Color32 {
-        mix(self.bg, Color32::BLACK, 0.15)
+        if self.mono {
+            mix(self.bg, self.fg, 0.04)
+        } else {
+            mix(self.bg, Color32::BLACK, 0.15)
+        }
     }
 
     /// Fondo de una fila bajo el mouse.
     pub(crate) fn hover(&self) -> Color32 {
         mix(self.bg, self.fg, 0.05)
+    }
+
+    /// Acento de la interfaz (pestaña activa, avisos): azul, o el color del texto si es monocromo.
+    pub(crate) fn accent(&self) -> Color32 {
+        if self.mono { self.fg } else { self.ansi[4] }
     }
 
     /// Líneas separadoras y bordes.

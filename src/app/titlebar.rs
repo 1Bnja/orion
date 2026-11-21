@@ -70,7 +70,7 @@ impl Orion {
         let frame = egui::Frame::new().fill(surface(theme().sidebar()));
         egui::Panel::top("barra")
             .exact_size(HEIGHT)
-            .show_separator_line(false)
+            .show_separator_line(theme().mono)
             .frame(frame)
             .show(ui, |ui| {
                 let bar = ui.max_rect();

@@ -34,7 +34,7 @@ pero cada comando queda en su propio **bloque**, con su resultado y lo que tard�
   - `Ctrl+clic` abre links en el navegador y rutas como `src/app.rs:42` en el editor, en esa línea.
 - **Paleta de comandos** (`Ctrl+Shift+P`): busca cualquier acción por su nombre y aprende su atajo.
 - **Sugerencias desde tu historial** mientras escribes; `→` las acepta.
-- **Temas**: Tokyo Night, Catppuccin Mocha, Dracula, Gruvbox y Catppuccin Latte (claro).
+- **Temas**: Vercel (el predeterminado: negro y grises, el color solo para los errores), Tokyo Night, Catppuccin Mocha, Dracula, Gruvbox y Catppuccin Latte (claro).
 - **Fondos translúcidos**: Mica o acrílico detrás de la terminal (Windows 11 y vibrancy nativa en macOS).
 - **Se actualiza solo**: avisa cuando hay una versión nueva y la instala con un clic.
 - **Cualquier fuente**: las instaladas o un archivo `.ttf`/`.otf` arrastrado a la ventana.
@@ -99,7 +99,7 @@ Los cambios se aplican apenas guardas el archivo, sin reiniciar.
 </p>
 
 ```toml
-theme = "Tokyo Night"   # Tokyo Night, Catppuccin Mocha, Dracula, Gruvbox, Catppuccin Latte
+theme = "Vercel"        # Vercel, Tokyo Night, Catppuccin Mocha, Dracula, Gruvbox, Catppuccin Latte
 shell = "PowerShell"    # PowerShell, Windows PowerShell, cmd, WSL
 backdrop = "Mica"       # Ninguno, Mica, Acrílico
 check_updates = true    # al abrir, buscar si hay una versión nueva
