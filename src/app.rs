@@ -836,6 +836,11 @@ impl eframe::App for Orion {
 
     // logic corre antes de cada ui y también con la ventana oculta: así ningún canal se acumula.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Se cerró la última pestaña y la ventana se está cerrando: este cuadro no tiene nada que hacer
+        // (sin esto, el título de abajo buscaba la pestaña activa, que ya no existe, y Orion se caía).
+        if self.tabs.is_empty() {
+            return;
+        }
         // Todos los paneles de todas las pestañas: los de atrás siguen recibiendo su salida.
         let mut pending = false;
         let mut copied = None;
