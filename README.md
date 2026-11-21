@@ -1,152 +1,147 @@
 <p align="center">
-  <img src="assets/orion.png" width="128" alt="Ícono de Orion">
+  <img src="assets/orion.png" width="128" alt="Orion icon">
 </p>
 
 <h1 align="center">Orion</h1>
 
-<p align="center">Una terminal simple, rápida y bonita para Windows 11, escrita en Rust.</p>
+<p align="center">A simple, fast and quiet terminal for Windows and macOS.</p>
 
 ---
 
-Orion ordena tu trabajo en la terminal sin pedirte que aprendas nada nuevo: abres PowerShell como siempre,
-pero cada comando queda en su propio **bloque**, con su resultado y lo que tardó a la vista.
+Orion keeps your terminal work organized without asking you to learn anything new. You use your
+usual shell, and every command lands in its own **block**, with its result and how long it took
+in plain sight. It's also built for working with coding agents: run several in parallel, each on
+its own branch, and Orion tells you when one of them needs you.
 
-<p align="center">
-  <img src="assets/screenshots/terminal.png" width="720" alt="Orion con la barra lateral de pestañas y un bloque de PowerShell">
-</p>
+## Features
 
-## Qué tiene
+### Command blocks
 
-- **Bloques de comandos.** Cada comando y su salida forman un bloque, con una barra de color
-  (verde si salió bien, rojo si falló) y una etiqueta como `✓ 120 ms` o `✗ 3 · 1.2 s`.
-  Puedes copiar el comando o la salida de un clic, colapsar las salidas largas y saltar entre bloques con `Ctrl+↑` / `Ctrl+↓`.
-- **Pestañas en una barra lateral**, con el nombre de la carpeta y un punto que te dice cómo terminó el último comando.
-- **Paneles divididos** a la derecha o hacia abajo, cada uno con su propia shell.
-- **Hecho para trabajar con agentes de código**:
-  - Perfiles de agente que abren una pestaña con el agente andando, si quieres en su propio `git worktree` y rama, para correr varios en paralelo.
-  - **Orquestador** (paleta → "Orquestar tarea con agentes…"): escribes una tarea, Claude Code la divide
-    en subtareas y elige un modelo para cada una (Opus para diseño, Sonnet para programar, Haiku para lo mecánico).
-    Revisas el plan y Orion abre un agente por subtarea, cada uno en su worktree y rama. Necesita
-    [Claude Code](https://code.claude.com) instalado y con tu sesión iniciada; se abre desde una pestaña dentro del repo.
-  - Avisos (un punto azul en la pestaña) cuando un agente termina o pide permiso.
-  - `Shift+Enter` para escribir prompts de varias líneas.
-  - Arrastra archivos o imágenes a la ventana para escribir sus rutas.
-  - `Ctrl+clic` abre links en el navegador y rutas como `src/app.rs:42` en el editor, en esa línea.
-- **Paleta de comandos** (`Ctrl+Shift+P`): busca cualquier acción por su nombre y aprende su atajo.
-- **Sugerencias desde tu historial** mientras escribes; `→` las acepta.
-- **Temas**: Vercel (el predeterminado: negro y grises, el color solo para los errores), Tokyo Night, Catppuccin Mocha, Dracula, Gruvbox y Catppuccin Latte (claro).
-- **Fondos translúcidos**: Mica o acrílico detrás de la terminal (Windows 11 y vibrancy nativa en macOS).
-- **Se actualiza solo**: avisa cuando hay una versión nueva y la instala con un clic.
-- **Cualquier fuente**: las instaladas o un archivo `.ttf`/`.otf` arrastrado a la ventana.
-- **Varias shells**: PowerShell, Windows PowerShell, cmd y WSL.
-- **Terminal completa**: colores de 24 bits, mouse, apps de pantalla completa, selección y portapapeles.
+- Every command and its output form a block, with a label such as `✓ 120 ms` or `✗ 3 · 1.2 s`.
+- A failed command stands out in red, so errors are easy to spot.
+- Copy a command or its output with one click, collapse long output, and jump between blocks
+  with `Ctrl+↑` / `Ctrl+↓`.
 
-## Instalar
+### Tabs and panes
+
+- Tabs live in a sidebar, named after the current folder, with a dot that shows how the last
+  command ended.
+- Split any pane to the right or downward, each with its own shell.
+- A command palette (`Ctrl+Shift+P`) finds any action by name and shows its shortcut.
+
+### Built for coding agents
+
+- **Agent profiles** open a tab with an agent already running, optionally in its own
+  `git worktree` and branch, so several agents can work in parallel without stepping on each other.
+- **Orchestrator** (palette → "Orquestar tarea con agentes…"): describe a task, and it gets split
+  into independent subtasks, each with a model suited to it. Review the plan, and Orion opens one
+  agent per subtask, each in its own worktree and branch. Requires
+  [Claude Code](https://code.claude.com), installed and signed in.
+- **Alerts**: a tab shows a pulsing dot when an agent finishes or asks for permission, even if
+  you're looking at another tab.
+- **`Shift+Enter`** adds a new line, for multi-line prompts.
+- **Drag files or images** onto the window to type their paths.
+- **`Ctrl+click`** opens links in your browser, and paths such as `src/app.rs:42` in your editor,
+  at that line.
+- **Clipboard**: what a program copies inside the terminal reaches your system clipboard.
+  Programs can't read your clipboard.
+
+### Everything else
+
+- **Suggestions from your history** as you type; `→` accepts them.
+- **Themes**: a monochrome default with color only where it means something, plus five more,
+  dark and light.
+- **Translucent background**: Mica or acrylic on Windows 11, native vibrancy on macOS.
+- **Any font**: pick an installed one, or drop a `.ttf` / `.otf` file onto the window.
+- **Several shells**: PowerShell, Windows PowerShell, cmd and WSL on Windows; zsh, bash, fish
+  and PowerShell on macOS.
+- **A complete terminal**: 24-bit color, mouse support, full-screen apps, selection and clipboard.
+- **Updates itself**: Orion lets you know when a new version is out and installs it in one click.
+
+## Install
 
 ### Windows
 
-1. Descarga `orion-<versión>-windows-x64.zip` desde [Releases](https://github.com/1Bnja/orion/releases/latest).
-2. Descomprímelo donde quieras y abre `orion.exe`.
+1. Download `orion-<version>-windows-x64.zip` from
+   [Releases](https://github.com/1Bnja/orion/releases/latest).
+2. Unzip it anywhere and open `orion.exe`.
 
-No instala nada ni necesita otros programas. Para borrarlo, borra la carpeta
-(y si quieres, tu configuración en `%APPDATA%\orion`).
+Nothing gets installed and nothing else is needed. To remove it, delete the folder (and, if you
+want, your settings in `%APPDATA%\orion`).
 
 ### macOS
 
-1. Descarga `orion-<versión>-macos.zip` desde [Releases](https://github.com/1Bnja/orion/releases/latest).
-   Es una sola app para Apple Silicon e Intel (macOS 11 o más nuevo).
-2. Descomprímelo y arrastra `Orion.app` a **Aplicaciones**. Desde ahí se puede actualizar sola.
-3. La primera vez, ábrela con **clic derecho → Abrir** y confirma con **Abrir**.
+1. Download `orion-<version>-macos.zip` from
+   [Releases](https://github.com/1Bnja/orion/releases/latest). It's a single app for Apple
+   Silicon and Intel, on macOS 11 or later.
+2. Unzip it and drag `Orion.app` into **Applications**, so it can update itself.
+3. The first time, open it with **right-click → Open** and confirm.
 
-Ese paso extra es por Gatekeeper: Orion no está firmado con un certificado de Apple, así que macOS
-avisa que no puede verificar al desarrollador. Se hace una sola vez; las actualizaciones no vuelven a preguntar.
-
-En macOS 15 (Sequoia) o más nuevo, el clic derecho ya no alcanza: intenta abrirla una vez, ve a
-**Configuración del Sistema → Privacidad y seguridad** y toca **Abrir igualmente**. También sirve, desde la Terminal:
+That extra step is because Orion isn't signed with an Apple certificate, so macOS can't verify
+the developer. You only do it once; updates don't ask again. On macOS 15 or later, try to open it
+once, then go to **System Settings → Privacy & Security** and click **Open Anyway**. You can also
+run this in Terminal:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Orion.app
 ```
 
-Para borrarla, manda `Orion.app` a la papelera (y si quieres, tu configuración en `~/Library/Application Support/orion`).
+To remove it, move `Orion.app` to the Trash (and, if you want, your settings in
+`~/Library/Application Support/orion`).
 
-## Atajos
+## Shortcuts
 
-| Atajo | Qué hace |
+On macOS, use `Cmd` where the table says `Ctrl`, except `Ctrl+C` to interrupt and `Ctrl+Tab` to
+switch tabs. `Cmd+1` … `Cmd+9` go to a tab.
+
+| Shortcut | What it does |
 |---|---|
-| `Ctrl+Shift+P` | Paleta de comandos |
-| `Ctrl+,` | Configuración |
-| `Ctrl+Shift+T` | Nueva pestaña (clic derecho en "+ Nueva pestaña" para elegir la shell) |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Pestaña siguiente / anterior |
-| `Alt+1` … `Alt+9` | Ir a esa pestaña |
-| `Ctrl+Shift+D` / `Ctrl+Shift+E` | Dividir el panel a la derecha / hacia abajo |
-| `Ctrl+Alt+←↑→↓` | Pasar al panel de al lado |
-| `Ctrl+Shift+W` | Cerrar el panel (o la pestaña, si es el último) |
-| `Ctrl+↑` / `Ctrl+↓` | Saltar al bloque anterior / siguiente |
-| `Ctrl+C` | Copiar la selección o el bloque marcado; si no hay nada, interrumpir |
-| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copiar / pegar |
-| `→` | Aceptar la sugerencia (`F2` muestra varias en una lista) |
-| `Shift+Enter` | Nueva línea sin ejecutar |
-| `Ctrl+clic` | Abrir el link o la ruta bajo el mouse |
+| `Ctrl+Shift+P` | Command palette |
+| `Ctrl+,` | Settings |
+| `Ctrl+Shift+T` | New tab (right-click "+ Nueva pestaña" to pick the shell) |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
+| `Alt+1` … `Alt+9` | Go to that tab |
+| `Ctrl+Shift+D` / `Ctrl+Shift+E` | Split the pane to the right / downward |
+| `Ctrl+Alt+←↑→↓` | Move to the neighboring pane |
+| `Ctrl+Shift+W` | Close the pane (or the tab, if it's the last pane) |
+| `Ctrl+↑` / `Ctrl+↓` | Jump to the previous / next block |
+| `Ctrl+C` | Copy the selection or the marked block; with nothing selected, interrupt |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
+| `→` | Accept the suggestion (`F2` shows several in a list) |
+| `Shift+Enter` | New line without running |
+| `Ctrl+click` | Open the link or path under the mouse |
 
-## Configuración
+## Settings
 
-Todo se puede cambiar desde `Ctrl+,` o editando `%APPDATA%\orion\config.toml`.
-Los cambios se aplican apenas guardas el archivo, sin reiniciar.
+Change everything from `Ctrl+,`, or edit `config.toml`:
 
-<p align="center">
-  <img src="assets/screenshots/configuracion.png" width="720" alt="Ventana de configuración: tema, shell y fuente">
-</p>
+- Windows: `%APPDATA%\orion\config.toml`
+- macOS: `~/Library/Application Support/orion/config.toml`
+
+Changes apply as soon as you save the file, without restarting.
 
 ```toml
 theme = "Vercel"        # Vercel, Tokyo Night, Catppuccin Mocha, Dracula, Gruvbox, Catppuccin Latte
-shell = "PowerShell"    # PowerShell, Windows PowerShell, cmd, WSL
+shell = "PowerShell"    # the shell for new tabs
 backdrop = "Mica"       # Ninguno, Mica, Acrílico
-check_updates = true    # al abrir, buscar si hay una versión nueva
+check_updates = true    # look for a new version on launch
 
 [font]
-family = "Cascadia Mono"  # una fuente instalada, o la ruta a un .ttf/.otf
+family = "Cascadia Mono"  # an installed font, or the path to a .ttf/.otf file
 size = 14.0
-line_height = 1.2         # 1.0 = líneas pegadas, 1.5 = muy espaciadas
+line_height = 1.2         # 1.0 = tight lines, 1.5 = very spaced out
 
-# Un perfil de agente: aparece en la paleta y en el clic derecho de "+ Nueva pestaña".
+# An agent profile: shows up in the palette and when you right-click "+ Nueva pestaña".
 [[agent]]
-name = "Mi agente"
-command = "mi-agente"   # lo que se escribe en la shell para lanzarlo
-worktree = true         # crear antes un git worktree en una rama nueva (orion/mi-agente-1)
+name = "My agent"
+command = "my-agent"    # what gets typed into the shell to launch it
+worktree = true         # first create a git worktree on a new branch (orion/my-agent-1)
 ```
 
-Las rutas en `Ctrl+clic` se abren con el editor (`code`, si está instalado) o con la app predeterminada.
+Blocks and folder titles work in PowerShell and zsh, and history suggestions in PowerShell.
+In other shells, Orion works as a regular terminal. Paths opened with `Ctrl+click` go to your
+editor (`code`, if installed) or to the default app.
 
-Los bloques, el título por carpeta y las sugerencias funcionan en PowerShell.
-En cmd y WSL Orion es una terminal normal.
-
-## Compilar desde el código
-
-Necesitas [Rust](https://rustup.rs) con el toolchain MSVC.
-
-```powershell
-cargo run                    # abrir Orion en modo desarrollo
-cargo test                   # tests
-.\scripts\package.ps1        # armar el zip portable en target\dist
-```
-
-Para publicar una versión: sube `version` en `Cargo.toml` y empuja un tag `v<versión>`;
-GitHub Actions compila, arma el zip y crea la release.
-
-### Cómo está hecho
-
-| Pieza | Para qué |
-|---|---|
-| `portable-pty` | Lanza la shell en un pseudo-terminal de Windows (ConPTY) |
-| `alacritty_terminal` | Interpreta las secuencias de la terminal y guarda la grilla de celdas |
-| `eframe` / `egui` | La ventana y el dibujo |
-| `serde` + `toml` | La configuración |
-| OSC 133 | Marcas que la shell imprime en cada prompt y comando: así nacen los bloques |
-
-El recorrido de los datos está explicado al comienzo de [`src/main.rs`](src/main.rs).
-La planificación vive en el [tablero del proyecto](https://github.com/users/1Bnja/projects/6).
-
-## Licencia
+## License
 
 [MIT](LICENSE)
