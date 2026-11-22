@@ -12,6 +12,8 @@ base64 = "0.22"
 eframe = { version = "0.37.0", features = ["glow"] }
 portable-pty = "0.9.0"
 raw-window-handle = "0.6"
+# Selector de carpetas nativo para "Nuevo proyecto" (Windows y macOS).
+rfd = { version = "0.15", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
 toml = "1.2.1"

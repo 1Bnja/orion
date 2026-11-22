@@ -26,6 +26,11 @@ its own branch, and Orion tells you when one of them needs you.
 
 - Tabs live in a sidebar, named after the current folder, with a dot that shows how the last
   command ended.
+- Tabs are grouped by git repo, with a header per project and loose terminals at the end. The `+`
+  on a project header opens another agent there (in a new worktree or in the repo folder) or a
+  plain terminal.
+- Projects opened with **New project** (`Ctrl+Shift+O`) are remembered in `projects.json`, next to
+  `config.toml`, and listed under "Guardados" until you remove them. One click reopens one.
 - Split any pane to the right or downward, each with its own shell.
 - A command palette (`Ctrl+Shift+P`) finds any action by name and shows its shortcut.
 
@@ -98,9 +103,10 @@ switch tabs. `Cmd+1` … `Cmd+9` go to a tab.
 |---|---|
 | `Ctrl+Shift+P` | Command palette |
 | `Ctrl+,` | Settings |
-| `Ctrl+Shift+T` | New tab (right-click "+ Nueva pestaña" to pick the shell) |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
-| `Alt+1` … `Alt+9` | Go to that tab |
+| `Ctrl+Shift+T` | New tab (click "+ Nueva pestaña" to pick a shell, a project or an agent) |
+| `Ctrl+Shift+O` | New project: a repo and an agent, optionally in its own worktree |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab, in the order the sidebar shows them |
+| `Alt+1` … `Alt+9` | Go to that tab (by its position in the sidebar) |
 | `Ctrl+Shift+D` / `Ctrl+Shift+E` | Split the pane to the right / downward |
 | `Ctrl+Alt+←↑→↓` | Move to the neighboring pane |
 | `Ctrl+Shift+W` | Close the pane (or the tab, if it's the last pane) |
@@ -131,7 +137,8 @@ family = "Cascadia Mono"  # an installed font, or the path to a .ttf/.otf file
 size = 14.0
 line_height = 1.2         # 1.0 = tight lines, 1.5 = very spaced out
 
-# An agent profile: shows up in the palette and when you right-click "+ Nueva pestaña".
+# An agent profile: shows up in the palette and in the "+ Nueva pestaña" menu.
+# Claude Code, Gemini CLI, Codex, OpenCode and Aider need no profile: Orion finds them on its own.
 [[agent]]
 name = "My agent"
 command = "my-agent"    # what gets typed into the shell to launch it

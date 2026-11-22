@@ -6,6 +6,7 @@ use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::Color;
 use alacritty_terminal::vte::ansi::NamedColor;
 use alacritty_terminal::vte::ansi::Rgb;
+use eframe::egui;
 use eframe::egui::Color32;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -181,6 +182,90 @@ impl Theme {
     /// Líneas separadoras y bordes.
     pub(crate) fn line(&self) -> Color32 {
         mix(self.bg, self.fg, 0.12)
+    }
+
+    /// La interfaz de egui (configuración, paleta, menús) con los colores del tema: el mismo
+    /// fondo, el mismo texto y los mismos grises que la terminal. En los temas monocromos los
+    /// botones van sin relleno hasta que el mouse los toca, como en Vercel.
+    pub(crate) fn visuals(&self) -> egui::Visuals {
+        let mut v = if self.is_light() {
+            egui::Visuals::light()
+        } else {
+            egui::Visuals::dark()
+        };
+        let (bg, fg) = (self.bg, self.fg);
+        let window = self.sidebar();
+        let line = self.line();
+        let hover = self.hover();
+        let raised = mix(bg, fg, 0.10);
+        let accent = self.accent();
+        let widget = |bg_fill, weak_bg_fill, bg_stroke, fg_stroke, corner_radius| {
+            egui::style::WidgetVisuals {
+                bg_fill,
+                weak_bg_fill,
+                bg_stroke,
+                corner_radius: egui::CornerRadius::same(corner_radius),
+                fg_stroke,
+                expansion: 0.0,
+            }
+        };
+
+        v.override_text_color = Some(fg);
+        v.window_fill = window;
+        v.panel_fill = window;
+        v.window_stroke = egui::Stroke::new(1.0, line);
+        v.window_corner_radius = egui::CornerRadius::same(if self.mono { 10 } else { 6 });
+        v.menu_corner_radius = egui::CornerRadius::same(8);
+        v.extreme_bg_color = mix(bg, fg, 0.07); // fondo de los cuadros de texto
+        v.faint_bg_color = hover;
+        v.code_bg_color = raised;
+        v.selection = egui::style::Selection {
+            bg_fill: self.selection,
+            stroke: egui::Stroke::new(1.0, fg),
+        };
+        v.hyperlink_color = accent;
+        v.warn_fg_color = self.ansi[3];
+        v.error_fg_color = self.ansi[1];
+        v.text_cursor.stroke = egui::Stroke::new(2.0, fg);
+        v.slider_trailing_fill = true;
+
+        let w = &mut v.widgets;
+        w.noninteractive = widget(
+            window,
+            window,
+            egui::Stroke::new(1.0, line),
+            egui::Stroke::new(1.0, fg),
+            4,
+        );
+        w.inactive = widget(
+            raised,
+            Color32::TRANSPARENT,
+            egui::Stroke::NONE,
+            egui::Stroke::new(1.0, fg),
+            6,
+        );
+        w.hovered = widget(
+            mix(bg, fg, 0.16),
+            hover,
+            egui::Stroke::new(1.0, line),
+            egui::Stroke::new(1.0, fg),
+            6,
+        );
+        w.active = widget(
+            mix(bg, fg, 0.20),
+            raised,
+            egui::Stroke::new(1.0, accent),
+            egui::Stroke::new(1.0, fg),
+            6,
+        );
+        w.open = widget(
+            raised,
+            hover,
+            egui::Stroke::new(1.0, line),
+            egui::Stroke::new(1.0, fg),
+            6,
+        );
+        v
     }
 }
 

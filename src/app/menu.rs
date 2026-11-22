@@ -23,15 +23,10 @@ pub(crate) struct SettingsMenu {
     pub(crate) show_all: bool,
 }
 
-/// Cambia el tema: los colores de la terminal y, si el fondo es claro, las ventanas de egui también.
+/// Cambia el tema: los colores de la terminal y los de las ventanas de egui (configuración, paleta).
 pub(crate) fn apply_theme(ctx: &egui::Context, name: &str) {
     set_theme(find_theme(name).unwrap_or(0));
-    let visuals = if theme().is_light() {
-        egui::Visuals::light()
-    } else {
-        egui::Visuals::dark()
-    };
-    ctx.set_visuals(visuals);
+    ctx.set_visuals(theme().visuals());
 }
 
 impl Orion {

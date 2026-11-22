@@ -14,6 +14,7 @@ pub(super) enum Command {
     CheckUpdates,
     Quit,
     NewTab,
+    NewProject,
     SplitRight,
     SplitDown,
     ClosePane,
@@ -27,7 +28,7 @@ pub(super) enum Command {
 type Keys = Option<(bool, Code)>;
 
 /// Cada ítem propio del menú: su id, su texto, su atajo y su comando.
-const ITEMS: [(&str, &str, Keys, Command); 11] = [
+const ITEMS: [(&str, &str, Keys, Command); 12] = [
     (
         "settings",
         "Configuración…",
@@ -51,6 +52,12 @@ const ITEMS: [(&str, &str, Keys, Command); 11] = [
         "Nueva pestaña",
         Some((true, Code::KeyT)),
         Command::NewTab,
+    ),
+    (
+        "new-project",
+        "Nuevo proyecto…",
+        Some((true, Code::KeyO)),
+        Command::NewProject,
     ),
     (
         "split-right",
@@ -158,6 +165,7 @@ impl MacMenu {
             "Shell",
             &[
                 item("new-tab"),
+                item("new-project"),
                 &separator,
                 item("split-right"),
                 item("split-down"),

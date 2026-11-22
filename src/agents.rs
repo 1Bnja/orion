@@ -3,6 +3,113 @@
 
 use crate::pty::ShellKind;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// Un CLI de agente que Orion sabe abrir. El perfil `[[agent]]` sigue siendo la vía libre para
+/// cualquier otro comando; estos son los que ya vienen listos y se detectan solos.
+pub(crate) struct Provider {
+    /// Nombre para el menú y la paleta.
+    pub(crate) name: &'static str,
+    /// Programa base; en Windows se prueban `.exe`, `.cmd` y `.bat`.
+    binary: &'static str,
+    /// Lo que se escribe en la shell para abrirlo.
+    pub(crate) command: &'static str,
+    /// Una línea para el tooltip: quién lo hace y cómo instalarlo.
+    pub(crate) about: &'static str,
+}
+
+/// Los agentes que Orion reconoce sin configurar nada. Para cualquier otro, un `[[agent]]`.
+pub(crate) static PROVIDERS: [Provider; 5] = [
+    Provider {
+        name: "Claude Code",
+        binary: "claude",
+        command: "claude",
+        about: "Anthropic · code.claude.com",
+    },
+    Provider {
+        name: "Gemini CLI",
+        binary: "gemini",
+        command: "gemini",
+        about: "Google · npm i -g @google/gemini-cli",
+    },
+    Provider {
+        name: "Codex",
+        binary: "codex",
+        command: "codex",
+        about: "OpenAI · npm i -g @openai/codex",
+    },
+    Provider {
+        name: "OpenCode",
+        binary: "opencode",
+        command: "opencode",
+        about: "open source · opencode.ai",
+    },
+    Provider {
+        name: "Aider",
+        binary: "aider",
+        command: "aider",
+        about: "cualquier modelo, incluido DeepSeek · aider.chat",
+    },
+];
+
+/// Carpetas donde buscar los CLIs: el PATH y donde los dejan los instaladores.
+fn search_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    // En Windows no hay HOME: la carpeta personal es USERPROFILE.
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    if let Some(home) = home {
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".npm-global/bin"));
+        dirs.push(home.join(".bun/bin"));
+    }
+    #[cfg(windows)]
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        dirs.push(PathBuf::from(appdata).join("npm"));
+    }
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    dirs
+}
+
+/// Los nombres que puede tener el ejecutable en este sistema.
+fn candidates(base: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        vec![
+            format!("{base}.exe"),
+            format!("{base}.cmd"),
+            format!("{base}.bat"),
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        vec![base.to_string()]
+    }
+}
+
+/// El ejecutable de `base` en la primera carpeta que lo tenga (mismo orden que el PATH).
+fn find_binary(base: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+    candidates(base)
+        .into_iter()
+        .flat_map(|name| dirs.iter().map(move |d| d.join(&name)))
+        .find(|p| p.is_file())
+}
+
+/// Los índices de `PROVIDERS` que están instalados. Se calcula una vez por sesión.
+pub(crate) fn installed() -> &'static [usize] {
+    static INSTALLED: OnceLock<Vec<usize>> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let dirs = search_dirs();
+        PROVIDERS
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| find_binary(p.binary, &dirs).is_some())
+            .map(|(i, _)| i)
+            .collect()
+    })
+}
 
 /// Corre git en `dir` y devuelve lo que imprimió, o su mensaje de error.
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -74,7 +181,13 @@ pub(crate) fn launch_input(shell: &ShellKind, dir: Option<&Path>, command: &str)
             format!("cd {quoted}\r") // WSL, zsh, bash, fish
         }
     });
-    format!("{}{command}\r", cd.unwrap_or_default())
+    // Sin comando (una terminal sola en esa carpeta) no hace falta el Enter de más.
+    let run = if command.is_empty() {
+        String::new()
+    } else {
+        format!("{command}\r")
+    };
+    format!("{}{run}", cd.unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -107,6 +220,30 @@ mod tests {
         let dir = Some(Path::new("/Users/ana/mi repo"));
         let zsh = &SHELLS[0];
         assert_eq!(launch_input(zsh, dir, "a"), "cd '/Users/ana/mi repo'\ra\r");
+    }
+
+    #[test]
+    fn a_provider_is_found_in_the_first_folder_that_has_it() {
+        let base = std::env::temp_dir().join(format!("orion-prov-{}", std::process::id()));
+        let (a, b) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let name = candidates("foo")[0].clone();
+        std::fs::write(b.join(&name), "").unwrap();
+        assert_eq!(
+            find_binary("foo", &[a.clone(), b.clone()]),
+            Some(b.join(&name))
+        );
+        assert_eq!(find_binary("nope", &[a, b]), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn every_provider_has_a_unique_name() {
+        let mut names: Vec<&str> = PROVIDERS.iter().map(|p| p.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), PROVIDERS.len());
     }
 
     #[test]

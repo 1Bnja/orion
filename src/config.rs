@@ -52,7 +52,8 @@ backdrop = {backdrop}
 # Al abrir, buscar si hay una versión nueva de Orion (se instala solo si tú lo pides).
 check_updates = {check_updates}
 # Shell de las pestañas nuevas ({key}+Shift+T). Hay: {shells}.
-# Para abrir otra solo una vez: clic derecho en "+ Nueva pestaña", o la paleta ({key}+Shift+P).
+# Para abrir una pestaña con otro proyecto o shell: clic en "+ Nueva pestaña",
+# o la paleta ({key}+Shift+P).
 shell = {shell}
 
 [font]
@@ -64,7 +65,7 @@ size = {:.1}
 # Alto de cada línea respecto de la letra: 1.0 = pegadas, 1.2 = con aire, 1.5 = muy espaciadas.
 line_height = {:.2}
 
-# Agentes: cada [[agent]] aparece en la paleta ({key}+Shift+P) y en el clic derecho de
+# Agentes: cada [[agent]] aparece en la paleta ({key}+Shift+P) y en el menú de
 # "+ Nueva pestaña". Abre una pestaña en la carpeta actual y escribe `command`.
 # Con worktree = true, antes crea un git worktree al lado del repo, en una rama nueva
 # (orion/nombre-1, -2…): así varios agentes trabajan en paralelo sin pisarse.

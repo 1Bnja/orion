@@ -67,23 +67,28 @@ fn ranked(names: &[&str], query: &str) -> Vec<usize> {
 impl Orion {
     /// Todo lo que se puede hacer desde la paleta: (nombre, atajo, acción).
     fn commands(&self) -> Vec<(String, &'static str, Action)> {
-        let (n, a) = (self.tabs.len(), self.active);
+        let (_n, a) = (self.tabs.len(), self.active);
         let mut list: Vec<(String, &'static str, Action)> = vec![
             (
                 "Nueva pestaña".into(),
                 keys!("+Shift+T"),
                 Action::NewTab(None),
             ),
+            (
+                "Nuevo proyecto (repo + agente)…".into(),
+                keys!("+Shift+O"),
+                Action::NewProject,
+            ),
             ("Cerrar pestaña".into(), "", Action::CloseTab(a)),
             (
                 "Siguiente pestaña".into(),
                 "Ctrl+Tab",
-                Action::SelectTab((a + 1) % n),
+                Action::SelectTab(self.tab_step(1)),
             ),
             (
                 "Pestaña anterior".into(),
                 "Ctrl+Shift+Tab",
-                Action::SelectTab((a + n - 1) % n),
+                Action::SelectTab(self.tab_step(-1)),
             ),
             (
                 "Dividir a la derecha".into(),
@@ -126,6 +131,10 @@ impl Orion {
             "",
             Action::Orchestrate,
         ));
+        for i in self.providers() {
+            let name = format!("Agente: {}", crate::agents::PROVIDERS[i].name);
+            list.push((name, "", Action::Provider(i)));
+        }
         for (i, agent) in self.settings.agents.iter().enumerate() {
             list.push((format!("Agente: {}", agent.name), "", Action::Agent(i)));
         }
@@ -135,13 +144,10 @@ impl Orion {
         for (i, t) in crate::colors::THEMES.iter().enumerate() {
             list.push((format!("Tema: {}", t.name), "", Action::Theme(i)));
         }
-        for (i, tab) in self.tabs.iter().enumerate() {
-            let name = format!("Ir a pestaña: {}", tab.focused().title());
-            list.push((
-                name,
-                numbers.get(i).copied().unwrap_or(""),
-                Action::SelectTab(i),
-            ));
+        for (pos, i) in self.tab_order().into_iter().enumerate() {
+            let name = format!("Ir a pestaña: {}", self.tabs[i].focused().title());
+            let key = numbers.get(pos).copied().unwrap_or("");
+            list.push((name, key, Action::SelectTab(i)));
         }
         list
     }
