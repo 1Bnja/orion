@@ -168,6 +168,35 @@ pub(crate) fn create_worktree(dir: &Path, agent: &str) -> Result<PathBuf, String
     unreachable!()
 }
 
+/// Los worktrees que Orion creó en `repo` (los de ramas `orion/…`): su carpeta y su rama.
+pub(crate) fn orion_worktrees(repo: &Path) -> Vec<(PathBuf, String)> {
+    let Ok(text) = git(repo, &["worktree", "list", "--porcelain"]) else {
+        return Vec::new();
+    };
+    let (mut found, mut path, mut branch) = (Vec::new(), None, None);
+    // Un bloque por worktree, separados por una línea vacía (la última lleva el que cierra).
+    for line in text.lines().chain([""]) {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(p));
+        } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
+            branch = Some(b.to_string());
+        } else if line.is_empty()
+            && let (Some(p), Some(b)) = (path.take(), branch.take())
+            && b.starts_with("orion/")
+        {
+            found.push((p, b));
+        }
+    }
+    found
+}
+
+/// Quita un worktree y su rama. Sin `--force`: si hay cambios sin guardar, falla y no toca nada.
+/// Devuelve si también se borró la rama (si tiene commits sin fusionar, se conserva).
+pub(crate) fn remove_worktree(repo: &Path, path: &Path, branch: &str) -> Result<bool, String> {
+    git(repo, &["worktree", "remove", &path.to_string_lossy()])?;
+    Ok(git(repo, &["branch", "-d", branch]).is_ok())
+}
+
 /// Lo que se escribe en la shell nueva: ir a `dir` (si hay) y lanzar el agente. Una línea por paso,
 /// así sirve igual en PowerShell, cmd y WSL.
 pub(crate) fn launch_input(shell: &ShellKind, dir: Option<&Path>, command: &str) -> String {
@@ -275,6 +304,18 @@ mod tests {
         );
         // Fuera de un repo, un error claro en vez de un worktree a medias.
         assert!(create_worktree(&std::env::temp_dir(), "x").is_err());
+
+        // Limpieza: los dos worktrees se listan; el que tiene cambios sin guardar se conserva.
+        assert_eq!(orion_worktrees(&repo).len(), 2);
+        std::fs::write(second.join("nuevo.txt"), "sin guardar").unwrap();
+        assert!(remove_worktree(&repo, &second, "orion/mi-agente-2").is_err());
+        assert!(second.exists());
+        assert_eq!(
+            remove_worktree(&repo, &first, "orion/mi-agente-1"),
+            Ok(true)
+        );
+        assert!(!first.exists());
+        assert_eq!(orion_worktrees(&repo).len(), 1);
 
         let _ = std::fs::remove_dir_all(&base);
     }

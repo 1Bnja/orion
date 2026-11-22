@@ -30,7 +30,11 @@ its own branch, and Orion tells you when one of them needs you.
   on a project header opens another agent there (in a new worktree or in the repo folder) or a
   plain terminal.
 - Projects opened with **New project** (`Ctrl+Shift+O`) are remembered in `projects.json`, next to
-  `config.toml`, and listed under "Guardados" until you remove them. One click reopens one.
+  `config.toml`, and listed under "Guardados" until you remove them. One click reopens one. In
+  that window, pick a recent repo or one next to the current one, or paste a path; tick several
+  agents to launch them at once, each in its own worktree and branch.
+- Worktrees are never deleted behind your back. Palette → "Limpiar worktrees de Orion" removes the
+  ones no tab uses, skipping any with unsaved changes; a branch is deleted only once merged.
 - Split any pane to the right or downward, each with its own shell.
 - A command palette (`Ctrl+Shift+P`) finds any action by name and shows its shortcut.
 

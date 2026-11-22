@@ -60,6 +60,8 @@ struct Tab {
     repo: Option<PathBuf>,
     /// El agente con que se abrió, para distinguir varias pestañas de un mismo proyecto.
     agent: Option<String>,
+    /// La carpeta del worktree si la pestaña nació en uno (para no limpiarlo mientras se usa).
+    worktree: Option<PathBuf>,
 }
 
 impl Tab {
@@ -67,6 +69,7 @@ impl Tab {
         Self {
             repo: None,
             agent: None,
+            worktree: None,
             focus: session.id,
             panes: Split::new(session),
             rects: Vec::new(),
@@ -192,6 +195,8 @@ enum Action {
     InProject(usize, AgentChoice, bool),
     /// Una terminal sola en el repo de esa pestaña.
     TerminalIn(usize),
+    /// Borrar los worktrees de Orion que ya no usa ninguna pestaña (y su rama, si se puede).
+    CleanWorktrees,
     /// Reabrir el proyecto guardado con ese índice en `Orion::saved`.
     OpenSaved(usize),
     /// Quitarlo de los proyectos guardados.
@@ -256,6 +261,11 @@ fn tab_label(agent: Option<&str>, title: &str) -> String {
         Some(a) if !title.to_lowercase().contains(&a.to_lowercase()) => format!("{a} · {title}"),
         _ => title.to_string(),
     }
+}
+
+/// Una ruta en una forma que sirva para compararla (git usa `/`, Windows `\`, y no distingue mayúsculas).
+fn same_path_key(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/").to_lowercase()
 }
 
 /// El nombre de la carpeta (o la ruta entera si no tiene).
@@ -492,6 +502,7 @@ impl Orion {
         let command = command(shell);
         // Una terminal sola (sin comando) no es un agente.
         tab.agent = (!command.is_empty()).then(|| name.to_string());
+        tab.worktree = if worktree { dir.clone() } else { None };
         let input = crate::agents::launch_input(shell, dir.as_deref(), &command);
         tab.focused().write(input.as_bytes());
         true
@@ -538,17 +549,15 @@ impl Orion {
         if let Some(dir) = dir {
             self.project.set_dir(dir);
         }
-        // El agente que usaste por última vez, si sigue disponible.
-        let last = self.saved.first().and_then(|s| {
-            choices
-                .iter()
-                .position(|c| c.name(&self.settings) == s.agent)
-        });
-        let agent = last.unwrap_or(self.project.agent);
-        self.project.agent = agent.min(choices.len().saturating_sub(1));
-        self.project.worktree = choices
-            .get(self.project.agent)
-            .is_some_and(|&c| self.default_worktree(c));
+        // Marcado de entrada: el agente que usaste por última vez si sigue disponible; si no, el primero.
+        let last = self.saved.first().map(|s| s.agent.as_str());
+        let name_of = |c: &AgentChoice| c.name(&self.settings).to_string();
+        let pick = choices
+            .iter()
+            .find(|c| Some(c.name(&self.settings)) == last)
+            .or(choices.first());
+        self.project.picked = pick.map(name_of).into_iter().collect();
+        self.refresh_worktree();
     }
 
     /// Abre una pestaña de proyecto: el agente `choice` en `dir`, o en un worktree nuevo.
@@ -600,6 +609,40 @@ impl Orion {
         }
     }
 
+    /// Borra los worktrees `orion/…` de los repos conocidos que ninguna pestaña usa. Los que tienen
+    /// cambios sin guardar se dejan; la rama solo se borra si ya está fusionada.
+    /// ponytail: corre en el hilo de la ventana; con muchos worktrees convendría un hilo aparte.
+    fn clean_worktrees(&mut self) {
+        let mut repos: Vec<PathBuf> = self.saved.iter().map(|s| s.dir.clone()).collect();
+        repos.extend(self.tabs.iter().filter_map(|t| t.repo.clone()));
+        repos.sort();
+        repos.dedup();
+        let in_use: Vec<String> = self
+            .tabs
+            .iter()
+            .filter_map(|t| t.worktree.as_deref())
+            .map(same_path_key)
+            .collect();
+        let (mut removed, mut kept) = (0, 0);
+        for repo in &repos {
+            for (path, branch) in crate::agents::orion_worktrees(repo) {
+                if in_use.contains(&same_path_key(&path)) {
+                    continue;
+                }
+                match crate::agents::remove_worktree(repo, &path, &branch) {
+                    Ok(_) => removed += 1,
+                    Err(_) => kept += 1,
+                }
+            }
+        }
+        let kept = if kept > 0 {
+            format!(" ({kept} con cambios sin guardar, se dejaron)")
+        } else {
+            String::new()
+        };
+        self.show_toast(format!("Worktrees limpiados: {removed}{kept}"));
+    }
+
     /// Cierra una pestaña (y las shells de todos sus paneles). Si era la última, se cierra la ventana.
     fn close_tab(&mut self, ctx: &egui::Context, index: usize) {
         let mut tab = self.tabs.remove(index);
@@ -609,6 +652,9 @@ impl Orion {
         if self.tabs.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
+        }
+        if tab.worktree.is_some() {
+            self.show_toast("El worktree sigue en disco: paleta → «Limpiar worktrees de Orion»");
         }
         self.active = active_after_close(self.active, index, self.tabs.len());
     }
@@ -1093,6 +1139,7 @@ impl Orion {
                     self.launch_agent(ctx, Some(repo), "terminal", false, |_| String::new());
                 }
             }
+            Action::CleanWorktrees => self.clean_worktrees(),
             Action::OpenSaved(i) => self.open_saved(ctx, i),
             Action::ForgetSaved(i) => {
                 if i < self.saved.len() {
@@ -1444,8 +1491,10 @@ impl eframe::App for Orion {
         if let Some(subtasks) = self.orchestrate_window(&ctx) {
             self.launch_plan(&ctx, subtasks);
         }
-        if let Some((dir, choice, worktree)) = self.project_window(&ctx) {
-            self.launch_project(&ctx, dir, choice, worktree);
+        if let Some((dir, choices, worktree)) = self.project_window(&ctx) {
+            for choice in choices {
+                self.launch_project(&ctx, dir.clone(), choice, worktree);
+            }
         }
         // Al final: una acción de la paleta (ej. cerrar la última pestaña) puede cerrar la ventana.
         if let Some(action) = self.palette_window(&ctx) {

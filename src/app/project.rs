@@ -1,10 +1,10 @@
-//! La ventana de "Nuevo proyecto": un repo y un agente, en su propia pestaña.
+//! La ventana de "Nuevo proyecto": un repo y uno o varios agentes, cada uno en su pestaña.
 //! Con worktree, el agente trabaja en un git worktree y una rama nueva, como los harness de agentes.
 
-use super::{AgentChoice, Orion};
+use super::{AgentChoice, Orion, folder_name};
 use crate::colors::theme;
 use eframe::egui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Un proyecto guardado: sobrevive al cierre de Orion y se reabre con un clic desde la barra lateral.
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Debug)]
@@ -44,24 +44,64 @@ pub(super) fn save_saved(list: &[Saved]) {
     }
 }
 
+/// Los repos que están junto a `dir` (en la misma carpeta madre), para elegirlos con un clic.
+/// Los worktrees no cuentan: su `.git` es un archivo, no una carpeta.
+fn sibling_repos(dir: &Path) -> Vec<PathBuf> {
+    let Some(entries) = dir.parent().and_then(|p| std::fs::read_dir(p).ok()) else {
+        return Vec::new();
+    };
+    let mut repos: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p != dir && p.join(".git").is_dir())
+        .collect();
+    repos.sort();
+    repos.truncate(12);
+    repos
+}
+
 #[derive(Default)]
 pub(super) struct Project {
     pub(super) open: bool,
     /// Carpeta elegida (el repo).
     pub(super) dir: Option<PathBuf>,
-    /// Índice en `Orion::agent_choices()`.
-    pub(super) agent: usize,
+    /// Lo que dice el campo de la ruta (puede ir por delante de `dir` mientras escribes).
+    path: String,
+    /// Nombres de los agentes marcados. Con varios, cada uno va en su propia rama.
+    pub(super) picked: Vec<String>,
     pub(super) worktree: bool,
     /// Raíz del repo de `dir`, o el error de git si no es un repo.
     repo: Option<Result<PathBuf, String>>,
+    /// Repos junto a `dir`.
+    siblings: Vec<PathBuf>,
     pub(super) error: Option<String>,
 }
 
 impl Project {
     pub(super) fn set_dir(&mut self, dir: PathBuf) {
         self.repo = Some(crate::agents::repo_root(&dir));
+        self.siblings = sibling_repos(&dir);
+        self.path = dir.display().to_string();
         self.dir = Some(dir);
+        self.error = None;
     }
+}
+
+/// Una fila de carpetas para elegir con un clic.
+fn chips(ui: &mut egui::Ui, label: &str, dirs: &[PathBuf], chosen: &mut Option<PathBuf>) {
+    if dirs.is_empty() {
+        return;
+    }
+    ui.add_space(4.0);
+    ui.weak(label);
+    ui.horizontal_wrapped(|ui| {
+        for dir in dirs {
+            let chip = ui.small_button(folder_name(dir));
+            if chip.on_hover_text(dir.display().to_string()).clicked() {
+                *chosen = Some(dir.clone());
+            }
+        }
+    });
 }
 
 impl Orion {
@@ -71,11 +111,29 @@ impl Orion {
         choice.worktree(&self.settings, busy)
     }
 
-    /// Dibuja la ventana si está abierta. Devuelve el proyecto a abrir cuando aprietas "Abrir".
+    /// Ajusta el worktree por defecto a lo marcado: con varios agentes, cada uno va en su rama;
+    /// con uno, según si el repo ya está ocupado.
+    pub(super) fn refresh_worktree(&mut self) {
+        let picked: Vec<AgentChoice> = self
+            .agent_choices()
+            .into_iter()
+            .filter(|c| {
+                self.project
+                    .picked
+                    .iter()
+                    .any(|n| n == c.name(&self.settings))
+            })
+            .collect();
+        self.project.worktree =
+            picked.len() > 1 || picked.first().is_some_and(|&c| self.default_worktree(c));
+    }
+
+    /// Dibuja la ventana si está abierta. Devuelve lo que hay que abrir cuando aprietas "Abrir":
+    /// la carpeta, los agentes marcados y si van en worktree.
     pub(super) fn project_window(
         &mut self,
         ctx: &egui::Context,
-    ) -> Option<(PathBuf, AgentChoice, bool)> {
+    ) -> Option<(PathBuf, Vec<AgentChoice>, bool)> {
         if !self.project.open {
             return None;
         }
@@ -84,13 +142,18 @@ impl Orion {
             .into_iter()
             .map(|c| (c, c.name(&self.settings).to_string()))
             .collect();
-        if self.project.agent >= choices.len() {
-            self.project.agent = 0;
-        }
         let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         let mut open = !escape;
         let mut launch = false;
+        let mut chosen: Option<PathBuf> = None;
         let start = self.project.dir.clone().unwrap_or_default();
+        let recents: Vec<PathBuf> = self
+            .saved
+            .iter()
+            .map(|s| s.dir.clone())
+            .filter(|d| Some(d) != self.project.dir.as_ref())
+            .take(6)
+            .collect();
         egui::Window::new("Nuevo proyecto")
             .open(&mut open)
             .collapsible(false)
@@ -100,8 +163,8 @@ impl Orion {
             .max_width(480.0)
             .show(ctx, |ui| {
                 ui.weak(
-                    "Un repo y un agente, en su propia pestaña. Con worktree, \
-                     cada agente trabaja en su rama.",
+                    "Un repo y uno o varios agentes, cada uno en su pestaña. \
+                     Con worktree, cada agente trabaja en su rama.",
                 );
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -112,54 +175,66 @@ impl Orion {
                         } else {
                             dialog
                         };
-                        if let Some(dir) = dialog.pick_folder() {
-                            self.project.set_dir(dir);
-                            if let Some(&(choice, _)) = choices.get(self.project.agent) {
-                                self.project.worktree = self.default_worktree(choice);
-                            }
-                        }
+                        chosen = dialog.pick_folder();
                     }
-                    match &self.project.dir {
-                        Some(dir) => {
-                            ui.label(egui::RichText::new(dir.display().to_string()).monospace());
-                        }
-                        None => {
-                            ui.weak("Ninguna carpeta elegida");
+                    let field = egui::TextEdit::singleline(&mut self.project.path)
+                        .hint_text("o pega la ruta del repo")
+                        .desired_width(ui.available_width());
+                    let field = ui.add(field);
+                    // Enter o salir del campo: usar esa ruta si cambió.
+                    let current = self.project.dir.as_ref().map(|d| d.display().to_string());
+                    if field.lost_focus() && current.as_deref() != Some(self.project.path.trim()) {
+                        let typed = PathBuf::from(self.project.path.trim());
+                        if typed.is_dir() {
+                            chosen = Some(typed);
+                        } else {
+                            self.project.error = Some("Esa carpeta no existe.".into());
                         }
                     }
                 });
+                chips(ui, "Recientes", &recents, &mut chosen);
+                chips(
+                    ui,
+                    "Junto a este repo",
+                    &self.project.siblings.clone(),
+                    &mut chosen,
+                );
                 if let Some(Err(e)) = &self.project.repo {
                     ui.colored_label(theme().ansi[1], format!("No es un repo git: {e}"));
                 }
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label("Agente");
-                    let current = choices
-                        .get(self.project.agent)
-                        .map(|c| c.1.as_str())
-                        .unwrap_or("—");
-                    egui::ComboBox::from_id_salt("agente-proyecto")
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            for (i, (choice, name)) in choices.iter().enumerate() {
-                                if ui
-                                    .selectable_label(self.project.agent == i, name.as_str())
-                                    .clicked()
-                                {
-                                    self.project.agent = i;
-                                    self.project.worktree = self.default_worktree(*choice);
-                                }
+                ui.label("Agentes (marca uno o varios)");
+                let mut toggled = false;
+                ui.horizontal_wrapped(|ui| {
+                    for (_, name) in &choices {
+                        let on = self.project.picked.contains(name);
+                        if ui.selectable_label(on, name.as_str()).clicked() {
+                            if on {
+                                self.project.picked.retain(|n| n != name);
+                            } else {
+                                self.project.picked.push(name.clone());
                             }
-                        });
+                            toggled = true;
+                        }
+                    }
                 });
-                ui.checkbox(
-                    &mut self.project.worktree,
-                    "Crear un git worktree y una rama nueva (orion/…)",
+                if toggled {
+                    self.refresh_worktree();
+                }
+                let several = self.project.picked.len() > 1;
+                let text = if several {
+                    "Cada agente en su propio worktree y rama nueva (orion/…)"
+                } else {
+                    "Crear un git worktree y una rama nueva (orion/…)"
+                };
+                ui.add_enabled(
+                    !several,
+                    egui::Checkbox::new(&mut self.project.worktree, text),
                 );
                 if self.project.worktree
                     && let Some(Ok(root)) = &self.project.repo
                 {
-                    ui.weak(format!("Rama nueva en {}", root.display()));
+                    ui.weak(format!("Ramas nuevas en {}", root.display()));
                 }
                 if let Some(e) = &self.project.error {
                     ui.colored_label(theme().ansi[1], e);
@@ -168,11 +243,13 @@ impl Orion {
                 ui.horizontal(|ui| {
                     let repo_ok = !self.project.worktree
                         || self.project.repo.as_ref().is_some_and(|r| r.is_ok());
-                    let ready = self.project.dir.is_some() && repo_ok && !choices.is_empty();
-                    if ui
-                        .add_enabled(ready, egui::Button::new("Abrir proyecto"))
-                        .clicked()
-                    {
+                    let ready =
+                        self.project.dir.is_some() && repo_ok && !self.project.picked.is_empty();
+                    let label = match self.project.picked.len() {
+                        0 | 1 => "Abrir proyecto".to_string(),
+                        n => format!("Abrir {n} agentes"),
+                    };
+                    if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
                         launch = true;
                     }
                     if choices.is_empty() {
@@ -181,12 +258,20 @@ impl Orion {
                 });
             });
         self.project.open = open;
+        if let Some(dir) = chosen {
+            self.project.set_dir(dir);
+            self.refresh_worktree();
+        }
         if !launch {
             return None;
         }
         let dir = self.project.dir.clone()?;
-        let choice = choices.get(self.project.agent)?.0;
-        Some((dir, choice, self.project.worktree))
+        let picks: Vec<AgentChoice> = choices
+            .iter()
+            .filter(|(_, name)| self.project.picked.contains(name))
+            .map(|(c, _)| *c)
+            .collect();
+        (!picks.is_empty()).then_some((dir, picks, self.project.worktree))
     }
 }
 
@@ -216,5 +301,18 @@ mod tests {
         let list = vec![saved("C:/Users/ana/mi repo", "Claude Code")];
         let text = serde_json::to_string(&list).unwrap();
         assert_eq!(serde_json::from_str::<Vec<Saved>>(&text).unwrap(), list);
+    }
+
+    #[test]
+    fn sibling_repos_skip_worktrees_and_plain_folders() {
+        let base = std::env::temp_dir().join(format!("orion-sib-{}", std::process::id()));
+        let (me, other) = (base.join("yo"), base.join("otro"));
+        std::fs::create_dir_all(me.join(".git")).unwrap();
+        std::fs::create_dir_all(other.join(".git")).unwrap();
+        std::fs::create_dir_all(base.join("carpeta")).unwrap(); // sin .git
+        std::fs::create_dir_all(base.join("wt")).unwrap();
+        std::fs::write(base.join("wt/.git"), "gitdir: x").unwrap(); // un worktree
+        assert_eq!(sibling_repos(&me), vec![other]);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

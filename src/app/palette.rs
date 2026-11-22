@@ -150,6 +150,11 @@ impl Orion {
                 list.push((in_folder, "", Action::InProject(a, choice, false)));
             }
         }
+        list.push((
+            "Limpiar worktrees de Orion".into(),
+            "",
+            Action::CleanWorktrees,
+        ));
         // Proyectos guardados que no están abiertos.
         for (i, saved) in self.saved.iter().enumerate() {
             if !self.repo_busy(&saved.dir) {
