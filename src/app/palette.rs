@@ -138,6 +138,29 @@ impl Orion {
         for (i, agent) in self.settings.agents.iter().enumerate() {
             list.push((format!("Agente: {}", agent.name), "", Action::Agent(i)));
         }
+        // Proyecto de la pestaña activa: una terminal u otro agente, sin tocar el mouse.
+        if let Some(repo) = self.tabs[a].repo.as_deref() {
+            let project = super::folder_name(repo);
+            list.push((format!("Terminal en {project}"), "", Action::TerminalIn(a)));
+            for choice in self.agent_choices() {
+                let name = choice.name(&self.settings);
+                let new_branch = format!("{name} en {project} (rama nueva)");
+                list.push((new_branch, "", Action::InProject(a, choice, true)));
+                let in_folder = format!("{name} en {project} (carpeta del repo)");
+                list.push((in_folder, "", Action::InProject(a, choice, false)));
+            }
+        }
+        // Proyectos guardados que no están abiertos.
+        for (i, saved) in self.saved.iter().enumerate() {
+            if !self.repo_busy(&saved.dir) {
+                let name = format!(
+                    "Abrir proyecto: {} · {}",
+                    super::folder_name(&saved.dir),
+                    saved.agent
+                );
+                list.push((name, "", Action::OpenSaved(i)));
+            }
+        }
         for (i, (name, _)) in crate::backdrop::BACKDROPS.iter().enumerate() {
             list.push((format!("Fondo: {name}"), "", Action::Backdrop(i)));
         }

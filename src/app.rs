@@ -58,12 +58,15 @@ struct Tab {
     rects: Vec<(u64, egui::Rect)>,
     /// Raíz del repo al que pertenece (para agrupar la barra lateral); None = terminal suelta.
     repo: Option<PathBuf>,
+    /// El agente con que se abrió, para distinguir varias pestañas de un mismo proyecto.
+    agent: Option<String>,
 }
 
 impl Tab {
     fn new(session: Session) -> Self {
         Self {
             repo: None,
+            agent: None,
             focus: session.id,
             panes: Split::new(session),
             rects: Vec::new(),
@@ -218,11 +221,12 @@ impl AgentChoice {
         }
     }
 
-    /// Con worktree, el proyecto nace en un git worktree y una rama nueva.
-    fn worktree(self, settings: &Settings) -> bool {
+    /// Si por defecto el proyecto nace en un git worktree y una rama nueva: cuando el repo ya tiene
+    /// una pestaña abierta (`busy`) para no pisarla, o cuando el perfil lo pide.
+    fn worktree(self, settings: &Settings, busy: bool) -> bool {
         match self {
-            Self::Provider(_) => true,
-            Self::Profile(i) => settings.agents[i].worktree,
+            Self::Provider(_) => busy,
+            Self::Profile(i) => busy || settings.agents[i].worktree,
         }
     }
 }
@@ -243,6 +247,15 @@ fn grouped_order(repos: &[Option<&PathBuf>]) -> Vec<usize> {
             .unwrap_or(usize::MAX)
     });
     order
+}
+
+/// Lo que dice la fila de una pestaña: el agente y la carpeta, salvo que el título ya nombre al agente
+/// (varios agentes ponen su nombre de título de la terminal).
+fn tab_label(agent: Option<&str>, title: &str) -> String {
+    match agent {
+        Some(a) if !title.to_lowercase().contains(&a.to_lowercase()) => format!("{a} · {title}"),
+        _ => title.to_string(),
+    }
 }
 
 /// El nombre de la carpeta (o la ruta entera si no tiene).
@@ -473,12 +486,20 @@ impl Orion {
         if self.tabs.len() == tabs {
             return false;
         }
-        self.tabs[self.active].repo = repo;
-        let session = self.session();
-        let shell = &crate::pty::SHELLS[session.kind];
-        let input = crate::agents::launch_input(shell, dir.as_deref(), &command(shell));
-        session.write(input.as_bytes());
+        let tab = &mut self.tabs[self.active];
+        tab.repo = repo;
+        let shell = &crate::pty::SHELLS[tab.focused().kind];
+        let command = command(shell);
+        // Una terminal sola (sin comando) no es un agente.
+        tab.agent = (!command.is_empty()).then(|| name.to_string());
+        let input = crate::agents::launch_input(shell, dir.as_deref(), &command);
+        tab.focused().write(input.as_bytes());
         true
+    }
+
+    /// Si ya hay una pestaña abierta en ese repo.
+    fn repo_busy(&self, repo: &std::path::Path) -> bool {
+        self.tabs.iter().any(|t| t.repo.as_deref() == Some(repo))
     }
 
     /// Los agentes detectados, sin los que el usuario ya definió como `[[agent]]` (mismo comando).
@@ -507,17 +528,27 @@ impl Orion {
         let choices = self.agent_choices();
         self.project.open = true;
         self.project.error = None;
-        self.project.agent = self.project.agent.min(choices.len().saturating_sub(1));
+        // La carpeta de la vez anterior, o el repo de la pestaña actual; se vuelve a mirar si es repo.
+        let cwd = self.session().cwd.clone();
+        let dir = self
+            .project
+            .dir
+            .clone()
+            .or(cwd.filter(|c| crate::agents::repo_root(c).is_ok()));
+        if let Some(dir) = dir {
+            self.project.set_dir(dir);
+        }
+        // El agente que usaste por última vez, si sigue disponible.
+        let last = self.saved.first().and_then(|s| {
+            choices
+                .iter()
+                .position(|c| c.name(&self.settings) == s.agent)
+        });
+        let agent = last.unwrap_or(self.project.agent);
+        self.project.agent = agent.min(choices.len().saturating_sub(1));
         self.project.worktree = choices
             .get(self.project.agent)
-            .map(|c| c.worktree(&self.settings))
-            .unwrap_or(true);
-        if self.project.dir.is_none()
-            && let Some(cwd) = self.session().cwd.clone()
-            && crate::agents::repo_root(&cwd).is_ok()
-        {
-            self.project.set_dir(cwd);
-        }
+            .is_some_and(|&c| self.default_worktree(c));
     }
 
     /// Abre una pestaña de proyecto: el agente `choice` en `dir`, o en un worktree nuevo.
@@ -659,12 +690,36 @@ impl Orion {
                 font.clone(),
                 color,
             );
-            // Clic (o clic derecho): elegir proyecto (repo + agente) o terminal.
-            if new.secondary_clicked() {
-                egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&new));
+            // Clic = terminal nueva. El menú (proyecto, otra shell, agente) abre con ▾ o clic derecho.
+            let more_rect = egui::Rect::from_center_size(
+                rect.right_center() - egui::vec2(14.0, 0.0),
+                egui::vec2(20.0, 20.0),
+            );
+            let more = ui.interact(more_rect, new.id.with("menu"), egui::Sense::click());
+            let more_color = if more.hovered() {
+                theme().fg
+            } else {
+                theme().ansi[8]
+            };
+            ui.painter().text(
+                more_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "▾",
+                font.clone(),
+                more_color,
+            );
+            if new.clicked() {
+                action = Some(Action::NewTab(None));
             }
+            let open = if new.secondary_clicked() {
+                Some(egui::SetOpenCommand::Bool(true))
+            } else if more.clicked() {
+                Some(egui::SetOpenCommand::Toggle)
+            } else {
+                None
+            };
             let providers = self.providers();
-            egui::Popup::menu(&new).show(|ui| {
+            egui::Popup::menu(&new).open_memory(open).show(|ui| {
                 ui.weak("Proyecto");
                 if ui
                     .button("Nuevo proyecto (repo + agente)…")
@@ -710,7 +765,11 @@ impl Orion {
                     }
                 }
             });
-            let tip = keys!("", "+Shift+T", "\nClic: proyecto o terminal");
+            let tip = keys!(
+                "",
+                "+Shift+T",
+                "\n▾ o clic derecho: proyecto, shell o agente"
+            );
             new.on_hover_text(tip);
             ui.add_space(6.0);
 
@@ -807,9 +866,11 @@ impl Orion {
                     rect.min + egui::vec2(26.0, 0.0),
                     egui::pos2(close_rect.min.x - 4.0, rect.max.y),
                 );
-                let galley = ui
-                    .painter()
-                    .layout_no_wrap(session.title(), font.clone(), color);
+                let galley = ui.painter().layout_no_wrap(
+                    tab_label(tab.agent.as_deref(), &session.title()),
+                    font.clone(),
+                    color,
+                );
                 ui.painter().with_clip_rect(title_rect).galley(
                     title_rect.left_center() - egui::vec2(0.0, galley.size().y / 2.0),
                     galley,
@@ -854,10 +915,7 @@ impl Orion {
 
             // Proyectos guardados que no tienen pestaña abierta: un clic los reabre.
             let closed: Vec<usize> = (0..self.saved.len())
-                .filter(|&i| {
-                    let dir = Some(&self.saved[i].dir);
-                    !self.tabs.iter().any(|t| t.repo.as_ref() == dir)
-                })
+                .filter(|&i| !self.repo_busy(&self.saved[i].dir))
                 .collect();
             if !closed.is_empty() {
                 group_header(ui, width, "Guardados", None, self.tabs.is_empty());
@@ -1419,6 +1477,13 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_names_its_agent_unless_the_title_already_does() {
+        assert_eq!(tab_label(None, "benja"), "benja");
+        assert_eq!(tab_label(Some("Codex"), "orion-1"), "Codex · orion-1");
+        assert_eq!(tab_label(Some("OpenCode"), "OpenCode"), "OpenCode");
+    }
+
+    #[test]
     fn profile_choice_reads_the_agents_settings() {
         let mut settings = Settings::default();
         settings.agents.push(crate::config::Agent {
@@ -1429,6 +1494,8 @@ mod tests {
         let choice = AgentChoice::Profile(0);
         assert_eq!(choice.name(&settings), "Mi agente");
         assert_eq!(choice.command(&settings), "mi-agente");
-        assert!(choice.worktree(&settings));
+        assert!(choice.worktree(&settings, false)); // el perfil lo pide
+        assert!(!AgentChoice::Provider(0).worktree(&settings, false)); // primero en la carpeta
+        assert!(AgentChoice::Provider(0).worktree(&settings, true)); // el repo ya está ocupado
     }
 }

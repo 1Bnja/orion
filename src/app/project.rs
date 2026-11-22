@@ -17,12 +17,10 @@ pub(super) struct Saved {
 }
 
 impl Saved {
-    /// Agrega el proyecto o, si ese repo ya estaba, actualiza su agente y su worktree.
+    /// Pone el proyecto de primero (el más reciente); si ese repo ya estaba, reemplaza su entrada.
     pub(super) fn upsert(list: &mut Vec<Saved>, saved: Saved) {
-        match list.iter_mut().find(|s| s.dir == saved.dir) {
-            Some(old) => *old = saved,
-            None => list.push(saved),
-        }
+        list.retain(|s| s.dir != saved.dir);
+        list.insert(0, saved);
     }
 }
 
@@ -67,6 +65,12 @@ impl Project {
 }
 
 impl Orion {
+    /// Si `choice` debe ir en un worktree por defecto, según el repo elegido en la ventana.
+    pub(super) fn default_worktree(&self, choice: AgentChoice) -> bool {
+        let busy = matches!(&self.project.repo, Some(Ok(root)) if self.repo_busy(root));
+        choice.worktree(&self.settings, busy)
+    }
+
     /// Dibuja la ventana si está abierta. Devuelve el proyecto a abrir cuando aprietas "Abrir".
     pub(super) fn project_window(
         &mut self,
@@ -75,16 +79,10 @@ impl Orion {
         if !self.project.open {
             return None;
         }
-        let choices: Vec<(AgentChoice, String, bool)> = self
+        let choices: Vec<(AgentChoice, String)> = self
             .agent_choices()
             .into_iter()
-            .map(|c| {
-                (
-                    c,
-                    c.name(&self.settings).to_string(),
-                    c.worktree(&self.settings),
-                )
-            })
+            .map(|c| (c, c.name(&self.settings).to_string()))
             .collect();
         if self.project.agent >= choices.len() {
             self.project.agent = 0;
@@ -116,6 +114,9 @@ impl Orion {
                         };
                         if let Some(dir) = dialog.pick_folder() {
                             self.project.set_dir(dir);
+                            if let Some(&(choice, _)) = choices.get(self.project.agent) {
+                                self.project.worktree = self.default_worktree(choice);
+                            }
                         }
                     }
                     match &self.project.dir {
@@ -140,13 +141,13 @@ impl Orion {
                     egui::ComboBox::from_id_salt("agente-proyecto")
                         .selected_text(current)
                         .show_ui(ui, |ui| {
-                            for (i, (_, name, worktree)) in choices.iter().enumerate() {
+                            for (i, (choice, name)) in choices.iter().enumerate() {
                                 if ui
                                     .selectable_label(self.project.agent == i, name.as_str())
                                     .clicked()
                                 {
                                     self.project.agent = i;
-                                    self.project.worktree = *worktree;
+                                    self.project.worktree = self.default_worktree(*choice);
                                 }
                             }
                         });
@@ -202,9 +203,10 @@ mod tests {
     }
 
     #[test]
-    fn saving_the_same_repo_twice_keeps_one_entry() {
+    fn saving_the_same_repo_twice_keeps_one_entry_and_puts_it_first() {
         let mut list = vec![saved("/a", "Claude Code")];
         Saved::upsert(&mut list, saved("/b", "Codex"));
+        assert_eq!(list[0], saved("/b", "Codex"));
         Saved::upsert(&mut list, saved("/a", "Aider"));
         assert_eq!(list, vec![saved("/a", "Aider"), saved("/b", "Codex")]);
     }

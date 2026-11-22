@@ -103,7 +103,7 @@ switch tabs. `Cmd+1` … `Cmd+9` go to a tab.
 |---|---|
 | `Ctrl+Shift+P` | Command palette |
 | `Ctrl+,` | Settings |
-| `Ctrl+Shift+T` | New tab (click "+ Nueva pestaña" to pick a shell, a project or an agent) |
+| `Ctrl+Shift+T` | New terminal (the ▾ or a right-click on "+ Nueva pestaña" opens the menu: other shell, project, agent) |
 | `Ctrl+Shift+O` | New project: a repo and an agent, optionally in its own worktree |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab, in the order the sidebar shows them |
 | `Alt+1` … `Alt+9` | Go to that tab (by its position in the sidebar) |
