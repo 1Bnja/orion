@@ -45,7 +45,7 @@ use menu::SettingsMenu;
 use palette::Palette;
 use panes::Split;
 use project::Project;
-use session::Session;
+use session::{AgentStatus, Session, agent_status_of};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -62,6 +62,11 @@ struct Tab {
     agent: Option<String>,
     /// La carpeta del worktree si la pestaña nació en uno (para no limpiarlo mientras se usa).
     worktree: Option<PathBuf>,
+    /// El comando exacto que Orion escribió para el agente y el `id` del panel donde lo escribió
+    /// (con splits el foco cambia). None = pestaña que no es de agente.
+    agent_run: Option<(String, u64)>,
+    /// Ya se avisó que el agente terminó con error (para no repetir el aviso cada frame).
+    agent_notified: bool,
 }
 
 impl Tab {
@@ -70,6 +75,8 @@ impl Tab {
             repo: None,
             agent: None,
             worktree: None,
+            agent_run: None,
+            agent_notified: false,
             focus: session.id,
             panes: Split::new(session),
             rects: Vec::new(),
@@ -86,6 +93,19 @@ impl Tab {
         self.panes
             .get_mut(self.focus)
             .expect("el foco apunta a un panel")
+    }
+
+    /// Cómo va el agente de esta pestaña; None si no es de agente (o su panel ya se cerró).
+    /// Solo PowerShell y zsh mandan OSC 133: en cmd y WSL no hay bloques y se queda en `Starting`.
+    pub(super) fn agent_status(&self) -> Option<AgentStatus> {
+        let (command, pane) = self.agent_run.as_ref()?;
+        let session = self.panes.get(*pane)?;
+        let blocks = session
+            .blocks
+            .list
+            .iter()
+            .map(|b| (b.command.as_str(), b.status()));
+        Some(agent_status_of(blocks, command))
     }
 }
 
@@ -503,6 +523,7 @@ impl Orion {
         // Una terminal sola (sin comando) no es un agente.
         tab.agent = (!command.is_empty()).then(|| name.to_string());
         tab.worktree = if worktree { dir.clone() } else { None };
+        tab.agent_run = (!command.is_empty()).then(|| (command.clone(), tab.focus));
         let input = crate::agents::launch_input(shell, dir.as_deref(), &command);
         tab.focused().write(input.as_bytes());
         true
@@ -1247,8 +1268,23 @@ impl Orion {
     fn collect_alerts(&mut self, ctx: &egui::Context) {
         let (active, focused) = (self.active, self.focused);
         let mut new_alert = false;
+        let mut failed = None;
         for (t, tab) in self.tabs.iter_mut().enumerate() {
             let focus = tab.focus;
+            // Un agente que termina con error avisa una sola vez, como cualquier otra alerta.
+            if let (Some(AgentStatus::Done(Some(code))), false) =
+                (tab.agent_status(), tab.agent_notified)
+                && code != 0
+                && let Some(name) = tab.agent.clone()
+                && let Some((_, pane)) = tab.agent_run
+                && let Some(session) = tab.panes.get_mut(pane)
+            {
+                tab.agent_notified = true;
+                session.alert = Some(format!(
+                    "El agente {name} terminó con error (código {code})"
+                ));
+                failed = session.alert.clone();
+            }
             for session in tab.panes.leaves_mut() {
                 let Some(alert) = session.alert.take() else {
                     continue;
@@ -1258,6 +1294,9 @@ impl Orion {
                     new_alert = true;
                 }
             }
+        }
+        if let Some(text) = failed {
+            self.show_toast(text);
         }
         // Lo que estás mirando ya no pide atención.
         if focused {
