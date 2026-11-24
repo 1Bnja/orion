@@ -34,6 +34,14 @@ pub(crate) fn config_text(settings: &Settings) -> String {
             "\n# [[agent]]\n# name = \"Mi agente\"\n# command = \"mi-agente\"\n# worktree = true\n"
                 .into();
     }
+    let mut executors = String::new();
+    for e in &settings.executors {
+        let id = toml::Value::String(e.id.clone());
+        let use_for = toml::Value::String(e.use_for.clone());
+        let command = toml::Value::String(e.command.clone());
+        executors +=
+            &format!("\n[[executor]]\nid = {id}\nuse_for = {use_for}\ncommand = {command}\n");
+    }
     // El modificador de los atajos de Orion: Cmd en Mac, Ctrl en Windows.
     let key = if cfg!(target_os = "macos") {
         "Cmd"
@@ -88,7 +96,7 @@ line_height = {:.2}
 "#,
         settings.font.size, settings.font.line_height
     );
-    text + &agents
+    text + &agents + &executors
 }
 
 /// Guarda la configuración en config.toml (creando la carpeta si hace falta).
@@ -113,6 +121,20 @@ pub(crate) struct Settings {
     /// Perfiles de agente ([[agent]] en el archivo).
     #[serde(rename = "agent")]
     pub(crate) agents: Vec<Agent>,
+    /// Ejecutores extra del orquestador ([[executor]] en el archivo).
+    #[serde(rename = "executor")]
+    pub(crate) executors: Vec<Executor>,
+}
+
+/// Algo que ejecuta subtareas del orquestador, además de los modelos de Claude.
+#[derive(serde::Deserialize, Clone, PartialEq, Debug)]
+pub(crate) struct Executor {
+    /// Cómo lo nombra el plan y lo muestra la ventana.
+    pub(crate) id: String,
+    /// Para qué tareas conviene (le llega al planificador).
+    pub(crate) use_for: String,
+    /// Lo que se escribe en la shell; `{prompt}` es donde va el prompt.
+    pub(crate) command: String,
 }
 
 #[derive(serde::Deserialize, Clone, PartialEq, Debug)]
@@ -134,6 +156,7 @@ impl Default for Settings {
             check_updates: true,
             font: FontSettings::default(),
             agents: Vec::new(),
+            executors: Vec::new(),
         }
     }
 }
@@ -279,11 +302,16 @@ mod tests {
         // Lo que guarda el menú se vuelve a leer igual, incluidas rutas con '\' y comillas.
         let mut s = Settings::default();
         let back: Settings = toml::from_str(&config_text(&s)).unwrap();
-        assert!(back.agents.is_empty()); // el ejemplo va comentado
+        assert!(back.agents.is_empty() && back.executors.is_empty()); // el ejemplo va comentado
         s.agents = vec![Agent {
             name: "Revisor".into(),
             command: r#"mi-agente --modo "revisar""#.into(),
             worktree: true,
+        }];
+        s.executors = vec![Executor {
+            id: "junie".into(),
+            use_for: r#"cambios "grandes" en C:\repo"#.into(),
+            command: "junie --model=mix.normal --prompt={prompt}".into(),
         }];
         for family in ["Monocraft", r#"C:\fuentes\Mi "Fuente".otf"#] {
             s.font.family = family.into();
