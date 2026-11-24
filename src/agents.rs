@@ -160,7 +160,6 @@ pub(crate) fn installed() -> Vec<usize> {
 }
 
 /// Los agentes con el binario roto: su índice en `PROVIDERS` y la ruta que falta.
-#[allow(dead_code)] // ponytail: idem locate
 pub(crate) fn broken() -> Vec<(usize, PathBuf)> {
     scan()
         .into_iter()

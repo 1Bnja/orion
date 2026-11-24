@@ -523,6 +523,14 @@ impl Orion {
             .collect()
     }
 
+    /// Los agentes detectados pero con la instalación rota, y la ruta que falta (solo para el menú).
+    fn broken_providers(&self) -> Vec<(usize, PathBuf)> {
+        let defined = |cmd: &str| self.settings.agents.iter().any(|a| a.command == cmd);
+        let mut broken = crate::agents::broken();
+        broken.retain(|(i, _)| !defined(crate::agents::PROVIDERS[*i].command));
+        broken
+    }
+
     /// Los agentes que se pueden elegir para un proyecto, en el orden del menú.
     fn agent_choices(&self) -> Vec<AgentChoice> {
         let mut choices: Vec<AgentChoice> = self
@@ -765,6 +773,7 @@ impl Orion {
                 None
             };
             let providers = self.providers();
+            let broken = self.broken_providers();
             egui::Popup::menu(&new).open_memory(open).show(|ui| {
                 ui.weak("Proyecto");
                 if ui
@@ -792,7 +801,7 @@ impl Orion {
                         ui.close();
                     }
                 }
-                if !providers.is_empty() || !self.settings.agents.is_empty() {
+                if !providers.is_empty() || !broken.is_empty() || !self.settings.agents.is_empty() {
                     ui.separator();
                     ui.weak("Agente en esta carpeta");
                 }
@@ -803,6 +812,18 @@ impl Orion {
                         action = Some(Action::Provider(i));
                         ui.close();
                     }
+                }
+                for (i, missing) in &broken {
+                    let provider = &crate::agents::PROVIDERS[*i];
+                    ui.add_enabled(
+                        false,
+                        egui::Button::new(format!("Agente: {} (roto)", provider.name)),
+                    )
+                    .on_disabled_hover_text(format!(
+                        "Instalación rota: falta {}. Reinstálalo ({})",
+                        missing.display(),
+                        provider.about
+                    ));
                 }
                 for (i, agent) in self.settings.agents.iter().enumerate() {
                     if ui.button(format!("Agente: {}", agent.name)).clicked() {
