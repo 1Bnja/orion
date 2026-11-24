@@ -1,4 +1,4 @@
-//! Orquestador: le das una tarea, Claude Code la divide en subtareas y elige un modelo para cada una;
+//! Orquestador: le das una tarea, Claude Code la divide en subtareas y elige un ejecutor para cada una;
 //! después Orion abre una pestaña de agente por subtarea, cada una en su propio git worktree.
 //! Si una subtarea necesita el código de otra (`after`), espera a que esa termine con commit y
 //! arranca desde su rama: el plan avanza por rondas.
@@ -11,11 +11,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+use crate::config::Executor;
+
 /// Quién planifica: el modelo más capaz, porque dividir bien la tarea es lo difícil.
 const PLANNER: &str = "claude-opus-5-5";
 
-/// Los modelos que puede elegir el plan, y para qué sirve cada uno (va en las instrucciones).
-pub(crate) const MODELS: [(&str, &str); 3] = [
+/// Los ejecutores de Claude, siempre disponibles: id, para qué sirve (va en las instrucciones).
+const CLAUDE: [(&str, &str); 3] = [
     (
         "claude-opus-5-5",
         "diseño, arquitectura o razonamiento difícil",
@@ -30,12 +32,49 @@ pub(crate) const MODELS: [(&str, &str); 3] = [
     ),
 ];
 
+/// Los ejecutores que puede elegir el plan: los de Claude y los `[[executor]]` del config
+/// (uno con el mismo `id` que uno de Claude lo reemplaza).
+pub(crate) fn catalog(extra: &[Executor]) -> Vec<Executor> {
+    let mut all: Vec<Executor> = CLAUDE
+        .iter()
+        .map(|(id, use_for)| Executor {
+            id: id.to_string(),
+            use_for: use_for.to_string(),
+            command: format!("claude --model {id} {{prompt}}"),
+        })
+        .collect();
+    for e in extra {
+        match all.iter_mut().find(|a| a.id == e.id) {
+            Some(old) => *old = e.clone(),
+            None => all.push(e.clone()),
+        }
+    }
+    all
+}
+
+/// Del catálogo, solo los que tienen su programa (la primera palabra del comando) instalado.
+fn installed(catalog: &[Executor]) -> Vec<Executor> {
+    use crate::agents::{Located, locate};
+    catalog
+        .iter()
+        .filter(|e| {
+            let program = e.command.split_whitespace().next().unwrap_or_default();
+            matches!(locate(program), Some(Located::Ready(_)))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Más que esto ya no se puede seguir en pestañas (ni conviene gastar tanto de una vez).
 const MAX_SUBTASKS: usize = 6;
 
-/// El nombre corto de un modelo, para la ventana: "claude-haiku-5-5" → "haiku".
-pub(crate) fn short_name(model: &str) -> &str {
-    model.split('-').nth(1).unwrap_or(model)
+/// Cómo se llama un ejecutor en la ventana: los de Claude, por su modelo ("claude-haiku-5-5" → "haiku");
+/// los demás, por su id.
+pub(crate) fn short_name(id: &str) -> &str {
+    match id.strip_prefix("claude-") {
+        Some(rest) => rest.split('-').next().unwrap_or(id),
+        None => id,
+    }
 }
 
 #[derive(serde::Deserialize, Clone, PartialEq, Debug)]
@@ -44,26 +83,28 @@ pub(crate) struct Subtask {
     pub(crate) title: String,
     /// Lo que recibe el agente: tiene que entenderse sin ver las otras subtareas.
     pub(crate) prompt: String,
-    pub(crate) model: String,
+    /// El `id` de un ejecutor del catálogo.
+    pub(crate) executor: String,
     /// Índices (desde 0) de subtareas anteriores cuyo código necesita: arranca cuando terminan.
     #[serde(default)]
     pub(crate) after: Vec<usize>,
 }
 
 /// El esquema que `claude -p` hace cumplir a la respuesta.
-fn schema() -> String {
-    let models: Vec<String> = MODELS.iter().map(|(id, _)| format!("\"{id}\"")).collect();
+fn schema(executors: &[Executor]) -> String {
+    let models: Vec<String> = (executors.iter())
+        .map(|e| serde_json::Value::from(e.id.as_str()).to_string())
+        .collect();
     format!(
-        r#"{{"type":"object","properties":{{"subtasks":{{"type":"array","minItems":1,"maxItems":{MAX_SUBTASKS},"items":{{"type":"object","properties":{{"title":{{"type":"string","maxLength":40}},"prompt":{{"type":"string"}},"model":{{"type":"string","enum":[{}]}},"after":{{"type":"array","items":{{"type":"integer","minimum":0}}}}}},"required":["title","prompt","model"]}}}}}},"required":["subtasks"]}}"#,
+        r#"{{"type":"object","properties":{{"subtasks":{{"type":"array","minItems":1,"maxItems":{MAX_SUBTASKS},"items":{{"type":"object","properties":{{"title":{{"type":"string","maxLength":40}},"prompt":{{"type":"string"}},"executor":{{"type":"string","enum":[{}]}},"after":{{"type":"array","items":{{"type":"integer","minimum":0}}}}}},"required":["title","prompt","executor"]}}}}}},"required":["subtasks"]}}"#,
         models.join(",")
     )
 }
 
 /// Las instrucciones para el planificador, con la tarea al final.
-fn instructions(task: &str) -> String {
-    let models: Vec<String> = MODELS
-        .iter()
-        .map(|(id, use_for)| format!("- {id}: {use_for}"))
+fn instructions(task: &str, executors: &[Executor]) -> String {
+    let models: Vec<String> = (executors.iter())
+        .map(|e| format!("- {}: {}", e.id, e.use_for))
         .collect();
     format!(
         "Eres el planificador de Orion. Divide la tarea de abajo en subtareas que distintos agentes \
@@ -71,7 +112,7 @@ fn instructions(task: &str) -> String {
          Si la tarea no se puede dividir, devuelve una sola subtarea.\n\
          Puedes leer el repositorio para planificar mejor, pero no cambies nada.\n\
          Para cada subtarea: un título corto (unas 4 palabras), un prompt completo que se entienda \
-         solo, y el modelo más barato que la haga bien:\n{}\n\
+         solo, y el ejecutor más barato que la haga bien, según para qué sirve cada uno:\n{}\n\
          `after` (opcional): los índices, desde 0, de subtareas ANTERIORES cuyo código necesita de \
          verdad (por ejemplo, usa una función que otra crea). Esa subtarea arranca cuando aquellas \
          terminan, desde sus ramas. Úsalo solo cuando haga falta: cada `after` hace esperar.\n\
@@ -95,11 +136,18 @@ pub(crate) fn cancel(planner: &Planner) {
 
 /// Pide el plan para `task`, trabajando en `dir`. Tarda (segundos o minutos): va en un hilo aparte.
 /// Mientras corre, el proceso queda en `planner` para que `cancel` pueda cortarlo.
-pub(crate) fn plan(task: &str, dir: &Path, planner: &Planner) -> Result<Vec<Subtask>, String> {
+/// `catalog` es el catálogo completo: se ofrecen solo los ejecutores instalados.
+pub(crate) fn plan(
+    task: &str,
+    dir: &Path,
+    planner: &Planner,
+    catalog: &[Executor],
+) -> Result<Vec<Subtask>, String> {
+    let executors = installed(catalog);
     let mut child = claude()?
         .current_dir(dir)
         .args(["-p", "--model", PLANNER, "--output-format", "json"])
-        .args(["--json-schema", &schema()])
+        .args(["--json-schema", &schema(&executors)])
         // Solo leer. Y sin MCP ni skills: cargarlos multiplica el contexto (y lo que cuesta) sin ayudar a planificar.
         .args(["--tools", "Read,Glob,Grep", "--strict-mcp-config"])
         .args(["--disable-slash-commands", "--no-session-persistence"])
@@ -111,7 +159,7 @@ pub(crate) fn plan(task: &str, dir: &Path, planner: &Planner) -> Result<Vec<Subt
     // La tarea va por stdin: en Windows, claude.cmd tiene reglas de comillas delicadas para los argumentos.
     let mut stdin = child.stdin.take().expect("stdin es piped");
     stdin
-        .write_all(instructions(task).as_bytes())
+        .write_all(instructions(task, &executors).as_bytes())
         .map_err(|e| e.to_string())?;
     drop(stdin); // cerrarlo: así claude sabe que el prompt terminó
     let (mut out, mut err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
@@ -133,11 +181,11 @@ pub(crate) fn plan(task: &str, dir: &Path, planner: &Planner) -> Result<Vec<Subt
     if !status.success() && stdout.trim().is_empty() {
         return Err(format!("Claude Code falló: {}", stderr.trim()));
     }
-    parse_plan(&stdout)
+    parse_plan(&stdout, &executors)
 }
 
 /// Lee lo que imprime `claude -p --output-format json`: el plan viene en `structured_output`.
-fn parse_plan(stdout: &str) -> Result<Vec<Subtask>, String> {
+fn parse_plan(stdout: &str, executors: &[Executor]) -> Result<Vec<Subtask>, String> {
     #[derive(serde::Deserialize)]
     struct Output {
         #[serde(default)]
@@ -163,14 +211,11 @@ fn parse_plan(stdout: &str) -> Result<Vec<Subtask>, String> {
     if subtasks.is_empty() {
         return Err("el plan vino vacío".into());
     }
-    // El esquema ya lo exige, pero el modelo que se lanza sale de acá: no se confía en lo que llegó.
-    if let Some(bad) = subtasks
-        .iter()
-        .find(|s| !MODELS.iter().any(|(id, _)| *id == s.model))
-    {
+    // El esquema ya lo exige, pero el comando que se lanza sale de acá: no se confía en lo que llegó.
+    if let Some(bad) = (subtasks.iter()).find(|s| !executors.iter().any(|e| e.id == s.executor)) {
         return Err(format!(
-            "el plan pidió un modelo desconocido: {}",
-            bad.model
+            "el plan pidió un ejecutor desconocido: {}",
+            bad.executor
         ));
     }
     // Solo hacia atrás: así no puede haber ciclos y cada ronda sabe de qué ramas parte.
@@ -276,18 +321,34 @@ fn claude() -> Result<Command, String> {
     }
 }
 
-/// Lo que se escribe en la pestaña del subagente: Claude Code interactivo, con su modelo y su prompt.
-/// El prompt va en una línea (un salto de línea en la shell sería un Enter) y sin comillas dobles
-/// (cmd no las admite dentro de un argumento, y Windows PowerShell las pierde al pasarlas).
-pub(crate) fn agent_command(shell: &crate::pty::ShellKind, subtask: &Subtask) -> String {
+/// Lo que se escribe en la pestaña del subagente: la plantilla de su ejecutor con el prompt puesto.
+/// El prompt va en una línea (un salto de línea en la shell sería un Enter), sin comillas dobles
+/// (cmd no las admite dentro de un argumento, y Windows PowerShell las pierde al pasarlas) y sin `!` ni `%`
+/// (los shims .bat/.cmd pasan por cmd, que los expande). Sin `{prompt}` en la plantilla, va al final.
+pub(crate) fn agent_command(
+    shell: &crate::pty::ShellKind,
+    subtask: &Subtask,
+    catalog: &[Executor],
+) -> String {
     let prompt: String = subtask
         .prompt
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-        .replace('"', "'");
+        .replace('"', "'")
+        .replace(['!', '%'], "");
     let quoted = shell.quote_path(&prompt);
-    format!("claude --model {} {quoted}", subtask.model)
+    let template = (catalog.iter())
+        .find(|e| e.id == subtask.executor)
+        .map_or_else(
+            || format!("claude --model {} {{prompt}}", subtask.executor),
+            |e| e.command.clone(),
+        );
+    if template.contains("{prompt}") {
+        template.replace("{prompt}", &quoted)
+    } else {
+        format!("{template} {quoted}")
+    }
 }
 
 #[cfg(test)]
@@ -296,7 +357,7 @@ mod tests {
     use crate::pty::SHELLS;
 
     fn subtask(model: &str) -> String {
-        format!(r#"{{"title":"Tests","prompt":"Escribe tests","model":"{model}"}}"#)
+        format!(r#"{{"title":"Tests","prompt":"Escribe tests","executor":"{model}"}}"#)
     }
 
     /// Un plan con una subtarea por cada `after` (en JSON).
@@ -304,7 +365,7 @@ mod tests {
         let items: Vec<String> = after
             .iter()
             .map(|a| {
-                format!(r#"{{"title":"T","prompt":"p","model":"claude-haiku-5-5","after":{a}}}"#)
+                format!(r#"{{"title":"T","prompt":"p","executor":"claude-haiku-5-5","after":{a}}}"#)
             })
             .collect();
         format!(
@@ -315,7 +376,7 @@ mod tests {
 
     #[test]
     fn after_only_points_back() {
-        let plan = parse_plan(&with_after(&["[]", "[0]", "[0,1]"])).unwrap();
+        let plan = parse_plan(&with_after(&["[]", "[0]", "[0,1]"]), &catalog(&[])).unwrap();
         assert!(plan[0].after.is_empty());
         assert_eq!(plan[2].after, vec![0, 1]);
         // Sin `after`, independiente.
@@ -323,11 +384,11 @@ mod tests {
             r#"{{"structured_output":{{"subtasks":[{}]}}}}"#,
             subtask("claude-haiku-5-5")
         );
-        assert!(parse_plan(&out).unwrap()[0].after.is_empty());
+        assert!(parse_plan(&out, &catalog(&[])).unwrap()[0].after.is_empty());
         // A sí misma o hacia adelante: error claro.
-        let own = parse_plan(&with_after(&["[]", "[1]"])).unwrap_err();
+        let own = parse_plan(&with_after(&["[]", "[1]"]), &catalog(&[])).unwrap_err();
         assert!(own.contains("anteriores"), "{own}");
-        assert!(parse_plan(&with_after(&["[1]", "[]"])).is_err());
+        assert!(parse_plan(&with_after(&["[1]", "[]"]), &catalog(&[])).is_err());
     }
 
     #[test]
@@ -399,10 +460,10 @@ mod tests {
             r#"{{"type":"result","is_error":false,"result":"…","structured_output":{{"subtasks":[{}]}}}}"#,
             subtask("claude-haiku-5-5")
         );
-        let plan = parse_plan(&out).unwrap();
+        let plan = parse_plan(&out, &catalog(&[])).unwrap();
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].title, "Tests");
-        assert_eq!(short_name(&plan[0].model), "haiku");
+        assert_eq!(short_name(&plan[0].executor), "haiku");
     }
 
     #[test]
@@ -411,18 +472,104 @@ mod tests {
             r#"{{"structured_output":{{"subtasks":[{}]}}}}"#,
             subtask("gpt-9")
         );
-        assert!(parse_plan(&unknown).unwrap_err().contains("gpt-9"));
-        assert!(parse_plan(r#"{"structured_output":{"subtasks":[]}}"#).is_err());
+        assert!(
+            parse_plan(&unknown, &catalog(&[]))
+                .unwrap_err()
+                .contains("gpt-9")
+        );
+        assert!(parse_plan(r#"{"structured_output":{"subtasks":[]}}"#, &catalog(&[])).is_err());
         let failed = r#"{"is_error":true,"result":"Not logged in"}"#;
-        assert!(parse_plan(failed).unwrap_err().contains("Not logged in"));
-        assert!(parse_plan("no es json").is_err());
+        assert!(
+            parse_plan(failed, &catalog(&[]))
+                .unwrap_err()
+                .contains("Not logged in")
+        );
+        assert!(parse_plan("no es json", &catalog(&[])).is_err());
     }
 
     #[test]
-    fn the_schema_is_valid_json_and_lists_every_model() {
-        let schema: serde_json::Value = serde_json::from_str(&schema()).unwrap();
-        let models = &schema["properties"]["subtasks"]["items"]["properties"]["model"]["enum"];
-        assert_eq!(models.as_array().unwrap().len(), MODELS.len());
+    fn the_schema_is_valid_json_and_lists_every_executor() {
+        let all = catalog(&[executor("junie", "mix", "junie --prompt={prompt}")]);
+        let schema: serde_json::Value = serde_json::from_str(&schema(&all)).unwrap();
+        let ids = &schema["properties"]["subtasks"]["items"]["properties"]["executor"]["enum"];
+        assert_eq!(ids.as_array().unwrap().len(), 4);
+        assert!(instructions("x", &all).contains("- junie: mix"));
+    }
+
+    fn executor(id: &str, use_for: &str, command: &str) -> Executor {
+        Executor {
+            id: id.into(),
+            use_for: use_for.into(),
+            command: command.into(),
+        }
+    }
+
+    #[test]
+    fn the_catalog_has_claude_and_the_configured_ones() {
+        let ids = |c: &[Executor]| c.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
+        let base = catalog(&[]);
+        assert_eq!(
+            ids(&base),
+            ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+        );
+        assert_eq!(base[1].command, "claude --model claude-sonnet-5-5 {prompt}");
+        // Uno nuevo se agrega; uno con el id de uno de Claude lo reemplaza.
+        let own = executor("claude-haiku-5-5", "otro", "mi-haiku {prompt}");
+        let plus = catalog(&[executor("opencode", "barato", "opencode"), own.clone()]);
+        assert_eq!(plus.len(), 4);
+        assert_eq!(plus[2], own);
+        assert_eq!(plus[3].id, "opencode");
+    }
+
+    #[test]
+    fn a_plan_with_an_executor_outside_the_catalog_is_rejected() {
+        let out = format!(
+            r#"{{"structured_output":{{"subtasks":[{}]}}}}"#,
+            subtask("junie")
+        );
+        assert!(
+            parse_plan(&out, &catalog(&[]))
+                .unwrap_err()
+                .contains("junie")
+        );
+        let with = catalog(&[executor("junie", "x", "junie")]);
+        assert!(parse_plan(&out, &with).is_ok());
+    }
+
+    #[test]
+    fn the_template_gets_the_prompt_without_bang_or_percent() {
+        let s = |executor: &str| Subtask {
+            title: "x".into(),
+            prompt: "Corre 100% de los tests! ya".into(),
+            executor: executor.into(),
+            after: Vec::new(),
+        };
+        let all = catalog(&[
+            executor("junie", "", "junie --model=mix.normal --prompt={prompt}"),
+            executor("opencode", "", "opencode -m deepseek/x --prompt {prompt}"),
+            executor("plano", "", "plano --rapido"),
+        ]);
+        let q = "'";
+        let sh = &SHELLS[0];
+        let junie = agent_command(sh, &s("junie"), &all);
+        assert_eq!(
+            junie,
+            format!("junie --model=mix.normal --prompt={q}Corre 100 de los tests ya{q}")
+        );
+        let opencode = agent_command(sh, &s("opencode"), &all);
+        assert_eq!(
+            opencode,
+            format!("opencode -m deepseek/x --prompt {q}Corre 100 de los tests ya{q}")
+        );
+        // Sin {prompt}, va al final.
+        let plano = agent_command(sh, &s("plano"), &all);
+        assert_eq!(
+            plano,
+            format!("plano --rapido {q}Corre 100 de los tests ya{q}")
+        );
+        for c in [junie, opencode, plano] {
+            assert!(!c.contains(['!', '%']), "{c}");
+        }
     }
 
     #[test]
@@ -452,10 +599,10 @@ mod tests {
         let s = Subtask {
             title: "x".into(),
             prompt: "Arregla \"el\" test\nde l'app".into(),
-            model: "claude-sonnet-5-5".into(),
+            executor: "claude-sonnet-5-5".into(),
             after: Vec::new(),
         };
-        let command = agent_command(&SHELLS[0], &s);
+        let command = agent_command(&SHELLS[0], &s, &catalog(&[]));
         // PowerShell (Windows) y zsh (Mac) usan comillas simples, cada una con su escape.
         let expected = if cfg!(windows) {
             "claude --model claude-sonnet-5-5 'Arregla ''el'' test de l''app'"
@@ -476,6 +623,7 @@ fn real_plan() {
         "Agrega un comentario de una línea arriba de fn main en src/main.rs",
         &dir,
         &Planner::default(),
+        &catalog(&[]),
     )
     .unwrap();
     assert!(!plan.is_empty());

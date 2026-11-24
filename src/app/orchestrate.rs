@@ -145,7 +145,7 @@ impl Orion {
         let (mut plan_now, mut launch, mut back, mut forget) = (false, false, false, false);
         let mut open = !escape;
         let model = |s: &Subtask| {
-            egui::RichText::new(short_name(&s.model))
+            egui::RichText::new(short_name(&s.executor))
                 .monospace()
                 .color(theme().ansi[4])
         };
@@ -261,6 +261,7 @@ impl Orion {
             // ponytail: si se cancela en el instante antes de que arranque el proceso, igual corre;
             // su resultado se descarta (el `step` ya es otro).
             o.planner = Planner::default();
+            let catalog = crate::orchestrator::catalog(&self.settings.executors);
             let (task, dir, step, planner, ctx) = (
                 o.task.clone(),
                 o.dir.clone(),
@@ -269,7 +270,7 @@ impl Orion {
                 ctx.clone(),
             );
             std::thread::spawn(move || {
-                let result = match crate::orchestrator::plan(&task, &dir, &planner) {
+                let result = match crate::orchestrator::plan(&task, &dir, &planner, &catalog) {
                     Ok(subtasks) => Step::Ready(subtasks),
                     Err(e) => Step::Failed(e),
                 };
@@ -379,7 +380,8 @@ impl Orion {
             Ok(ready) => ready,
             Err(e) => return Run::Blocked(e),
         };
-        let command = |shell: &crate::pty::ShellKind| agent_command(shell, &s);
+        let catalog = crate::orchestrator::catalog(&self.settings.executors);
+        let command = |shell: &crate::pty::ShellKind| agent_command(shell, &s, &catalog);
         if !self.launch_agent(ctx, Some(path.clone()), &s.title, false, command) {
             return Run::Blocked("no pude abrir su pestaña".into());
         }
