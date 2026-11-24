@@ -502,7 +502,11 @@ mod tests {
 
         let first = create_worktree(&repo, "Mi Agente", None).unwrap();
         let second = create_worktree(&repo.join("."), "Mi Agente", None).unwrap();
-        assert_eq!(first, repo.join(".orion/worktrees/mi-agente-1"));
+        // Dentro de `<repo>/.orion/worktrees`. Se compara por componentes y ya resuelto: git puede devolver
+        // la ruta con otra forma (en macOS /private/var en vez de /var; en Windows nombres cortos 8.3).
+        assert!(first.ends_with(".orion/worktrees/mi-agente-1"), "{first:?}");
+        let (first_real, repo_real) = (first.canonicalize().unwrap(), repo.canonicalize().unwrap());
+        assert!(first_real.starts_with(repo_real), "{first_real:?}");
         assert_eq!(second.file_name().unwrap(), "mi-agente-2");
         // `.orion` no ensucia el repo principal ni toca su .gitignore.
         assert_eq!(git(&repo, &["status", "--porcelain"]).unwrap(), "");
