@@ -33,6 +33,7 @@ mod project;
 mod render;
 mod review;
 mod session;
+mod settings;
 mod titlebar;
 
 use crate::colors::{opaque, surface, theme};
