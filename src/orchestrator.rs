@@ -65,6 +65,26 @@ fn installed(catalog: &[Executor]) -> Vec<Executor> {
         .collect()
 }
 
+/// Los ejecutores del catálogo que no se ofrecen, y por qué ("junie: no encuentro `junie`").
+pub(crate) fn unavailable(catalog: &[Executor]) -> Vec<String> {
+    use crate::agents::{Located, locate};
+    catalog
+        .iter()
+        .filter_map(|e| {
+            let program = e.command.split_whitespace().next().unwrap_or_default();
+            match locate(program) {
+                Some(Located::Ready(_)) => None,
+                Some(Located::Broken { missing }) => Some(format!(
+                    "{}: instalación rota (falta {})",
+                    e.id,
+                    missing.display()
+                )),
+                None => Some(format!("{}: no encuentro `{program}`", e.id)),
+            }
+        })
+        .collect()
+}
+
 /// Más que esto ya no se puede seguir en pestañas (ni conviene gastar tanto de una vez).
 const MAX_SUBTASKS: usize = 6;
 
@@ -392,6 +412,20 @@ mod tests {
         let own = parse_plan(&with_after(&["[]", "[1]"]), &catalog(&[])).unwrap_err();
         assert!(own.contains("anteriores"), "{own}");
         assert!(parse_plan(&with_after(&["[1]", "[]"]), &catalog(&[])).is_err());
+    }
+
+    #[test]
+    fn a_missing_executor_says_which_program_is_missing() {
+        let extra = [Executor {
+            id: "fantasma".into(),
+            use_for: "nada".into(),
+            command: "orion-no-existe-xyz --prompt {prompt}".into(),
+        }];
+        let missing = unavailable(&catalog(&extra));
+        assert!(
+            missing.contains(&"fantasma: no encuentro `orion-no-existe-xyz`".to_string()),
+            "{missing:?}"
+        );
     }
 
     #[test]

@@ -16,8 +16,9 @@ use std::sync::{Arc, Mutex};
 enum Step {
     Writing,
     Planning,
-    /// El plan, y los ids de los ejecutores instalados que se le ofrecieron (para cambiar el de cada subtarea).
-    Ready(Vec<Subtask>, Vec<String>),
+    /// El plan, los ids de los ejecutores instalados que se le ofrecieron (para cambiar el de cada
+    /// subtarea) y una nota de cuáles no se ofrecieron y por qué.
+    Ready(Vec<Subtask>, Vec<String>, String),
     Failed(String),
 }
 
@@ -214,7 +215,7 @@ impl Orion {
                         ui.weak("Puede tardar un par de minutos. Puedes cerrar esta ventana y volver.");
                         back = ui.button("Cancelar").clicked();
                     }
-                    Step::Ready(subtasks, offered) => {
+                    Step::Ready(subtasks, offered, note) => {
                         for (i, s) in subtasks.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 ui.weak(format!("{}.", i + 1));
@@ -238,6 +239,7 @@ impl Orion {
                             });
                         }
                         ui.weak("Pasa el mouse por una subtarea para ver su prompt.");
+                        ui.weak(note);
                         if subtasks.iter().any(|s| !s.after.is_empty()) {
                             ui.weak(
                                 "Las que van «después de» otra arrancan cuando cierres esa \
@@ -263,7 +265,7 @@ impl Orion {
             });
         o.open = open;
         if let Some((i, id)) = pick
-            && let Step::Ready(subtasks, _) = &mut *o.step.lock().unwrap()
+            && let Step::Ready(subtasks, ..) = &mut *o.step.lock().unwrap()
             && let Some(s) = subtasks.get_mut(i)
         {
             s.executor = id;
@@ -283,6 +285,7 @@ impl Orion {
             // su resultado se descarta (el `step` ya es otro).
             o.planner = Planner::default();
             let catalog = crate::orchestrator::catalog(&self.settings.executors);
+            let extra = self.settings.executors.len();
             let (task, dir, step, planner, ctx) = (
                 o.task.clone(),
                 o.dir.clone(),
@@ -292,14 +295,22 @@ impl Orion {
             );
             std::thread::spawn(move || {
                 let result = match crate::orchestrator::plan(&task, &dir, &planner, &catalog) {
-                    Ok((subtasks, offered)) => Step::Ready(subtasks, offered),
+                    Ok((subtasks, offered)) => {
+                        // Por qué el menú ofrece lo que ofrece: cuántos vienen de config.toml y cuáles faltan.
+                        let missing = crate::orchestrator::unavailable(&catalog);
+                        let mut note = format!("Ejecutores de config.toml: {extra}.");
+                        if !missing.is_empty() {
+                            note += &format!(" No disponibles: {}.", missing.join("; "));
+                        }
+                        Step::Ready(subtasks, offered, note)
+                    }
                     Err(e) => Step::Failed(e),
                 };
                 *step.lock().unwrap() = result;
                 ctx.request_repaint();
             });
         }
-        let Step::Ready(subtasks, _) = step else {
+        let Step::Ready(subtasks, ..) = step else {
             return None;
         };
         if !launch {
