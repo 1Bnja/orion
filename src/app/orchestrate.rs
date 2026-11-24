@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex};
 enum Step {
     Writing,
     Planning,
-    Ready(Vec<Subtask>),
+    /// El plan, y los ids de los ejecutores instalados que se le ofrecieron (para cambiar el de cada subtarea).
+    Ready(Vec<Subtask>, Vec<String>),
     Failed(String),
 }
 
@@ -114,7 +115,7 @@ impl Orion {
     pub(super) fn open_orchestrate(&mut self) {
         // Con un plan en camino, listo o en curso, se vuelve a él: es de su repo, no del de la pestaña actual.
         let o = &mut self.orchestrate;
-        if !o.plan.is_empty() || matches!(o.step(), Step::Planning | Step::Ready(_)) {
+        if !o.plan.is_empty() || matches!(o.step(), Step::Planning | Step::Ready(..)) {
             o.open = true;
             return;
         }
@@ -143,6 +144,8 @@ impl Orion {
         let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         let step = o.step();
         let (mut plan_now, mut launch, mut back, mut forget) = (false, false, false, false);
+        // Elegiste otro ejecutor para una subtarea: (índice, id).
+        let mut pick: Option<(usize, String)> = None;
         let mut open = !escape;
         let model = |s: &Subtask| {
             egui::RichText::new(short_name(&s.executor))
@@ -211,11 +214,23 @@ impl Orion {
                         ui.weak("Puede tardar un par de minutos. Puedes cerrar esta ventana y volver.");
                         back = ui.button("Cancelar").clicked();
                     }
-                    Step::Ready(subtasks) => {
+                    Step::Ready(subtasks, offered) => {
                         for (i, s) in subtasks.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 ui.weak(format!("{}.", i + 1));
-                                ui.label(model(s));
+                                // La recomendación del plan, cambiable por otro ejecutor instalado.
+                                egui::ComboBox::from_id_salt(("ejecutor", i))
+                                    .selected_text(model(s))
+                                    .show_ui(ui, |ui| {
+                                        for id in offered {
+                                            let on = *id == s.executor;
+                                            if ui.selectable_label(on, short_name(id)).clicked() {
+                                                pick = Some((i, id.clone()));
+                                            }
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text("Ejecutor de esta subtarea");
                                 ui.label(&s.title).on_hover_text(&s.prompt);
                                 if !s.after.is_empty() {
                                     ui.weak(after_text(&s.after));
@@ -247,6 +262,12 @@ impl Orion {
                 }
             });
         o.open = open;
+        if let Some((i, id)) = pick
+            && let Step::Ready(subtasks, _) = &mut *o.step.lock().unwrap()
+            && let Some(s) = subtasks.get_mut(i)
+        {
+            s.executor = id;
+        }
         if forget {
             (o.plan, o.open) = (Vec::new(), false);
             return None;
@@ -271,14 +292,14 @@ impl Orion {
             );
             std::thread::spawn(move || {
                 let result = match crate::orchestrator::plan(&task, &dir, &planner, &catalog) {
-                    Ok(subtasks) => Step::Ready(subtasks),
+                    Ok((subtasks, offered)) => Step::Ready(subtasks, offered),
                     Err(e) => Step::Failed(e),
                 };
                 *step.lock().unwrap() = result;
                 ctx.request_repaint();
             });
         }
-        let Step::Ready(subtasks) = step else {
+        let Step::Ready(subtasks, _) = step else {
             return None;
         };
         if !launch {

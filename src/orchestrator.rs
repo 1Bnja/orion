@@ -113,6 +113,7 @@ fn instructions(task: &str, executors: &[Executor]) -> String {
          Puedes leer el repositorio para planificar mejor, pero no cambies nada.\n\
          Para cada subtarea: un título corto (unas 4 palabras), un prompt completo que se entienda \
          solo, y el ejecutor más barato que la haga bien, según para qué sirve cada uno:\n{}\n\
+         Si la tarea pide un ejecutor concreto para una parte, usa ese: lo eligió el usuario.\n\
          `after` (opcional): los índices, desde 0, de subtareas ANTERIORES cuyo código necesita de \
          verdad (por ejemplo, usa una función que otra crea). Esa subtarea arranca cuando aquellas \
          terminan, desde sus ramas. Úsalo solo cuando haga falta: cada `after` hace esperar.\n\
@@ -136,13 +137,14 @@ pub(crate) fn cancel(planner: &Planner) {
 
 /// Pide el plan para `task`, trabajando en `dir`. Tarda (segundos o minutos): va en un hilo aparte.
 /// Mientras corre, el proceso queda en `planner` para que `cancel` pueda cortarlo.
-/// `catalog` es el catálogo completo: se ofrecen solo los ejecutores instalados.
+/// `catalog` es el catálogo completo: se ofrecen solo los ejecutores instalados, y esos ids vuelven
+/// junto al plan para que la ventana deje cambiar el de cada subtarea por otro de la misma lista.
 pub(crate) fn plan(
     task: &str,
     dir: &Path,
     planner: &Planner,
     catalog: &[Executor],
-) -> Result<Vec<Subtask>, String> {
+) -> Result<(Vec<Subtask>, Vec<String>), String> {
     let executors = installed(catalog);
     let mut child = claude()?
         .current_dir(dir)
@@ -181,7 +183,8 @@ pub(crate) fn plan(
     if !status.success() && stdout.trim().is_empty() {
         return Err(format!("Claude Code falló: {}", stderr.trim()));
     }
-    parse_plan(&stdout, &executors)
+    let offered = executors.iter().map(|e| e.id.clone()).collect();
+    parse_plan(&stdout, &executors).map(|subtasks| (subtasks, offered))
 }
 
 /// Lee lo que imprime `claude -p --output-format json`: el plan viene en `structured_output`.
@@ -619,7 +622,7 @@ mod tests {
 #[ignore]
 fn real_plan() {
     let dir = std::env::current_dir().unwrap();
-    let plan = plan(
+    let (plan, offered) = plan(
         "Agrega un comentario de una línea arriba de fn main en src/main.rs",
         &dir,
         &Planner::default(),
@@ -627,5 +630,7 @@ fn real_plan() {
     )
     .unwrap();
     assert!(!plan.is_empty());
+    // Lo que la ventana deja elegir es lo que se ofreció, y el plan eligió de ahí.
+    assert!(plan.iter().all(|s| offered.contains(&s.executor)));
     eprintln!("{plan:#?}");
 }
