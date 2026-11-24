@@ -1,11 +1,13 @@
 //! Orquestador: le das una tarea, Claude Code la divide en subtareas y elige un modelo para cada una;
 //! después Orion abre una pestaña de agente por subtarea, cada una en su propio git worktree.
+//! Si una subtarea necesita el código de otra (`after`), espera a que esa termine con commit y
+//! arranca desde su rama: el plan avanza por rondas.
 //!
 //! Planifica `claude -p` (Claude Code sin ventana, con tu misma sesión: sin API key ni librerías de red),
 //! con un esquema JSON para que la respuesta venga validada. Solo puede leer el repo: no edita nada.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -43,13 +45,16 @@ pub(crate) struct Subtask {
     /// Lo que recibe el agente: tiene que entenderse sin ver las otras subtareas.
     pub(crate) prompt: String,
     pub(crate) model: String,
+    /// Índices (desde 0) de subtareas anteriores cuyo código necesita: arranca cuando terminan.
+    #[serde(default)]
+    pub(crate) after: Vec<usize>,
 }
 
 /// El esquema que `claude -p` hace cumplir a la respuesta.
 fn schema() -> String {
     let models: Vec<String> = MODELS.iter().map(|(id, _)| format!("\"{id}\"")).collect();
     format!(
-        r#"{{"type":"object","properties":{{"subtasks":{{"type":"array","minItems":1,"maxItems":{MAX_SUBTASKS},"items":{{"type":"object","properties":{{"title":{{"type":"string","maxLength":40}},"prompt":{{"type":"string"}},"model":{{"type":"string","enum":[{}]}}}},"required":["title","prompt","model"]}}}}}},"required":["subtasks"]}}"#,
+        r#"{{"type":"object","properties":{{"subtasks":{{"type":"array","minItems":1,"maxItems":{MAX_SUBTASKS},"items":{{"type":"object","properties":{{"title":{{"type":"string","maxLength":40}},"prompt":{{"type":"string"}},"model":{{"type":"string","enum":[{}]}},"after":{{"type":"array","items":{{"type":"integer","minimum":0}}}}}},"required":["title","prompt","model"]}}}}}},"required":["subtasks"]}}"#,
         models.join(",")
     )
 }
@@ -62,11 +67,16 @@ fn instructions(task: &str) -> String {
         .collect();
     format!(
         "Eres el planificador de Orion. Divide la tarea de abajo en subtareas que distintos agentes \
-         puedan hacer en paralelo, cada uno en su propia rama de git, sin depender del trabajo de \
-         los otros. Si la tarea no se puede dividir así, devuelve una sola subtarea.\n\
+         hagan en paralelo, cada uno en su propia rama de git. Prefiere subtareas independientes. \
+         Si la tarea no se puede dividir, devuelve una sola subtarea.\n\
          Puedes leer el repositorio para planificar mejor, pero no cambies nada.\n\
          Para cada subtarea: un título corto (unas 4 palabras), un prompt completo que se entienda \
          solo, y el modelo más barato que la haga bien:\n{}\n\
+         `after` (opcional): los índices, desde 0, de subtareas ANTERIORES cuyo código necesita de \
+         verdad (por ejemplo, usa una función que otra crea). Esa subtarea arranca cuando aquellas \
+         terminan, desde sus ramas. Úsalo solo cuando haga falta: cada `after` hace esperar.\n\
+         Cada prompt tiene que pedirle al agente que, al terminar, haga commit de su trabajo en su rama.\n\
+         Si conviene, la última subtarea puede ser una revisión del conjunto que dependa de las demás.\n\
          Escribe títulos y prompts en el idioma de la tarea.\n\nTarea:\n{task}",
         models.join("\n")
     )
@@ -163,7 +173,110 @@ fn parse_plan(stdout: &str) -> Result<Vec<Subtask>, String> {
             bad.model
         ));
     }
+    // Solo hacia atrás: así no puede haber ciclos y cada ronda sabe de qué ramas parte.
+    for (i, s) in subtasks.iter().enumerate() {
+        if let Some(bad) = s.after.iter().find(|&&j| j >= i) {
+            return Err(format!(
+                "el plan dice que «{}» (subtarea {i}) va después de la {bad}: solo puede depender de subtareas anteriores",
+                s.title
+            ));
+        }
+    }
     Ok(subtasks)
+}
+
+/// Cómo está una dependencia, para decidir si la subtarea que la espera puede arrancar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Dep {
+    /// Todavía no arranca, o su agente sigue abierto.
+    Pending,
+    /// Su agente terminó (el usuario lo cerró), con su código y si dejó commits en su rama.
+    Done { code: Option<i32>, commits: bool },
+    /// Se cerró su pestaña antes de que el agente terminara.
+    Closed,
+    /// No pudo arrancar (y lo que dependa de ella tampoco).
+    Blocked,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum Gate {
+    Ready,
+    Wait,
+    Blocked(String),
+}
+
+/// Si una subtarea puede arrancar, dados `(título, estado)` de sus dependencias.
+/// Basta una que falle para bloquearla, aunque otras sigan trabajando: así se avisa apenas se sabe.
+pub(crate) fn gate(deps: &[(&str, Dep)]) -> Gate {
+    let mut wait = false;
+    for &(title, dep) in deps {
+        let why = match dep {
+            Dep::Pending => {
+                wait = true;
+                continue;
+            }
+            Dep::Done {
+                code: Some(0) | None,
+                commits: true,
+            } => continue,
+            Dep::Done {
+                code: Some(0) | None,
+                commits: false,
+            } => format!("«{title}» terminó sin hacer commit en su rama"),
+            Dep::Done { code: Some(c), .. } => format!("«{title}» terminó con error (código {c})"),
+            Dep::Closed => format!("se cerró la pestaña de «{title}» antes de que terminara"),
+            Dep::Blocked => format!("«{title}» quedó bloqueada"),
+        };
+        return Gate::Blocked(why);
+    }
+    if wait { Gate::Wait } else { Gate::Ready }
+}
+
+/// Corre git en `dir` y devuelve lo que imprimió, o su mensaje de error.
+/// ponytail: copia del `git` privado de agents.rs (ese archivo no se tocó en este cambio); unificarlas.
+fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = crate::update::quiet("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|e| format!("no encuentro git ({e})"))?;
+    let text = |b: &[u8]| String::from_utf8_lossy(b).trim().to_string();
+    if out.status.success() {
+        Ok(text(&out.stdout))
+    } else {
+        Err(text(&out.stderr))
+    }
+}
+
+/// Un worktree para la subtarea `title` con el código de las ramas de sus dependencias: parte de la
+/// primera y fusiona las demás. Si una fusión choca, la deshace y devuelve el error (el worktree queda
+/// limpio, por si quieres resolverlo a mano). Devuelve la carpeta, su rama y el commit del que parte
+/// el agente (para saber después si hizo commits propios).
+pub(crate) fn prepare_worktree(
+    repo: &Path,
+    title: &str,
+    deps: &[String],
+) -> Result<(PathBuf, String, String), String> {
+    let path = crate::agents::create_worktree(repo, title, deps.first().map(String::as_str))?;
+    for branch in deps.iter().skip(1) {
+        if let Err(e) = git(&path, &["merge", "--no-edit", branch]) {
+            let _ = git(&path, &["merge", "--abort"]);
+            return Err(format!(
+                "chocó al fusionar {branch} en {}: deshice la fusión ({e})",
+                path.display()
+            ));
+        }
+    }
+    let branch = git(&path, &["branch", "--show-current"])?;
+    let base = git(&path, &["rev-parse", "HEAD"])?;
+    Ok((path, branch, base))
+}
+
+/// Si `branch` tiene commits que no están en `base`. Ante un error de git, no.
+pub(crate) fn has_commits(repo: &Path, base: &str, branch: &str) -> bool {
+    git(repo, &["rev-list", "--count", &format!("{base}..{branch}")])
+        .is_ok_and(|n| n.parse::<u32>().is_ok_and(|n| n > 0))
 }
 
 fn claude() -> Result<Command, String> {
@@ -199,6 +312,100 @@ mod tests {
 
     fn subtask(model: &str) -> String {
         format!(r#"{{"title":"Tests","prompt":"Escribe tests","model":"{model}"}}"#)
+    }
+
+    /// Un plan con una subtarea por cada `after` (en JSON).
+    fn with_after(after: &[&str]) -> String {
+        let items: Vec<String> = after
+            .iter()
+            .map(|a| {
+                format!(r#"{{"title":"T","prompt":"p","model":"claude-haiku-5-5","after":{a}}}"#)
+            })
+            .collect();
+        format!(
+            r#"{{"structured_output":{{"subtasks":[{}]}}}}"#,
+            items.join(",")
+        )
+    }
+
+    #[test]
+    fn after_only_points_back() {
+        let plan = parse_plan(&with_after(&["[]", "[0]", "[0,1]"])).unwrap();
+        assert!(plan[0].after.is_empty());
+        assert_eq!(plan[2].after, vec![0, 1]);
+        // Sin `after`, independiente.
+        let out = format!(
+            r#"{{"structured_output":{{"subtasks":[{}]}}}}"#,
+            subtask("claude-haiku-5-5")
+        );
+        assert!(parse_plan(&out).unwrap()[0].after.is_empty());
+        // A sí misma o hacia adelante: error claro.
+        let own = parse_plan(&with_after(&["[]", "[1]"])).unwrap_err();
+        assert!(own.contains("anteriores"), "{own}");
+        assert!(parse_plan(&with_after(&["[1]", "[]"])).is_err());
+    }
+
+    #[test]
+    fn the_gate_waits_launches_or_blocks() {
+        let done = |code, commits| Dep::Done { code, commits };
+        assert_eq!(gate(&[]), Gate::Ready);
+        let ok = [("a", done(Some(0), true)), ("b", done(None, true))];
+        assert_eq!(gate(&ok), Gate::Ready);
+        assert_eq!(gate(&[ok[0], ("b", Dep::Pending)]), Gate::Wait);
+        let blocked = |deps: &[(&str, Dep)]| match gate(deps) {
+            Gate::Blocked(why) => why,
+            other => panic!("{other:?}"),
+        };
+        assert!(blocked(&[("a", done(Some(0), false))]).contains("sin hacer commit"));
+        assert!(blocked(&[("a", done(Some(2), true))]).contains("código 2"));
+        // Una que falla bloquea aunque otra siga trabajando.
+        assert!(blocked(&[("a", Dep::Pending), ("b", Dep::Closed)]).contains("«b»"));
+        assert!(blocked(&[("a", Dep::Blocked)]).contains("bloqueada"));
+    }
+
+    #[test]
+    fn dependent_worktrees_start_from_their_dependencies() {
+        let base = std::env::temp_dir().join(format!("orion-rondas-{}", std::process::id()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let run = |dir: &Path, args: &[&str]| git(dir, args).unwrap();
+        run(&repo, &["init", "-q"]);
+        run(&repo, &["config", "user.name", "t"]);
+        run(&repo, &["config", "user.email", "t@t"]);
+        std::fs::write(repo.join("comun.txt"), "base\n").unwrap();
+        run(&repo, &["add", "."]);
+        run(&repo, &["commit", "-q", "-m", "base"]);
+        // Un "agente" que escribe un archivo y hace commit en su rama.
+        let work = |title: &str, deps: &[String], file: &str, text: &str| {
+            let (path, branch, start) = prepare_worktree(&repo, title, deps).unwrap();
+            assert!(!has_commits(&repo, &start, &branch), "todavía no hizo nada");
+            std::fs::write(path.join(file), text).unwrap();
+            run(&path, &["add", "."]);
+            run(&path, &["commit", "-q", "-m", title]);
+            assert!(has_commits(&repo, &start, &branch));
+            branch
+        };
+        let a = work("A", &[], "a.txt", "a");
+        let b = work("B", &[], "b.txt", "b");
+        // Depende de una: parte de su rama y tiene su commit.
+        let after_a = work("D", std::slice::from_ref(&a), "d.txt", "d");
+        assert!(run(&repo, &["log", "--format=%s", &after_a]).contains('A'));
+        // Depende de las dos: parte de A y fusiona B.
+        let (both, _, _) = prepare_worktree(&repo, "C", &[a, b]).unwrap();
+        assert!(both.join("a.txt").exists() && both.join("b.txt").exists());
+
+        // Dos ramas que cambian la misma línea: la fusión choca y no queda a medias.
+        let x = work("X", &[], "comun.txt", "x\n");
+        let y = work("Y", &[], "comun.txt", "y\n");
+        let err = prepare_worktree(&repo, "Z", &[x, y]).unwrap_err();
+        assert!(err.contains("chocó"), "{err}");
+        let z = repo.join(".orion/worktrees/z-1");
+        assert_eq!(run(&z, &["status", "--porcelain"]), "");
+        assert!(git(&z, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_err());
+        let text = std::fs::read_to_string(z.join("comun.txt")).unwrap();
+        assert_eq!(text.trim(), "x");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -261,6 +468,7 @@ mod tests {
             title: "x".into(),
             prompt: "Arregla \"el\" test\nde l'app".into(),
             model: "claude-sonnet-5-5".into(),
+            after: Vec::new(),
         };
         let command = agent_command(&SHELLS[0], &s);
         // PowerShell (Windows) y zsh (Mac) usan comillas simples, cada una con su escape.

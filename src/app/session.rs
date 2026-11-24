@@ -445,17 +445,28 @@ pub(super) enum AgentStatus {
 }
 
 /// Estado del agente que se lanzó con `command`, dados los `(comando, estado)` de los bloques del
-/// panel en orden. Gana el primer bloque cuyo comando (sin espacios en los bordes) coincide.
+/// panel en orden. Gana el primer bloque cuyo comando coincide (ver `same_command`).
 pub(super) fn agent_status_of<'a>(
     blocks: impl IntoIterator<Item = (&'a str, Status)>,
     command: &str,
 ) -> AgentStatus {
-    let found = blocks.into_iter().find(|(c, _)| c.trim() == command.trim());
+    let found = blocks.into_iter().find(|(c, _)| same_command(c, command));
     match found {
         None | Some((_, Status::Editing)) => AgentStatus::Starting,
         Some((_, Status::Running(_))) => AgentStatus::Running,
         Some((_, Status::Done(code, _))) => AgentStatus::Done(code),
     }
+}
+
+/// Si el comando leído de la pantalla (`read`) es el que Orion escribió. Un prompt largo se parte en
+/// varias filas y en el corte se pueden perder o sumar espacios: se compara sin espacios. Y si de la
+/// pantalla salió solo el comienzo, basta con que empiece igual y pase de las tres primeras palabras
+/// (`claude --model <id>`), para no confundirlo con otro comando corto.
+fn same_command(read: &str, written: &str) -> bool {
+    let compact = |s: &str| s.split_whitespace().collect::<String>();
+    let (read, full) = (compact(read), compact(written));
+    let head: String = written.split_whitespace().take(3).collect();
+    read == full || (read.len() > head.len() && full.starts_with(&read))
 }
 
 #[cfg(test)]
@@ -480,5 +491,40 @@ mod agent_tests {
             ("claude", Status::Running(D)),
         ];
         assert_eq!(agent_status_of(two, "claude"), AgentStatus::Done(Some(1)));
+    }
+
+    #[test]
+    fn long_commands_match_even_when_the_screen_splits_them() {
+        let written =
+            "claude --model claude-sonnet-5-5 'Arregla ''el'' test de l''app y agrega docs'";
+        let ok = |read: &str| agent_status_of([(read, Status::Running(D))], written);
+        // Partido en filas: el corte cae en medio de una palabra o se come un espacio.
+        assert_eq!(
+            ok("claude --model claude-sonnet-5-5 'Arregla ''el'' te\nst de l''app y agrega docs'"),
+            AgentStatus::Running
+        );
+        assert_eq!(
+            ok("claude  --model claude-sonnet-5-5 'Arregla ''el''test de l''app y agrega docs'"),
+            AgentStatus::Running
+        );
+        // Solo el comienzo, pero más que `claude --model <id>`.
+        assert_eq!(
+            ok("claude --model claude-sonnet-5-5 'Arregla ''el''"),
+            AgentStatus::Running
+        );
+        // Otros comandos no cuentan: solo la cabeza, otro prompt, otro modelo.
+        assert_eq!(
+            ok("claude --model claude-sonnet-5-5"),
+            AgentStatus::Starting
+        );
+        assert_eq!(
+            ok("claude --model claude-sonnet-5-5 'Otra cosa'"),
+            AgentStatus::Starting
+        );
+        assert_eq!(
+            ok("claude --model claude-haiku-5-5 'Arregla'"),
+            AgentStatus::Starting
+        );
+        assert_eq!(ok("claude"), AgentStatus::Starting);
     }
 }
