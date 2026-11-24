@@ -172,7 +172,7 @@ pub(crate) fn broken() -> Vec<(usize, PathBuf)> {
 }
 
 /// Corre git en `dir` y devuelve lo que imprimió, o su mensaje de error.
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     let out = crate::update::quiet("git")
         .arg("-C")
         .arg(dir)
@@ -579,7 +579,7 @@ no-existe
         std::fs::write(repo.join("a.txt"), "uno\n").unwrap();
         git(&repo, &["add", "."]).unwrap();
         git(&repo, &["commit", "-q", "-m", "base"]).unwrap();
-        let wt = create_worktree(&repo, "a").unwrap();
+        let wt = create_worktree(&repo, "a", None).unwrap();
         (base, repo, wt)
     }
 

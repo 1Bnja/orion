@@ -232,22 +232,7 @@ pub(crate) fn gate(deps: &[(&str, Dep)]) -> Gate {
     if wait { Gate::Wait } else { Gate::Ready }
 }
 
-/// Corre git en `dir` y devuelve lo que imprimió, o su mensaje de error.
-/// ponytail: copia del `git` privado de agents.rs (ese archivo no se tocó en este cambio); unificarlas.
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = crate::update::quiet("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .map_err(|e| format!("no encuentro git ({e})"))?;
-    let text = |b: &[u8]| String::from_utf8_lossy(b).trim().to_string();
-    if out.status.success() {
-        Ok(text(&out.stdout))
-    } else {
-        Err(text(&out.stderr))
-    }
-}
+use crate::agents::git;
 
 /// Un worktree para la subtarea `title` con el código de las ramas de sus dependencias: parte de la
 /// primera y fusiona las demás. Si una fusión choca, la deshace y devuelve el error (el worktree queda
