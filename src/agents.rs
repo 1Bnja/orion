@@ -194,9 +194,14 @@ pub(crate) fn repo_root(dir: &Path) -> Result<PathBuf, String> {
 
 /// Crea un worktree en `<raíz del repo>/.orion/worktrees/agente-N`, en una rama nueva `orion/agente-N`.
 /// `.orion/.gitignore` (con `*`) lo mantiene fuera del `git status` sin tocar el `.gitignore` del usuario.
+/// Parte de `from` (una rama o commit) o, sin base, del HEAD del repo.
 /// Después copia lo que liste `.worktreeinclude` (por ejemplo `.env`); si esa copia falla, el worktree queda igual.
 /// ponytail: corre en el hilo de la ventana (git tarda poco); en repos enormes convendría un hilo aparte.
-pub(crate) fn create_worktree(dir: &Path, agent: &str) -> Result<PathBuf, String> {
+pub(crate) fn create_worktree(
+    dir: &Path,
+    agent: &str,
+    from: Option<&str>,
+) -> Result<PathBuf, String> {
     let root = repo_root(dir)?;
     let slug: String = agent
         .to_lowercase()
@@ -230,7 +235,9 @@ pub(crate) fn create_worktree(dir: &Path, agent: &str) -> Result<PathBuf, String
             continue;
         }
         let target = path.to_string_lossy();
-        git(&root, &["worktree", "add", "-b", &branch, &target])?;
+        let mut args = vec!["worktree", "add", "-b", &branch, &target];
+        args.extend(from);
+        git(&root, &args)?;
         copy_included(&root, &path);
         return Ok(path);
     }
@@ -493,8 +500,8 @@ mod tests {
             "x",
         ]);
 
-        let first = create_worktree(&repo, "Mi Agente").unwrap();
-        let second = create_worktree(&repo.join("."), "Mi Agente").unwrap();
+        let first = create_worktree(&repo, "Mi Agente", None).unwrap();
+        let second = create_worktree(&repo.join("."), "Mi Agente", None).unwrap();
         assert_eq!(first, repo.join(".orion/worktrees/mi-agente-1"));
         assert_eq!(second.file_name().unwrap(), "mi-agente-2");
         // `.orion` no ensucia el repo principal ni toca su .gitignore.
@@ -505,7 +512,7 @@ mod tests {
             "orion/mi-agente-2"
         );
         // Fuera de un repo, un error claro en vez de un worktree a medias.
-        assert!(create_worktree(&std::env::temp_dir(), "x").is_err());
+        assert!(create_worktree(&std::env::temp_dir(), "x", None).is_err());
 
         // Limpieza: los dos worktrees se listan; el que tiene cambios sin guardar se conserva.
         assert_eq!(orion_worktrees(&repo).len(), 2);

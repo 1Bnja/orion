@@ -513,7 +513,7 @@ impl Orion {
                 self.show_toast(format!("No sé en qué repo estás: {tip}"));
                 return false;
             };
-            match crate::agents::create_worktree(&cwd, name) {
+            match crate::agents::create_worktree(&cwd, name, None) {
                 Ok(path) => dir = Some(path),
                 Err(e) => {
                     self.show_toast(format!("No pude crear el worktree: {e}"));
@@ -1649,6 +1649,7 @@ impl eframe::App for Orion {
         if let Some(subtasks) = self.orchestrate_window(&ctx) {
             self.launch_plan(&ctx, subtasks);
         }
+        self.advance_plan(&ctx);
         if let Some((dir, choices, worktree)) = self.project_window(&ctx) {
             for choice in choices {
                 self.launch_project(&ctx, dir.clone(), choice, worktree);
