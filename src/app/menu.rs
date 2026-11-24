@@ -2,7 +2,7 @@
 
 use crate::app::Orion;
 use crate::backdrop::{BACKDROPS, Backdrop, find_backdrop};
-use crate::colors::{THEMES, find_theme, set_surface_alpha, set_theme, theme};
+use crate::colors::{THEMES, find_theme, parse_hex, set_surface_alpha, set_theme, theme, to_hex};
 use crate::config::Settings;
 use crate::config::save_settings;
 use crate::fonts::FontChoice;
@@ -24,8 +24,11 @@ pub(crate) struct SettingsMenu {
 }
 
 /// Cambia el tema: los colores de la terminal y los de las ventanas de egui (configuración, paleta).
-pub(crate) fn apply_theme(ctx: &egui::Context, name: &str) {
-    set_theme(find_theme(name).unwrap_or(0));
+pub(crate) fn apply_theme(ctx: &egui::Context, settings: &Settings) {
+    set_theme(
+        find_theme(&settings.theme).unwrap_or(0),
+        settings.colors.overrides(),
+    );
     ctx.set_visuals(theme().visuals());
 }
 
@@ -50,11 +53,13 @@ impl Orion {
         if new.font.family != self.settings.font.family {
             apply_font(ctx, &new.font.family);
         }
-        if new.theme != self.settings.theme {
-            apply_theme(ctx, &new.theme);
+        let colors_changed = new.colors != self.settings.colors;
+        if new.theme != self.settings.theme || colors_changed {
+            apply_theme(ctx, &new);
         }
-        let look_changed =
-            new.theme != self.settings.theme || new.backdrop != self.settings.backdrop;
+        let look_changed = new.theme != self.settings.theme
+            || new.backdrop != self.settings.backdrop
+            || colors_changed;
         self.settings = new;
         if look_changed {
             self.apply_window_look();
@@ -138,6 +143,23 @@ impl Orion {
                     ")"
                 ));
                 ui.separator();
+                ui.heading("Colores");
+                ui.weak(
+                    "Hex #RRGGBB. Lo que no cambies usa el tema y se mantiene al cambiar de tema.",
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt("colores")
+                    .max_height(220.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (key, value) in new.colors.fields_mut() {
+                            color_row(ui, key, value);
+                        }
+                        if ui.button("Restablecer todos").clicked() {
+                            new.colors.clear();
+                        }
+                    });
+                ui.separator();
                 ui.heading("Fuente");
                 ui.horizontal(|ui| {
                     ui.label("Tamaño");
@@ -185,6 +207,79 @@ impl Orion {
         self.menu.open = open;
         if new != self.settings {
             self.change_settings(ctx, new);
+        }
+    }
+}
+
+/// Una fila de la sección Colores: nombre, muestra editable, hex y vuelta al tema.
+fn color_row(ui: &mut egui::Ui, key: &str, value: &mut Option<String>) {
+    let base = color_base(key);
+    ui.horizontal(|ui| {
+        ui.label(color_label(key));
+        let mut color = value.as_deref().and_then(parse_hex).unwrap_or(base);
+        let picker = egui::color_picker::color_edit_button_srgba(
+            ui,
+            &mut color,
+            egui::color_picker::Alpha::Opaque,
+        );
+        if picker.changed() {
+            *value = Some(to_hex(color));
+        }
+        let valid = match value.as_deref() {
+            Some(text) => parse_hex(text).is_some(),
+            None => true,
+        };
+        let mut text = value.clone().unwrap_or_else(|| to_hex(base));
+        let edit = egui::TextEdit::singleline(&mut text)
+            .desired_width(78.0)
+            .font(egui::TextStyle::Monospace)
+            .text_color(if valid {
+                ui.visuals().text_color()
+            } else {
+                ui.visuals().error_fg_color
+            });
+        if ui.add(edit).changed() {
+            // Se guarda tal cual para poder escribir sin trabas; un hex inválido no se aplica.
+            *value = Some(text);
+        }
+        if ui
+            .add_enabled(value.is_some(), egui::Button::new("Tema"))
+            .on_hover_text("Volver al color del tema")
+            .clicked()
+        {
+            *value = None;
+        }
+    });
+}
+
+/// Nombre visible de una clave de [colors].
+fn color_label(key: &str) -> String {
+    match key {
+        "fg" => "Texto".into(),
+        "bg" => "Fondo".into(),
+        "selection" => "Selección".into(),
+        "sidebar" => "Barra lateral".into(),
+        "accent" => "Acento".into(),
+        "line" => "Separadores".into(),
+        "hover" => "Resaltado".into(),
+        _ => format!("ANSI {}", key.trim_start_matches("ansi")),
+    }
+}
+
+/// El color del tema para una clave (sin contar su propio override).
+fn color_base(key: &str) -> egui::Color32 {
+    let t = theme();
+    match key {
+        "fg" => t.fg,
+        "bg" => t.bg,
+        "selection" => t.selection,
+        "sidebar" => t.sidebar(),
+        "accent" => t.accent(),
+        "line" => t.line(),
+        "hover" => t.hover(),
+        _ => {
+            let i = key.trim_start_matches("ansi").parse::<usize>().unwrap_or(0);
+            t.ansi[i]
         }
     }
 }

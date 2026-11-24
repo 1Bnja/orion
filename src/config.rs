@@ -1,10 +1,41 @@
 //! Configuración del usuario: leer y guardar %APPDATA%\orion\config.toml.
 
 use crate::backdrop::{BACKDROPS, find_backdrop};
-use crate::colors::{THEMES, find_theme};
+use crate::colors::{Overrides, THEMES, find_theme, parse_hex};
 use crate::pty::{SHELLS, find_shell};
 use std::path::PathBuf;
 use std::time::SystemTime;
+
+/// La tabla [colors] de config.toml: los overrides válidos, o un ejemplo comentado si no hay.
+fn colors_text(settings: &Settings) -> String {
+    let mut lines = String::new();
+    for (key, value) in settings.colors.fields() {
+        if let Some(v) = value
+            && parse_hex(v).is_some()
+        {
+            let v = toml::Value::String(v.clone());
+            lines += &format!("{key} = {v}\n");
+        }
+    }
+    if lines.is_empty() {
+        return r##"
+# Colores de la interfaz, en hex #RRGGBB. Lo que no cambies usa el tema y se
+# mantiene al cambiar de tema.
+# [colors]
+# fg = "#EDEDED"
+# bg = "#000000"
+# ansi4 = "#52A8FF"
+"##
+        .into();
+    }
+    format!(
+        r#"
+# Colores de la interfaz, en hex #RRGGBB. Lo que no esté usa el tema y se mantiene
+# al cambiar de tema.
+[colors]
+{lines}"#
+    )
+}
 
 /// Texto de config.toml. Se regenera completo al guardar desde el menú.
 /// ponytail: los comentarios que agregues a mano se pierden al guardar; toml_edit los conservaría.
@@ -14,6 +45,7 @@ pub(crate) fn config_text(settings: &Settings) -> String {
     let theme = toml::Value::String(settings.theme.clone());
     let themes: Vec<&str> = THEMES.iter().map(|t| t.name).collect();
     let themes = themes.join(", ");
+    let colors = colors_text(settings);
     let shell = toml::Value::String(settings.shell.clone());
     let shells: Vec<&str> = SHELLS.iter().map(|s| s.name).collect();
     let shells = shells.join(", ");
@@ -63,7 +95,7 @@ check_updates = {check_updates}
 # Para abrir una pestaña con otro proyecto o shell: clic en "+ Nueva pestaña",
 # o la paleta ({key}+Shift+P).
 shell = {shell}
-
+{colors}
 [font]
 # Nombre de una fuente instalada (como aparece en Windows), o la ruta a un archivo .ttf/.otf.
 # Ejemplos: "Cascadia Mono", "Monocraft", 'C:\fuentes\MiFuente.ttf'
@@ -117,6 +149,8 @@ pub(crate) struct Settings {
     pub(crate) backdrop: String,
     /// Al abrir, revisar si hay una versión nueva en GitHub.
     pub(crate) check_updates: bool,
+    /// Cambios de color de la interfaz ([colors]); lo que falte usa el tema.
+    pub(crate) colors: ColorSettings,
     pub(crate) font: FontSettings,
     /// Perfiles de agente ([[agent]] en el archivo).
     #[serde(rename = "agent")]
@@ -154,10 +188,145 @@ impl Default for Settings {
             shell: SHELLS[0].name.into(),
             backdrop: BACKDROPS[0].0.into(),
             check_updates: true,
+            colors: ColorSettings::default(),
             font: FontSettings::default(),
             agents: Vec::new(),
             executors: Vec::new(),
         }
+    }
+}
+
+/// Overrides de color de la interfaz, en hex "#RRGGBB". None = el color del tema.
+#[derive(serde::Deserialize, Clone, PartialEq, Default, Debug)]
+#[serde(default)]
+pub(crate) struct ColorSettings {
+    pub(crate) fg: Option<String>,
+    pub(crate) bg: Option<String>,
+    pub(crate) selection: Option<String>,
+    pub(crate) sidebar: Option<String>,
+    pub(crate) accent: Option<String>,
+    pub(crate) line: Option<String>,
+    pub(crate) hover: Option<String>,
+    pub(crate) ansi0: Option<String>,
+    pub(crate) ansi1: Option<String>,
+    pub(crate) ansi2: Option<String>,
+    pub(crate) ansi3: Option<String>,
+    pub(crate) ansi4: Option<String>,
+    pub(crate) ansi5: Option<String>,
+    pub(crate) ansi6: Option<String>,
+    pub(crate) ansi7: Option<String>,
+    pub(crate) ansi8: Option<String>,
+    pub(crate) ansi9: Option<String>,
+    pub(crate) ansi10: Option<String>,
+    pub(crate) ansi11: Option<String>,
+    pub(crate) ansi12: Option<String>,
+    pub(crate) ansi13: Option<String>,
+    pub(crate) ansi14: Option<String>,
+    pub(crate) ansi15: Option<String>,
+}
+
+impl ColorSettings {
+    /// Las claves de [colors] con su valor, en el orden en que se muestran y guardan.
+    pub(crate) fn fields(&self) -> [(&'static str, &Option<String>); 23] {
+        [
+            ("fg", &self.fg),
+            ("bg", &self.bg),
+            ("selection", &self.selection),
+            ("sidebar", &self.sidebar),
+            ("accent", &self.accent),
+            ("line", &self.line),
+            ("hover", &self.hover),
+            ("ansi0", &self.ansi0),
+            ("ansi1", &self.ansi1),
+            ("ansi2", &self.ansi2),
+            ("ansi3", &self.ansi3),
+            ("ansi4", &self.ansi4),
+            ("ansi5", &self.ansi5),
+            ("ansi6", &self.ansi6),
+            ("ansi7", &self.ansi7),
+            ("ansi8", &self.ansi8),
+            ("ansi9", &self.ansi9),
+            ("ansi10", &self.ansi10),
+            ("ansi11", &self.ansi11),
+            ("ansi12", &self.ansi12),
+            ("ansi13", &self.ansi13),
+            ("ansi14", &self.ansi14),
+            ("ansi15", &self.ansi15),
+        ]
+    }
+
+    /// Lo mismo que `fields`, pero para editarlos en el menú.
+    pub(crate) fn fields_mut(&mut self) -> [(&'static str, &mut Option<String>); 23] {
+        [
+            ("fg", &mut self.fg),
+            ("bg", &mut self.bg),
+            ("selection", &mut self.selection),
+            ("sidebar", &mut self.sidebar),
+            ("accent", &mut self.accent),
+            ("line", &mut self.line),
+            ("hover", &mut self.hover),
+            ("ansi0", &mut self.ansi0),
+            ("ansi1", &mut self.ansi1),
+            ("ansi2", &mut self.ansi2),
+            ("ansi3", &mut self.ansi3),
+            ("ansi4", &mut self.ansi4),
+            ("ansi5", &mut self.ansi5),
+            ("ansi6", &mut self.ansi6),
+            ("ansi7", &mut self.ansi7),
+            ("ansi8", &mut self.ansi8),
+            ("ansi9", &mut self.ansi9),
+            ("ansi10", &mut self.ansi10),
+            ("ansi11", &mut self.ansi11),
+            ("ansi12", &mut self.ansi12),
+            ("ansi13", &mut self.ansi13),
+            ("ansi14", &mut self.ansi14),
+            ("ansi15", &mut self.ansi15),
+        ]
+    }
+
+    /// Vuelve todos los colores al tema.
+    pub(crate) fn clear(&mut self) {
+        for (_, value) in self.fields_mut() {
+            *value = None;
+        }
+    }
+
+    /// Los overrides ya convertidos a Color32. Un hex inválido se ignora (usa el tema).
+    pub(crate) fn overrides(&self) -> Overrides {
+        let mut overrides = Overrides::default();
+        for (key, value) in self.fields() {
+            let color = value.as_deref().and_then(parse_hex);
+            match key {
+                "fg" => overrides.fg = color,
+                "bg" => overrides.bg = color,
+                "selection" => overrides.selection = color,
+                "sidebar" => overrides.sidebar = color,
+                "accent" => overrides.accent = color,
+                "line" => overrides.line = color,
+                "hover" => overrides.hover = color,
+                _ => {
+                    if let Some(i) = key
+                        .strip_prefix("ansi")
+                        .and_then(|n| n.parse::<usize>().ok())
+                    {
+                        overrides.ansi[i] = color;
+                    }
+                }
+            }
+        }
+        overrides
+    }
+
+    /// Revisa que cada valor sea "#RRGGBB"; el error nombra la clave.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        for (key, value) in self.fields() {
+            if let Some(v) = value
+                && parse_hex(v).is_none()
+            {
+                return Err(format!("colors.{key}: '{v}' no es un color #RRGGBB"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -205,6 +374,7 @@ pub(crate) fn parse_settings(text: &str) -> Result<Settings, String> {
     })?;
     settings.font.size = settings.font.size.clamp(6.0, 72.0);
     settings.font.line_height = settings.font.line_height.clamp(1.0, 3.0);
+    settings.colors.validate()?;
     // El nombre queda escrito como en la lista ("dracula" → "Dracula").
     let theme = find_theme(&settings.theme)
         .ok_or_else(|| format!("no hay un tema \"{}\"", settings.theme))?;
@@ -295,6 +465,32 @@ mod tests {
             "Acrílico"
         );
         assert!(parse_settings("backdrop = 'vidrio'").is_err());
+    }
+
+    #[test]
+    fn color_overrides_parse_and_bad_hex_says_which_key() {
+        let s = parse_settings("[colors]\nfg = '#010203'\nansi4 = '#A0B0C0'").unwrap();
+        let o = s.colors.overrides();
+        assert_eq!(o.fg, parse_hex("#010203"));
+        assert_eq!(o.ansi[4], parse_hex("#A0B0C0"));
+        assert_eq!(o.bg, None);
+        let err = parse_settings("[colors]\nbg = '#12'").err().unwrap();
+        assert_eq!(err, "colors.bg: '#12' no es un color #RRGGBB");
+        let err = parse_settings("[colors]\nansi7 = 'nope'").err().unwrap();
+        assert!(err.starts_with("colors.ansi7:"), "{err}");
+    }
+
+    #[test]
+    fn color_overrides_save_and_load() {
+        let mut s = Settings::default();
+        s.colors.bg = Some("#123456".into());
+        let text = config_text(&s);
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back.colors, s.colors);
+        // Sin overrides, la tabla va comentada (el ejemplo no se lee como configuración).
+        let text = config_text(&Settings::default());
+        assert!(text.contains("# [colors]"));
+        assert!(!text.lines().any(|l| l.trim() == "[colors]"));
     }
 
     #[test]

@@ -357,7 +357,7 @@ impl Orion {
         grid: (u16, u16),
     ) -> Result<Self, Error> {
         apply_font(&cc.egui_ctx, &settings.font.family);
-        menu::apply_theme(&cc.egui_ctx, &settings.theme);
+        menu::apply_theme(&cc.egui_ctx, &settings);
         let first = Session::new(&cc.egui_ctx, grid, default_shell(&settings))?;
         let orion = Self {
             tabs: vec![Tab::new(first)],
