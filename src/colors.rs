@@ -8,7 +8,8 @@ use alacritty_terminal::vte::ansi::NamedColor;
 use alacritty_terminal::vte::ansi::Rgb;
 use eframe::egui;
 use eframe::egui::Color32;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{OnceLock, RwLock};
 
 /// Un tema: el texto, el fondo, la selección y los 16 colores ANSI (0-7 normales, 8-15 brillantes).
 /// Los colores de la interfaz (barra lateral, separadores) se sacan mezclando el fondo y el texto.
@@ -21,6 +22,39 @@ pub(crate) struct Theme {
     /// Estilo monocromo (como Vercel): los bloques van en grises con un borde fino, y el color
     /// queda solo para lo que importa (un comando que falló). Si no, la barra de color de siempre.
     pub(crate) mono: bool,
+    /// Overrides del usuario de los colores derivados (None = se calculan del tema).
+    derived: Derived,
+}
+
+/// Colores de interfaz que normalmente se derivan del tema y que el usuario puede fijar a mano.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Derived {
+    sidebar: Option<Color32>,
+    accent: Option<Color32>,
+    line: Option<Color32>,
+    hover: Option<Color32>,
+}
+
+impl Derived {
+    const NONE: Self = Self {
+        sidebar: None,
+        accent: None,
+        line: None,
+        hover: None,
+    };
+}
+
+/// Cambios de color del usuario sobre el tema elegido. None = el color del tema.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub(crate) struct Overrides {
+    pub(crate) fg: Option<Color32>,
+    pub(crate) bg: Option<Color32>,
+    pub(crate) selection: Option<Color32>,
+    pub(crate) sidebar: Option<Color32>,
+    pub(crate) accent: Option<Color32>,
+    pub(crate) line: Option<Color32>,
+    pub(crate) hover: Option<Color32>,
+    pub(crate) ansi: [Option<Color32>; 16],
 }
 
 /// 0xRRGGBB → Color32 (const: así los temas se escriben como en sus sitios oficiales).
@@ -47,6 +81,7 @@ pub(crate) static THEMES: [Theme; 6] = [
         bg: hex(0x000000),
         selection: hex(0x333333),
         mono: true,
+        derived: Derived::NONE,
         ansi: ansi([
             0x242424, 0xff6166, 0x4cc38a, 0xffb224, 0x52a8ff, 0xbf7af0, 0x0ac7b4, 0xa1a1a1, //
             0x8f8f8f, 0xff8a8e, 0x6fdba3, 0xffc53d, 0x75bfff, 0xd09cf6, 0x2fd8c5, 0xededed,
@@ -58,6 +93,7 @@ pub(crate) static THEMES: [Theme; 6] = [
         bg: hex(0x1a1b26),
         selection: hex(0x33467c),
         mono: false,
+        derived: Derived::NONE,
         ansi: ansi([
             0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6, //
             0x414868, 0xff899d, 0x9fe044, 0xfaba4a, 0x8db0ff, 0xc7a9ff, 0xa4daff, 0xc0caf5,
@@ -69,6 +105,7 @@ pub(crate) static THEMES: [Theme; 6] = [
         bg: hex(0x1e1e2e),
         selection: hex(0x45475a),
         mono: false,
+        derived: Derived::NONE,
         ansi: ansi([
             0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, //
             0x585b70, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xa6adc8,
@@ -80,6 +117,7 @@ pub(crate) static THEMES: [Theme; 6] = [
         bg: hex(0x282a36),
         selection: hex(0x44475a),
         mono: false,
+        derived: Derived::NONE,
         ansi: ansi([
             0x21222c, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd, 0xf8f8f2, //
             0x6272a4, 0xff6e6e, 0x69ff94, 0xffffa5, 0xd6acff, 0xff92df, 0xa4ffff, 0xffffff,
@@ -91,6 +129,7 @@ pub(crate) static THEMES: [Theme; 6] = [
         bg: hex(0x282828),
         selection: hex(0x504945),
         mono: false,
+        derived: Derived::NONE,
         ansi: ansi([
             0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984, //
             0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
@@ -102,6 +141,7 @@ pub(crate) static THEMES: [Theme; 6] = [
         bg: hex(0xeff1f5),
         selection: hex(0xacb0be),
         mono: false,
+        derived: Derived::NONE,
         ansi: ansi([
             0x5c5f77, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xacb0be, //
             0x6c6f85, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xbcc0cc,
@@ -109,13 +149,17 @@ pub(crate) static THEMES: [Theme; 6] = [
     },
 ];
 
-/// Índice en THEMES del tema actual.
-/// ponytail: global porque se lee en todos lados al pintar; un índice atómico basta (solo lo cambia la UI).
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
+/// El tema activo: el base elegido con los overrides del usuario encima.
+/// ponytail: global porque se lee en todos lados al pintar; un RwLock basta (solo lo cambia la UI).
+static ACTIVE: OnceLock<RwLock<&'static Theme>> = OnceLock::new();
+
+fn active() -> &'static RwLock<&'static Theme> {
+    ACTIVE.get_or_init(|| RwLock::new(&THEMES[0]))
+}
 
 /// El tema actual.
 pub(crate) fn theme() -> &'static Theme {
-    &THEMES[CURRENT.load(Ordering::Relaxed)]
+    *active().read().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Índice del tema con ese nombre (sin importar mayúsculas).
@@ -125,8 +169,26 @@ pub(crate) fn find_theme(name: &str) -> Option<usize> {
         .position(|t| t.name.eq_ignore_ascii_case(name.trim()))
 }
 
-pub(crate) fn set_theme(index: usize) {
-    CURRENT.store(index.min(THEMES.len() - 1), Ordering::Relaxed);
+/// Elige el tema base y le aplica los overrides del usuario.
+/// Se filtra un Theme por cambio (diminuto): así `theme()` sigue devolviendo `&'static`.
+pub(crate) fn set_theme(index: usize, overrides: Overrides) {
+    let base = &THEMES[index.min(THEMES.len() - 1)];
+    let theme: &'static Theme = Box::leak(Box::new(base.with_overrides(overrides)));
+    *active().write().unwrap_or_else(|e| e.into_inner()) = theme;
+}
+
+/// "#RRGGBB" (mayúsculas o minúsculas) → Color32. None si no es un hex de 6 dígitos.
+pub(crate) fn parse_hex(text: &str) -> Option<Color32> {
+    let digits = text.trim().strip_prefix('#')?;
+    if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(hex(u32::from_str_radix(digits, 16).ok()?))
+}
+
+/// Color32 → "#RRGGBB" (para mostrarlo y guardarlo en config.toml).
+pub(crate) fn to_hex(c: Color32) -> String {
+    format!("#{:02X}{:02X}{:02X}", c.r(), c.g(), c.b())
 }
 
 /// Opacidad de los fondos de Orion (255 = opaco). Menos de 255 deja ver Mica o el acrílico detrás.
@@ -154,6 +216,30 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 }
 
 impl Theme {
+    /// Este tema con los overrides del usuario encima. Solo cambia lo que venga en `overrides`.
+    fn with_overrides(&self, overrides: Overrides) -> Theme {
+        let mut ansi = self.ansi;
+        for (color, over) in ansi.iter_mut().zip(overrides.ansi) {
+            if let Some(c) = over {
+                *color = c;
+            }
+        }
+        Theme {
+            name: self.name,
+            fg: overrides.fg.unwrap_or(self.fg),
+            bg: overrides.bg.unwrap_or(self.bg),
+            selection: overrides.selection.unwrap_or(self.selection),
+            ansi,
+            mono: self.mono,
+            derived: Derived {
+                sidebar: overrides.sidebar,
+                accent: overrides.accent,
+                line: overrides.line,
+                hover: overrides.hover,
+            },
+        }
+    }
+
     /// ¿Fondo claro? (para elegir los colores de las ventanas de egui).
     pub(crate) fn is_light(&self) -> bool {
         let c = self.bg;
@@ -162,6 +248,9 @@ impl Theme {
 
     /// Barra lateral: un poco más oscura que la terminal (con fondo negro, apenas más clara).
     pub(crate) fn sidebar(&self) -> Color32 {
+        if let Some(c) = self.derived.sidebar {
+            return c;
+        }
         if self.mono {
             mix(self.bg, self.fg, 0.04)
         } else {
@@ -171,17 +260,24 @@ impl Theme {
 
     /// Fondo de una fila bajo el mouse.
     pub(crate) fn hover(&self) -> Color32 {
-        mix(self.bg, self.fg, 0.05)
+        self.derived
+            .hover
+            .unwrap_or_else(|| mix(self.bg, self.fg, 0.05))
     }
 
     /// Acento de la interfaz (pestaña activa, avisos): azul, o el color del texto si es monocromo.
     pub(crate) fn accent(&self) -> Color32 {
+        if let Some(c) = self.derived.accent {
+            return c;
+        }
         if self.mono { self.fg } else { self.ansi[4] }
     }
 
     /// Líneas separadoras y bordes.
     pub(crate) fn line(&self) -> Color32 {
-        mix(self.bg, self.fg, 0.12)
+        self.derived
+            .line
+            .unwrap_or_else(|| mix(self.bg, self.fg, 0.12))
     }
 
     /// La interfaz de egui (configuración, paleta, menús) con los colores del tema: el mismo
@@ -412,5 +508,44 @@ mod tests {
         assert_eq!(cell_colors(rows[0][0], colors), (BG, PALETTE[4])); // texto oscuro sobre azul claro
         assert_eq!(cell_colors(rows[0][1], colors).0, PALETTE[8]); // se respeta el gris tenue
         assert_eq!(readable(PALETTE[1], BG), PALETTE[1]); // rojo sobre fondo oscuro ya contrasta
+    }
+
+    #[test]
+    fn hex_round_trips_and_rejects_bad_values() {
+        assert_eq!(
+            parse_hex("#1a2B3c"),
+            Some(Color32::from_rgb(0x1a, 0x2b, 0x3c))
+        );
+        assert_eq!(to_hex(Color32::from_rgb(1, 2, 255)), "#0102FF");
+        for bad in ["1a2b3c", "#12345", "#12345g", "", "#"] {
+            assert!(parse_hex(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_override_replaces_only_that_color() {
+        let over = Overrides {
+            fg: Some(Color32::from_rgb(1, 2, 3)),
+            ansi: {
+                let mut ansi = [None; 16];
+                ansi[4] = Some(Color32::from_rgb(4, 5, 6));
+                ansi
+            },
+            ..Overrides::default()
+        };
+        let t = THEMES[0].with_overrides(over);
+        assert_eq!(t.fg, Color32::from_rgb(1, 2, 3));
+        assert_eq!(t.ansi[4], Color32::from_rgb(4, 5, 6));
+        assert_eq!(t.bg, THEMES[0].bg);
+        assert_eq!(t.ansi[1], THEMES[0].ansi[1]);
+        // Override de un color derivado: manda sobre el cálculo.
+        let over = Overrides {
+            sidebar: Some(Color32::from_rgb(9, 9, 9)),
+            ..Overrides::default()
+        };
+        assert_eq!(
+            THEMES[0].with_overrides(over).sidebar(),
+            Color32::from_rgb(9, 9, 9)
+        );
     }
 }
