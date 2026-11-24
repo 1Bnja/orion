@@ -42,6 +42,9 @@ its own branch, and Orion tells you when one of them needs you.
 
 - **Agent profiles** open a tab with an agent already running, optionally in its own
   `git worktree` and branch, so several agents can work in parallel without stepping on each other.
+  Worktrees live in `.orion/worktrees/` inside the repo (git-ignored on its own). Files git ignores,
+  like `.env`, are copied over if you list them in a `.worktreeinclude` file at the repo root: one
+  relative path per line, files or folders.
 - **Orchestrator** (palette → "Orquestar tarea con agentes…"): describe a task, and it gets split
   into independent subtasks, each with a model suited to it. Review the plan, and Orion opens one
   agent per subtask, each in its own worktree and branch. Requires
@@ -146,7 +149,7 @@ line_height = 1.2         # 1.0 = tight lines, 1.5 = very spaced out
 [[agent]]
 name = "My agent"
 command = "my-agent"    # what gets typed into the shell to launch it
-worktree = true         # first create a git worktree on a new branch (orion/my-agent-1)
+worktree = true         # first create a git worktree in .orion/worktrees/ on a new branch (orion/my-agent-1)
 ```
 
 Blocks and folder titles work in PowerShell and zsh, and history suggestions in PowerShell.

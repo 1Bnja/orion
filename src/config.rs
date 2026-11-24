@@ -67,8 +67,10 @@ line_height = {:.2}
 
 # Agentes: cada [[agent]] aparece en la paleta ({key}+Shift+P) y en el menú de
 # "+ Nueva pestaña". Abre una pestaña en la carpeta actual y escribe `command`.
-# Con worktree = true, antes crea un git worktree al lado del repo, en una rama nueva
-# (orion/nombre-1, -2…): así varios agentes trabajan en paralelo sin pisarse.
+# Con worktree = true, antes crea un git worktree en .orion/worktrees/ dentro del repo,
+# en una rama nueva (orion/nombre-1, -2…): así varios agentes trabajan en paralelo sin pisarse.
+# Para que lleve tu .env y similares, lístalos en un archivo .worktreeinclude en la raíz del repo
+# (una ruta relativa por línea, archivos o carpetas).
 "#,
         settings.font.size, settings.font.line_height
     );

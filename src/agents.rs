@@ -192,22 +192,30 @@ pub(crate) fn repo_root(dir: &Path) -> Result<PathBuf, String> {
     git(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
-/// Crea un worktree al lado del repo de `dir`, en una rama nueva: `../repo-agente-N` en `orion/agente-N`.
+/// Crea un worktree en `<raíz del repo>/.orion/worktrees/agente-N`, en una rama nueva `orion/agente-N`.
+/// `.orion/.gitignore` (con `*`) lo mantiene fuera del `git status` sin tocar el `.gitignore` del usuario.
+/// Después copia lo que liste `.worktreeinclude` (por ejemplo `.env`); si esa copia falla, el worktree queda igual.
 /// ponytail: corre en el hilo de la ventana (git tarda poco); en repos enormes convendría un hilo aparte.
 pub(crate) fn create_worktree(dir: &Path, agent: &str) -> Result<PathBuf, String> {
     let root = repo_root(dir)?;
-    let repo = root
-        .file_name()
-        .ok_or("el repo no tiene nombre")?
-        .to_string_lossy();
     let slug: String = agent
         .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect();
-    let parent = root.parent().ok_or("el repo está en la raíz del disco")?;
+    let base = root.join(".orion");
+    let folder = base.join("worktrees");
+    std::fs::create_dir_all(&folder)
+        .map_err(|e| format!("no pude crear {}: {e}", folder.display()))?;
+    let ignore = base.join(".gitignore");
+    if !ignore.exists() {
+        let _ = std::fs::write(
+            &ignore, "*
+",
+        );
+    }
     for n in 1.. {
-        let path = parent.join(format!("{repo}-{slug}-{n}"));
+        let path = folder.join(format!("{slug}-{n}"));
         let branch = format!("orion/{slug}-{n}");
         let taken = git(
             &root,
@@ -223,9 +231,45 @@ pub(crate) fn create_worktree(dir: &Path, agent: &str) -> Result<PathBuf, String
         }
         let target = path.to_string_lossy();
         git(&root, &["worktree", "add", "-b", &branch, &target])?;
+        copy_included(&root, &path);
         return Ok(path);
     }
     unreachable!()
+}
+
+/// Copia al worktree lo que liste `<root>/.worktreeinclude`: una ruta relativa por línea (archivo o carpeta).
+/// Salta lo vacío, los `#`, lo que no existe, las rutas absolutas y las que tengan `..`. Los errores se ignoran.
+fn copy_included(root: &Path, worktree: &Path) {
+    let Ok(list) = std::fs::read_to_string(root.join(".worktreeinclude")) else {
+        return;
+    };
+    for line in list.lines().map(str::trim) {
+        let rel = Path::new(line);
+        let safe = rel
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if line.is_empty() || line.starts_with('#') || !safe {
+            continue;
+        }
+        let _ = copy_recursive(&root.join(rel), &worktree.join(rel));
+    }
+}
+
+/// Copia un archivo o una carpeta entera (solo std). Si el origen no existe, no hace nada.
+fn copy_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+        }
+    } else if from.is_file() {
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(from, to)?;
+    }
+    Ok(())
 }
 
 /// Los worktrees que Orion creó en `repo` (los de ramas `orion/…`): su carpeta y su rama.
@@ -388,8 +432,11 @@ mod tests {
 
         let first = create_worktree(&repo, "Mi Agente").unwrap();
         let second = create_worktree(&repo.join("."), "Mi Agente").unwrap();
-        assert_eq!(first.file_name().unwrap(), "proyecto-mi-agente-1");
-        assert_eq!(second.file_name().unwrap(), "proyecto-mi-agente-2");
+        assert_eq!(first, repo.join(".orion/worktrees/mi-agente-1"));
+        assert_eq!(second.file_name().unwrap(), "mi-agente-2");
+        // `.orion` no ensucia el repo principal ni toca su .gitignore.
+        assert_eq!(git(&repo, &["status", "--porcelain"]).unwrap(), "");
+        assert!(!repo.join(".gitignore").exists());
         assert_eq!(
             git(&second, &["branch", "--show-current"]).unwrap(),
             "orion/mi-agente-2"
@@ -408,6 +455,40 @@ mod tests {
         );
         assert!(!first.exists());
         assert_eq!(orion_worktrees(&repo).len(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn worktreeinclude_copies_files_and_folders_but_never_from_outside() {
+        let base = std::env::temp_dir().join(format!("orion-inc-{}", std::process::id()));
+        let (root, wt) = (base.join("repo"), base.join("wt"));
+        std::fs::create_dir_all(root.join("config/sub")).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(root.join(".env"), "A=1").unwrap();
+        std::fs::write(root.join("config/sub/x.txt"), "x").unwrap();
+        std::fs::write(base.join("afuera.txt"), "secreto").unwrap();
+        let absoluta = base.join("afuera.txt");
+        let lista = format!(
+            "# comentario
+
+.env
+config
+no-existe
+../afuera.txt
+{}
+",
+            absoluta.display()
+        );
+        std::fs::write(root.join(".worktreeinclude"), lista).unwrap();
+
+        copy_included(&root, &wt);
+        assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "A=1");
+        assert!(wt.join("config/sub/x.txt").is_file());
+        assert!(!wt.join("no-existe").exists());
+        // Nada se escribió fuera del worktree ni con la ruta absoluta.
+        assert_eq!(std::fs::read_dir(&wt).unwrap().count(), 2);
+        assert!(!wt.join("afuera.txt").exists());
 
         let _ = std::fs::remove_dir_all(&base);
     }
