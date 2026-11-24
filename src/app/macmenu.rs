@@ -19,6 +19,7 @@ pub(super) enum Command {
     SplitDown,
     ClosePane,
     Palette,
+    ToggleSidebar,
     NextTheme,
     FontBigger,
     FontSmaller,
@@ -28,7 +29,7 @@ pub(super) enum Command {
 type Keys = Option<(bool, Code)>;
 
 /// Cada ítem propio del menú: su id, su texto, su atajo y su comando.
-const ITEMS: [(&str, &str, Keys, Command); 12] = [
+const ITEMS: [(&str, &str, Keys, Command); 13] = [
     (
         "settings",
         "Configuración…",
@@ -82,6 +83,12 @@ const ITEMS: [(&str, &str, Keys, Command); 12] = [
         "Paleta de comandos",
         Some((true, Code::KeyP)),
         Command::Palette,
+    ),
+    (
+        "sidebar",
+        "Mostrar/ocultar barra lateral",
+        Some((false, Code::KeyB)),
+        Command::ToggleSidebar,
     ),
     ("theme", "Cambiar de tema", None, Command::NextTheme),
     ("font-bigger", "Agrandar letra", None, Command::FontBigger),
@@ -176,6 +183,7 @@ impl MacMenu {
             "Ver",
             &[
                 item("palette"),
+                item("sidebar"),
                 &separator,
                 item("theme"),
                 item("font-bigger"),

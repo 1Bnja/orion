@@ -18,6 +18,7 @@ const LIGHTS_WIDTH: f32 = 72.0;
 enum Icon {
     Gear,
     Palette,
+    Sidebar,
     Split,
     Theme,
 }
@@ -44,6 +45,12 @@ fn draw_icon(painter: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
             painter.line_segment([o, o + vec2(2.5, 2.5)], stroke);
             painter.line_segment([o + vec2(2.5, 2.5), o + vec2(0.0, 5.0)], stroke);
             painter.hline(o.x + 4.5..=o.x + 7.5, o.y + 5.0, stroke);
+        }
+        Icon::Sidebar => {
+            // Una ventana con la barra lateral marcada a la izquierda.
+            let r = Rect::from_center_size(c, vec2(14.0, 12.0));
+            painter.rect_stroke(r, 2.5, stroke, egui::StrokeKind::Inside);
+            painter.vline(r.min.x + 5.0, r.y_range(), stroke);
         }
         Icon::Split => {
             let r = Rect::from_center_size(c, vec2(14.0, 12.0));
@@ -119,6 +126,11 @@ impl Orion {
                         Icon::Palette,
                         keys!("Paleta de comandos   ", "+Shift+P", ""),
                         Action::Palette,
+                    ),
+                    (
+                        Icon::Sidebar,
+                        keys!("Mostrar/ocultar barra lateral   ", "+B", ""),
+                        Action::ToggleSidebar,
                     ),
                     (
                         Icon::Split,

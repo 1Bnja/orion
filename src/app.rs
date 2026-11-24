@@ -126,6 +126,8 @@ pub(crate) struct Orion {
     saved: Vec<project::Saved>,
     /// Si la ventana tenía el foco en el frame anterior (para avisar cambios a la app de la pestaña).
     focused: bool,
+    /// La barra lateral de pestañas está oculta: la terminal usa todo el ancho.
+    sidebar_hidden: bool,
     /// Aviso breve ("Salida copiada") y desde cuándo se muestra.
     toast: Option<(String, Instant)>,
     /// Último título que le pusimos a la ventana (para cambiarlo solo cuando hace falta).
@@ -194,6 +196,8 @@ enum Action {
     Focus(egui::Vec2),
     /// Abrir o cerrar la paleta de comandos.
     Palette,
+    /// Mostrar u ocultar la barra lateral de pestañas.
+    ToggleSidebar,
     OpenSettings,
     /// Cambiar el tamaño de la letra en tantos puntos.
     FontSize(f32),
@@ -370,6 +374,7 @@ impl Orion {
             review: None,
             saved: project::load_saved(),
             focused: true,
+            sidebar_hidden: false,
             toast: None,
             window_title: String::new(),
             config_modified: config_modified(),
@@ -435,6 +440,7 @@ impl Orion {
             Command::SplitDown => Action::Split(false),
             Command::ClosePane => Action::ClosePane,
             Command::Palette => Action::Palette,
+            Command::ToggleSidebar => Action::ToggleSidebar,
             Command::NextTheme => Action::Theme(self.next_theme()),
             Command::FontBigger => Action::FontSize(1.0),
             Command::FontSmaller => Action::FontSize(-1.0),
@@ -803,6 +809,10 @@ impl Orion {
     /// "+ Nueva pestaña" arriba y una fila por pestaña con un punto de estado y el nombre de la carpeta.
     /// Se puede ensanchar o angostar arrastrando su borde.
     fn tab_sidebar(&self, ui: &mut egui::Ui) -> Option<Action> {
+        // Oculta: el panel no se dibuja y la terminal ocupa todo el ancho.
+        if self.sidebar_hidden {
+            return None;
+        }
         let mut action = None;
         let frame = egui::Frame::new()
             .fill(surface(theme().sidebar()))
@@ -1210,6 +1220,10 @@ impl Orion {
                 if i.consume_key(cmd_shift, Key::W) {
                     return Some(Action::ClosePane);
                 }
+                // Ctrl+B: mostrar u ocultar la barra lateral (en Mac es Cmd+B, del menú del sistema).
+                if i.consume_key(Modifiers::COMMAND, Key::B) {
+                    return Some(Action::ToggleSidebar);
+                }
             }
             // Ctrl+Alt+flechas (Cmd+Option en Mac): pasar al panel de al lado.
             let arrows = [
@@ -1298,6 +1312,7 @@ impl Orion {
                 }
             }
             Action::Palette => self.palette.toggle(),
+            Action::ToggleSidebar => self.sidebar_hidden = !self.sidebar_hidden,
             Action::OpenSettings => self.open_menu(),
             Action::FontSize(delta) => {
                 let mut new = self.settings.clone();
