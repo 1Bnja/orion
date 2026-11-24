@@ -71,6 +71,20 @@ line_height = {:.2}
 # en una rama nueva (orion/nombre-1, -2…): así varios agentes trabajan en paralelo sin pisarse.
 # Para que lleve tu .env y similares, lístalos en un archivo .worktreeinclude en la raíz del repo
 # (una ruta relativa por línea, archivos o carpetas).
+
+# Ejecutores: el orquestador (palette → "Orquestar tarea con agentes") reparte las subtareas entre ellos.
+# Claude Opus planifica y elige, para cada subtarea, el ejecutor más barato que sirva según `use_for`.
+# Los tres modelos de Claude vienen siempre incluidos; un [[executor]] con el mismo id los reemplaza.
+# Solo se ofrecen los ejecutores cuyo programa (la primera palabra de `command`) está instalado.
+# {{prompt}} se reemplaza por el prompt de la subtarea, en una línea y entre comillas;
+# si falta, el prompt se agrega al final. Los ! y % se quitan del prompt.
+# El comando debe abrir el agente en modo INTERACTIVO con el prompt inicial, y el agente debe
+# terminar haciendo commit en su rama; si no, las subtareas que dependen de él se bloquean.
+# Ejemplo (OpenCode):
+# [[executor]]
+# id = "deepseek-pro"
+# use_for = "programar algo normal, barato"
+# command = "opencode -m deepseek/deepseek-v4-pro --prompt {{prompt}}"
 "#,
         settings.font.size, settings.font.line_height
     );

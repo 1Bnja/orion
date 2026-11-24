@@ -58,6 +58,34 @@ its own branch, and Orion tells you when one of them needs you.
 - **Clipboard**: what a program copies inside the terminal reaches your system clipboard.
   Programs can't read your clipboard.
 
+### Executors / other agents
+
+The orchestrator plans with Claude Opus and gives each subtask to the cheapest executor that fits it.
+The three Claude models (`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`) are always
+included. To add other agents, declare `[[executor]]` blocks in `config.toml`:
+
+```toml
+[[executor]]
+id = "deepseek-pro"
+use_for = "programar algo normal, barato"
+command = "opencode -m deepseek/deepseek-v4-pro --prompt {prompt}"
+
+[[executor]]
+id = "junie"
+use_for = "refactors grandes que necesitan entender el proyecto"
+command = "junie --model=mix.normal --prompt={prompt}"
+```
+
+- An `[[executor]]` with the same `id` as a built-in Claude model replaces it.
+- `use_for` tells the planner when to pick the executor.
+- Only executors whose program (the first word of `command`) is installed are offered.
+- `{prompt}` is replaced by the subtask prompt, on one line and in quotes. If it's missing, the prompt is appended at the end.
+- `!` and `%` are removed from the prompt.
+
+The command must open the agent in **interactive** mode with the initial prompt, because the next
+round starts when you close that agent. The agent must also finish by committing on its branch;
+otherwise the subtasks that depend on it stay blocked.
+
 ### Everything else
 
 - **Suggestions from your history** as you type; `→` accepts them.
