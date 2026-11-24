@@ -433,3 +433,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Cómo va un agente, según los bloques de su panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AgentStatus {
+    /// Todavía no aparece el bloque de su comando.
+    Starting,
+    Running,
+    /// Terminó, con su código si la shell lo informó.
+    Done(Option<i32>),
+}
+
+/// Estado del agente que se lanzó con `command`, dados los `(comando, estado)` de los bloques del
+/// panel en orden. Gana el primer bloque cuyo comando (sin espacios en los bordes) coincide.
+pub(super) fn agent_status_of<'a>(
+    blocks: impl IntoIterator<Item = (&'a str, Status)>,
+    command: &str,
+) -> AgentStatus {
+    let found = blocks.into_iter().find(|(c, _)| c.trim() == command.trim());
+    match found {
+        None | Some((_, Status::Editing)) => AgentStatus::Starting,
+        Some((_, Status::Running(_))) => AgentStatus::Running,
+        Some((_, Status::Done(code, _))) => AgentStatus::Done(code),
+    }
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+
+    const D: Duration = Duration::ZERO;
+
+    #[test]
+    fn agent_status_cases() {
+        let other = ("dir", Status::Done(Some(0), D));
+        assert_eq!(agent_status_of([other], "claude"), AgentStatus::Starting);
+        let running = [other, (" claude ", Status::Running(D))];
+        assert_eq!(agent_status_of(running, "claude"), AgentStatus::Running);
+        let ok = [("claude", Status::Done(Some(0), D))];
+        assert_eq!(agent_status_of(ok, "claude"), AgentStatus::Done(Some(0)));
+        let bad = [("claude", Status::Done(Some(1), D))];
+        assert_eq!(agent_status_of(bad, "claude"), AgentStatus::Done(Some(1)));
+        // Gana el primero que coincide, aunque haya uno posterior.
+        let two = [
+            ("claude", Status::Done(Some(1), D)),
+            ("claude", Status::Running(D)),
+        ];
+        assert_eq!(agent_status_of(two, "claude"), AgentStatus::Done(Some(1)));
+    }
+}
