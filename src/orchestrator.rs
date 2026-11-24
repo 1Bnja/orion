@@ -167,7 +167,7 @@ fn parse_plan(stdout: &str) -> Result<Vec<Subtask>, String> {
 }
 
 fn claude() -> Result<Command, String> {
-    use crate::agents::{locate, Located};
+    use crate::agents::{Located, locate};
     match locate("claude") {
         Some(Located::Ready(path)) => Ok(crate::update::quiet(&path.to_string_lossy())),
         Some(Located::Broken { missing }) => Err(format!(
