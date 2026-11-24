@@ -58,33 +58,12 @@ its own branch, and Orion tells you when one of them needs you.
 - **Clipboard**: what a program copies inside the terminal reaches your system clipboard.
   Programs can't read your clipboard.
 
-### Executors / other agents
+### Other agents and executors
 
-The orchestrator plans with Claude Opus and gives each subtask to the cheapest executor that fits it.
-The three Claude models (`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`) are always
-included. To add other agents, declare `[[executor]]` blocks in `config.toml`:
-
-```toml
-[[executor]]
-id = "deepseek-pro"
-use_for = "programar algo normal, barato"
-command = "opencode -m deepseek/deepseek-v4-pro --prompt {prompt}"
-
-[[executor]]
-id = "junie"
-use_for = "refactors grandes que necesitan entender el proyecto"
-command = "junie --model=mix.normal --prompt={prompt}"
-```
-
-- An `[[executor]]` with the same `id` as a built-in Claude model replaces it.
-- `use_for` tells the planner when to pick the executor.
-- Only executors whose program (the first word of `command`) is installed are offered.
-- `{prompt}` is replaced by the subtask prompt, on one line and in quotes. If it's missing, the prompt is appended at the end.
-- `!` and `%` are removed from the prompt.
-
-The command must open the agent in **interactive** mode with the initial prompt, because the next
-round starts when you close that agent. The agent must also finish by committing on its branch;
-otherwise the subtasks that depend on it stay blocked.
+The orchestrator plans with Claude Opus and gives each subtask to the cheapest executor that fits
+it. Besides the three Claude models, you can add any other CLI (OpenCode with DeepSeek, Junie…).
+Before launching, each subtask has a menu to switch its executor. See
+[Configuring agents](#configuring-agents) for how to set them up.
 
 ### Everything else
 
@@ -183,6 +162,95 @@ worktree = true         # first create a git worktree in .orion/worktrees/ on a 
 Blocks and folder titles work in PowerShell and zsh, and history suggestions in PowerShell.
 In other shells, Orion works as a regular terminal. Paths opened with `Ctrl+click` go to your
 editor (`code`, if installed) or to the default app.
+
+> Saving from the Settings window rewrites `config.toml` from scratch, so comments you added by
+> hand are not kept. If you edit the file yourself, keep your notes somewhere else.
+
+## Configuring agents
+
+Agents are set up in `config.toml` (see [Settings](#settings) for where it lives). There are two
+kinds of entries, and you can use either or both. Changes apply when you save the file.
+
+### Agent profiles: `[[agent]]`
+
+A profile adds an entry to the command palette and to the "+ Nueva pestaña" menu. Orion opens a tab
+and types `command` into your shell.
+
+```toml
+[[agent]]
+name = "Claude Sonnet"
+command = "claude --model claude-sonnet-5-5"
+worktree = true
+```
+
+| Key | What it does |
+|---|---|
+| `name` | How it appears in the menu and on the tab. Required. |
+| `command` | What is typed into the shell to launch it. Anything you can run in a terminal works. Required. |
+| `worktree` | Optional, `false` by default. With `true`, Orion first creates a git worktree in `.orion/worktrees/` on a new branch (`orion/<name>-1`, `-2`…), so several agents can work in parallel. |
+
+Claude Code, Gemini CLI, Codex, OpenCode and Aider need no profile: Orion finds them on its own. Add
+one only to pass options (a model, a flag) or to turn on `worktree`. A profile with the same
+`command` as a detected agent replaces it in the menu.
+
+To copy files git ignores into each new worktree (a `.env`, for example), list them in a
+`.worktreeinclude` file at the repo root: one relative path per line, files or folders. Absolute
+paths and `..` are skipped.
+
+### Orchestrator executors: `[[executor]]`
+
+The orchestrator (palette → "Orquestar tarea con agentes…") splits a task into subtasks and gives
+each one to the cheapest executor that fits it. The three Claude models (`claude-opus-5-5`,
+`claude-sonnet-5-5` and `claude-haiku-5-5`) are always available. Add other agents like this:
+
+```toml
+# OpenCode with DeepSeek (list the models you have with `opencode models`)
+[[executor]]
+id = "deepseek-pro"
+use_for = "regular coding: a function, a fix, tests; cheap"
+command = "opencode -m deepseek/deepseek-v4-pro --prompt {prompt}"
+
+# Junie (JetBrains)
+[[executor]]
+id = "junie"
+use_for = "changes that touch several files and need to understand the project"
+command = "junie --model=mix.normal --prompt={prompt}"
+```
+
+| Key | What it does |
+|---|---|
+| `id` | The name the plan and the window show. With the same `id` as a Claude model, it replaces that one. |
+| `use_for` | A sentence telling the planner when to pick it. The clearer it is, the better the choice. |
+| `command` | What is typed into the shell. `{prompt}` is replaced by the subtask's prompt. |
+
+- `{prompt}` becomes a single line in quotes: line breaks are flattened, double quotes turn into
+  single quotes, and `!` and `%` are removed. If `command` has no `{prompt}`, the prompt is added at
+  the end.
+- Only executors whose program (the first word of `command`) is installed are offered to the
+  planner. If one is missing, the plan window says which and why.
+- The command must open the agent in **interactive** mode with the prompt already sent. Programs
+  that run a task and exit won't work, because the next round starts when you close the agent
+  (`/exit`).
+- The agent must finish by **committing** on its branch. Without a commit, the subtasks that depend
+  on it stay blocked.
+- Each subtask has a menu in the plan window to switch its executor before launching.
+
+To check a command before relying on it, replace `{prompt}` with a short text and run it in a
+normal Orion tab: it should open the agent with that text already submitted.
+
+### Let an AI agent set it up
+
+You can ask any coding agent to edit the file for you. Paste something like this, with your
+agent's name and command:
+
+```text
+Edit my Orion config.toml (Windows: %APPDATA%\orion\config.toml; macOS:
+~/Library/Application Support/orion/config.toml). Keep every existing entry and add:
+- an [[agent]] with name = "<name>" and command = "<command>"
+- an [[executor]] with id = "<id>", use_for = "<when to use it>" and command = "<command with {prompt}>"
+The command must open the agent in interactive mode with the initial prompt.
+Then check that the file is still valid TOML.
+```
 
 ## License
 
