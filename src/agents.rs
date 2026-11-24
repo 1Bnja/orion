@@ -3,7 +3,8 @@
 
 use crate::pty::ShellKind;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Un CLI de agente que Orion sabe abrir. El perfil `[[agent]]` sigue siendo la vía libre para
 /// cualquier otro comando; estos son los que ya vienen listos y se detectan solos.
@@ -64,6 +65,7 @@ fn search_dirs() -> Vec<PathBuf> {
         dirs.push(home.join(".local/bin"));
         dirs.push(home.join(".npm-global/bin"));
         dirs.push(home.join(".bun/bin"));
+        dirs.push(home.join(".claude/local"));
     }
     #[cfg(windows)]
     if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -97,18 +99,78 @@ fn find_binary(base: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Los índices de `PROVIDERS` que están instalados. Se calcula una vez por sesión.
-pub(crate) fn installed() -> &'static [usize] {
-    static INSTALLED: OnceLock<Vec<usize>> = OnceLock::new();
-    INSTALLED.get_or_init(|| {
-        let dirs = search_dirs();
-        PROVIDERS
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| find_binary(p.binary, &dirs).is_some())
-            .map(|(i, _)| i)
-            .collect()
-    })
+/// Un CLI encontrado: listo para usar, o con un shim cuyo destino ya no existe.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Located {
+    Ready(PathBuf),
+    Broken { missing: PathBuf },
+}
+
+/// La primera ruta `"%dp0%\…"` de un shim `.cmd`/`.bat` de npm que no existe.
+/// Las líneas `IF EXIST` son opcionales (p. ej. el `node.exe` junto al shim): se saltan.
+fn missing_target(shim: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(shim).ok()?;
+    let dir = shim.parent()?;
+    text.lines()
+        .filter(|l| !l.to_ascii_lowercase().contains("if exist"))
+        .flat_map(|l| l.split('"').skip(1).step_by(2)) // lo que va entre comillas
+        .filter_map(|q| q.strip_prefix("%dp0%"))
+        .map(|rest| dir.join(rest.trim_start_matches(['\\', '/'])))
+        .find(|p| !p.exists())
+}
+
+fn check(path: PathBuf) -> Located {
+    let is_shim = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+    match is_shim.then(|| missing_target(&path)).flatten() {
+        Some(missing) => Located::Broken { missing },
+        None => Located::Ready(path),
+    }
+}
+
+/// Dónde está `base` y si sirve; `None` si no está instalado.
+#[allow(dead_code)] // ponytail: lo usan otros agentes; quitar al conectarlos
+pub(crate) fn locate(base: &str) -> Option<Located> {
+    find_binary(base, &search_dirs()).map(check)
+}
+
+/// Qué hay de cada agente de `PROVIDERS`. Se recalcula si tiene más de 5 s: se pregunta en cada frame.
+fn scan() -> Vec<Option<Located>> {
+    static CACHE: Mutex<Option<(Instant, Vec<Option<Located>>)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    match &*cache {
+        Some((at, found)) if at.elapsed() < Duration::from_secs(5) => found.clone(),
+        _ => {
+            let dirs = search_dirs();
+            let found: Vec<_> = PROVIDERS
+                .iter()
+                .map(|p| find_binary(p.binary, &dirs).map(check))
+                .collect();
+            *cache = Some((Instant::now(), found.clone()));
+            found
+        }
+    }
+}
+
+/// Los índices de `PROVIDERS` instalados y sanos, en el mismo orden.
+pub(crate) fn installed() -> Vec<usize> {
+    let ready = |l: &Option<Located>| matches!(l, Some(Located::Ready(_)));
+    let found = scan();
+    (0..found.len()).filter(|&i| ready(&found[i])).collect()
+}
+
+/// Los agentes con el binario roto: su índice en `PROVIDERS` y la ruta que falta.
+#[allow(dead_code)] // ponytail: idem locate
+pub(crate) fn broken() -> Vec<(usize, PathBuf)> {
+    scan()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, l)| match l {
+            Some(Located::Broken { missing }) => Some((i, missing)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Corre git en `dir` y devuelve lo que imprimió, o su mensaje de error.
@@ -264,6 +326,38 @@ mod tests {
             Some(b.join(&name))
         );
         assert_eq!(find_binary("nope", &[a, b]), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cmd_shims_are_ready_or_broken_by_their_target() {
+        let base = std::env::temp_dir().join(format!("orion-shim-{}", std::process::id()));
+        let exe = base.join(r"node_modules\x\claude.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let shim = |name: &str, body: &str| {
+            let p = base.join(name);
+            std::fs::write(&p, body).unwrap();
+            p
+        };
+        let body = "@ECHO off\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n)\r\n\"%dp0%\\node_modules\\x\\claude.exe\"   %*\r\n";
+
+        // El destino no existe todavía: roto, y dice cuál falta (el node.exe opcional no cuenta).
+        let p = shim("a.cmd", body);
+        assert_eq!(
+            check(p),
+            Located::Broken {
+                missing: base.join(r"node_modules\x\claude.exe")
+            }
+        );
+
+        std::fs::write(&exe, "").unwrap();
+        let p = shim("b.cmd", body);
+        assert_eq!(check(p.clone()), Located::Ready(p));
+
+        let p = shim("c.cmd", "@echo hola\r\n");
+        assert_eq!(check(p.clone()), Located::Ready(p));
+
         let _ = std::fs::remove_dir_all(&base);
     }
 
