@@ -323,6 +323,69 @@ pub(crate) fn launch_input(shell: &ShellKind, dir: Option<&Path>, command: &str)
     format!("{}{run}", cd.unwrap_or_default())
 }
 
+/// La rama en la que está `dir` (el repo principal o un worktree). Error si está en HEAD suelto.
+pub(crate) fn current_branch(dir: &Path) -> Result<String, String> {
+    let branch = git(dir, &["branch", "--show-current"])?;
+    if branch.is_empty() {
+        return Err("el repo no está en ninguna rama (HEAD suelto)".into());
+    }
+    Ok(branch)
+}
+
+/// Lo que hizo el agente en su rama.
+#[derive(Debug, PartialEq)]
+pub(crate) struct BranchSummary {
+    /// Un commit por línea (`hash título`), solo los de la rama respecto de la del repo.
+    pub(crate) commits: Vec<String>,
+    /// `git diff --stat` de esos commits.
+    pub(crate) stat: String,
+    /// Si el worktree tiene cambios sin commitear.
+    pub(crate) dirty: bool,
+}
+
+/// Resume la rama `branch` de un worktree: sus commits desde el merge-base con la rama del repo.
+/// ponytail: corre en el hilo de la ventana (git tarda poco); en ramas enormes convendría un hilo aparte.
+pub(crate) fn branch_summary(
+    repo: &Path,
+    worktree: &Path,
+    branch: &str,
+) -> Result<BranchSummary, String> {
+    let base = git(repo, &["merge-base", &current_branch(repo)?, branch])?;
+    let range = format!("{base}..{branch}");
+    let commits = git(repo, &["log", "--oneline", &range])?;
+    Ok(BranchSummary {
+        commits: commits.lines().map(String::from).collect(),
+        stat: git(repo, &["diff", "--stat", &base, branch])?,
+        dirty: !git(worktree, &["status", "--porcelain"])?.is_empty(),
+    })
+}
+
+/// Fusiona `branch` en la rama del repo principal. Pide el checkout limpio; si hay conflicto,
+/// deshace la fusión y devuelve el error: el repo queda como estaba.
+/// ponytail: corre en el hilo de la ventana (git tarda poco).
+pub(crate) fn merge_branch(repo: &Path, branch: &str) -> Result<(), String> {
+    if !git(repo, &["status", "--porcelain"])?.is_empty() {
+        return Err(
+            "el repo principal tiene cambios sin guardar: guárdalos antes de fusionar".into(),
+        );
+    }
+    git(repo, &["merge", "--no-edit", branch]).map_err(|e| {
+        let _ = git(repo, &["merge", "--abort"]);
+        format!("conflicto al fusionar, se deshizo la fusión ({e})")
+    })?;
+    Ok(())
+}
+
+/// Borra el worktree (con sus cambios sin guardar) y su rama, fusionada o no.
+/// ponytail: corre en el hilo de la ventana (git tarda poco).
+pub(crate) fn discard_worktree(repo: &Path, path: &Path, branch: &str) -> Result<(), String> {
+    git(
+        repo,
+        &["worktree", "remove", "--force", &path.to_string_lossy()],
+    )?;
+    git(repo, &["branch", "-D", branch]).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,6 +553,94 @@ no-existe
         assert_eq!(std::fs::read_dir(&wt).unwrap().count(), 2);
         assert!(!wt.join("afuera.txt").exists());
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Un repo temporal con un commit, y un worktree de agente en `orion/a-1`.
+    fn repo_with_agent(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("orion-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("proyecto");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.name", "t"],
+            &["config", "user.email", "t@t"],
+        ] {
+            git(&repo, args).unwrap();
+        }
+        std::fs::write(repo.join("a.txt"), "uno\n").unwrap();
+        git(&repo, &["add", "."]).unwrap();
+        git(&repo, &["commit", "-q", "-m", "base"]).unwrap();
+        let wt = create_worktree(&repo, "a").unwrap();
+        (base, repo, wt)
+    }
+
+    fn commit_file(dir: &Path, file: &str, text: &str) {
+        std::fs::write(dir.join(file), text).unwrap();
+        git(dir, &["add", "."]).unwrap();
+        git(dir, &["commit", "-q", "-m", &format!("cambia {file}")]).unwrap();
+    }
+
+    #[test]
+    fn summary_lists_own_commits_and_dirty_state() {
+        let (base, repo, wt) = repo_with_agent("sum");
+        let branch = current_branch(&wt).unwrap();
+        assert_eq!(branch, "orion/a-1");
+        let empty = branch_summary(&repo, &wt, &branch).unwrap();
+        assert!(empty.commits.is_empty() && empty.stat.is_empty() && !empty.dirty);
+        commit_file(&wt, "b.txt", "hola\n");
+        std::fs::write(wt.join("c.txt"), "sin commitear").unwrap();
+        let s = branch_summary(&repo, &wt, &branch).unwrap();
+        assert_eq!(s.commits.len(), 1);
+        assert!(s.commits[0].ends_with("cambia b.txt"));
+        assert!(s.stat.contains("b.txt"));
+        assert!(s.dirty);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn merge_brings_the_agent_work() {
+        let (base, repo, wt) = repo_with_agent("merge");
+        commit_file(&wt, "b.txt", "hola\n");
+        merge_branch(&repo, "orion/a-1").unwrap();
+        assert!(repo.join("b.txt").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn merge_refuses_a_dirty_main_checkout() {
+        let (base, repo, wt) = repo_with_agent("dirty");
+        commit_file(&wt, "b.txt", "hola\n");
+        std::fs::write(repo.join("a.txt"), "editado\n").unwrap();
+        let err = merge_branch(&repo, "orion/a-1").unwrap_err();
+        assert!(err.contains("sin guardar"), "{err}");
+        assert!(!repo.join("b.txt").exists());
+        assert_eq!(git(&repo, &["status", "--porcelain"]).unwrap(), "M a.txt");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn merge_conflict_is_aborted() {
+        let (base, repo, wt) = repo_with_agent("conflict");
+        commit_file(&wt, "a.txt", "del agente\n");
+        commit_file(&repo, "a.txt", "del repo\n");
+        let err = merge_branch(&repo, "orion/a-1").unwrap_err();
+        assert!(err.contains("conflicto"), "{err}");
+        assert_eq!(git(&repo, &["status", "--porcelain"]).unwrap(), "");
+        let kept = std::fs::read_to_string(repo.join("a.txt")).unwrap();
+        assert_eq!(kept.trim(), "del repo");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn discard_removes_worktree_and_branch() {
+        let (base, repo, wt) = repo_with_agent("discard");
+        commit_file(&wt, "b.txt", "hola\n");
+        std::fs::write(wt.join("c.txt"), "sin commitear").unwrap();
+        discard_worktree(&repo, &wt, "orion/a-1").unwrap();
+        assert!(!wt.exists());
+        assert!(git(&repo, &["rev-parse", "--verify", "orion/a-1"]).is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
 }

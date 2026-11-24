@@ -31,6 +31,7 @@ mod palette;
 mod panes;
 mod project;
 mod render;
+mod review;
 mod session;
 mod titlebar;
 
@@ -119,6 +120,8 @@ pub(crate) struct Orion {
     palette: Palette,
     orchestrate: orchestrate::Orchestrate,
     project: Project,
+    /// La ventana "Ver cambios" de una pestaña con worktree.
+    review: Option<review::Review>,
     /// Proyectos guardados (projects.json).
     saved: Vec<project::Saved>,
     /// Si la ventana tenía el foco en el frame anterior (para avisar cambios a la app de la pestaña).
@@ -221,6 +224,12 @@ enum Action {
     OpenSaved(usize),
     /// Quitarlo de los proyectos guardados.
     ForgetSaved(usize),
+    /// Abrir "Ver cambios" de la pestaña con worktree.
+    Review(usize),
+    /// Fusionar la rama de esa pestaña en la rama del repo principal.
+    Merge(usize),
+    /// Borrar el worktree y la rama de esa pestaña, y cerrarla.
+    Discard(usize),
 }
 
 /// Un agente que se puede elegir para un proyecto: uno de los que Orion detecta solo, o un
@@ -358,6 +367,7 @@ impl Orion {
             palette: Palette::default(),
             orchestrate: Default::default(),
             project: Default::default(),
+            review: None,
             saved: project::load_saved(),
             focused: true,
             toast: None,
@@ -678,14 +688,76 @@ impl Orion {
         for session in tab.panes.leaves_mut() {
             let _ = session.shell.child.kill();
         }
+        // Un worktree sin trabajo (nada sin commitear ni commits propios) se borra sin preguntar.
+        // ponytail: git en el hilo de la ventana (tarda poco).
+        if let (Some(path), Some(repo)) = (&tab.worktree, &tab.repo) {
+            let state = crate::agents::current_branch(path)
+                .and_then(|b| crate::agents::branch_summary(repo, path, &b).map(|s| (b, s)));
+            match state {
+                Ok((branch, s)) if !s.dirty && s.commits.is_empty() => {
+                    if let Err(e) = crate::agents::remove_worktree(repo, path, &branch) {
+                        self.show_toast(format!("No pude borrar el worktree vacío: {e}"));
+                    }
+                }
+                _ => self.show_toast(
+                    "El worktree tiene trabajo: clic derecho → Ver cambios / Fusionar antes de cerrar",
+                ),
+            }
+        }
         if self.tabs.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        if tab.worktree.is_some() {
-            self.show_toast("El worktree sigue en disco: paleta → «Limpiar worktrees de Orion»");
-        }
         self.active = active_after_close(self.active, index, self.tabs.len());
+    }
+
+    /// Abre "Ver cambios" para la pestaña `i` (que tiene worktree).
+    fn open_review(&mut self, i: usize) {
+        let Some(tab) = self.tabs.get(i) else { return };
+        let (Some(repo), Some(worktree)) = (&tab.repo, &tab.worktree) else {
+            return;
+        };
+        match review::Review::load(repo, worktree.clone()) {
+            Ok(review) => self.review = Some(review),
+            Err(e) => self.show_toast(format!("No pude leer los cambios: {e}")),
+        }
+    }
+
+    /// Fusiona la rama de la pestaña `i` en la rama del repo principal y avisa el resultado.
+    /// ponytail: git en el hilo de la ventana (tarda poco).
+    fn merge_tab(&mut self, i: usize) {
+        let Some(tab) = self.tabs.get(i) else { return };
+        let (Some(repo), Some(worktree)) = (&tab.repo, &tab.worktree) else {
+            return;
+        };
+        let result = crate::agents::current_branch(worktree).and_then(|branch| {
+            let into = crate::agents::current_branch(repo)?;
+            crate::agents::merge_branch(repo, &branch)
+                .map(|_| format!("{branch} fusionada en {into}"))
+        });
+        self.review = None;
+        self.show_toast(result.unwrap_or_else(|e| format!("No se fusionó: {e}")));
+    }
+
+    /// Borra el worktree y la rama de la pestaña `i` y la cierra. La confirmación ya la dio la ventana.
+    /// ponytail: git en el hilo de la ventana (tarda poco).
+    fn discard_tab(&mut self, ctx: &egui::Context, i: usize) {
+        let Some(tab) = self.tabs.get_mut(i) else {
+            return;
+        };
+        let (Some(repo), Some(worktree)) = (tab.repo.clone(), tab.worktree.take()) else {
+            return;
+        };
+        let branch = crate::agents::current_branch(&worktree);
+        // Primero se cierran las shells (en Windows bloquean la carpeta) y la pestaña, sin el aviso de worktree.
+        self.close_tab(ctx, i);
+        self.review = None;
+        let result =
+            branch.and_then(|b| crate::agents::discard_worktree(&repo, &worktree, &b).map(|_| b));
+        self.show_toast(match result {
+            Ok(branch) => format!("Rama {branch} descartada"),
+            Err(e) => format!("No pude descartar el worktree: {e}"),
+        });
     }
 
     /// Divide el panel con foco con una shell nueva, que queda con el foco.
@@ -992,6 +1064,26 @@ impl Orion {
                     tip = format!("🔔 {alert}\n{tip}");
                 }
                 let row = row.on_hover_text(tip);
+                // Clic derecho en una pestaña con worktree: ver, fusionar o descartar lo del agente.
+                if let (Some(_), Some(repo)) = (&tab.worktree, &tab.repo) {
+                    row.context_menu(|ui| {
+                        if ui.button("Ver cambios").clicked() {
+                            action = Some(Action::Review(i));
+                            ui.close();
+                        }
+                        // ponytail: git en el hilo de la ventana, solo mientras el menú está abierto.
+                        let into =
+                            crate::agents::current_branch(repo).unwrap_or_else(|_| "?".into());
+                        if ui.button(format!("Fusionar en {into}")).clicked() {
+                            action = Some(Action::Merge(i));
+                            ui.close();
+                        }
+                        if ui.button("Descartar rama…").clicked() {
+                            action = Some(Action::Review(i));
+                            ui.close();
+                        }
+                    });
+                }
                 if row.clicked() {
                     action = Some(Action::SelectTab(i));
                 }
@@ -1183,6 +1275,9 @@ impl Orion {
             }
             Action::CleanWorktrees => self.clean_worktrees(),
             Action::OpenSaved(i) => self.open_saved(ctx, i),
+            Action::Review(i) => self.open_review(i),
+            Action::Merge(i) => self.merge_tab(i),
+            Action::Discard(i) => self.discard_tab(ctx, i),
             Action::ForgetSaved(i) => {
                 if i < self.saved.len() {
                     self.saved.remove(i);
@@ -1548,6 +1643,9 @@ impl eframe::App for Orion {
             ui.ctx().request_repaint_after(Duration::from_millis(500));
         }
         self.settings_window(&ctx);
+        if let Some(action) = self.review_window(&ctx) {
+            self.apply_action(&ctx, action);
+        }
         if let Some(subtasks) = self.orchestrate_window(&ctx) {
             self.launch_plan(&ctx, subtasks);
         }
