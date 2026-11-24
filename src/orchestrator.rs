@@ -5,7 +5,7 @@
 //! con un esquema JSON para que la respuesta venga validada. Solo puede leer el repo: no edita nada.
 
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -166,41 +166,16 @@ fn parse_plan(stdout: &str) -> Result<Vec<Subtask>, String> {
     Ok(subtasks)
 }
 
-/// Dónde buscar `claude`, además del PATH.
-/// macOS: una app abierta desde el Finder no hereda el PATH de tu terminal, así que se miran también
-/// las carpetas donde lo dejan sus instaladores (el nativo, Homebrew y npm).
-/// ponytail: lista fija; si alguien lo instala en otro lado, agregar `claude_path` a config.toml.
-fn claude_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        dirs.push(home.join(".local/bin"));
-        dirs.push(home.join(".claude/local"));
-    }
-    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
-    dirs
-}
-
-/// Windows: el instalador nativo deja claude.exe; npm, claude.cmd (que `Command::new("claude")` no encuentra).
-#[cfg(windows)]
-const CLAUDE_NAMES: [&str; 2] = ["claude.exe", "claude.cmd"];
-#[cfg(not(windows))]
-const CLAUDE_NAMES: [&str; 1] = ["claude"];
-
-/// El primer `names` que exista en `dirs`, en orden: primero todas las carpetas con el primer nombre.
-fn find_in(dirs: &[PathBuf], names: &[&str]) -> Option<PathBuf> {
-    names
-        .iter()
-        .flat_map(|name| dirs.iter().map(move |d| d.join(name)))
-        .find(|p| p.is_file())
-}
-
 fn claude() -> Result<Command, String> {
-    let path = find_in(&claude_dirs(), &CLAUDE_NAMES)
-        .ok_or("no encuentro Claude Code (`claude`): instálalo desde code.claude.com")?;
-    Ok(crate::update::quiet(&path.to_string_lossy()))
+    use crate::agents::{locate, Located};
+    match locate("claude") {
+        Some(Located::Ready(path)) => Ok(crate::update::quiet(&path.to_string_lossy())),
+        Some(Located::Broken { missing }) => Err(format!(
+            "la instalación de Claude Code está rota (falta {}): reinstálala con `npm install -g @anthropic-ai/claude-code`",
+            missing.display()
+        )),
+        None => Err("no encuentro Claude Code (`claude`): instálalo desde code.claude.com".into()),
+    }
 }
 
 /// Lo que se escribe en la pestaña del subagente: Claude Code interactivo, con su modelo y su prompt.
@@ -256,28 +231,6 @@ mod tests {
         let schema: serde_json::Value = serde_json::from_str(&schema()).unwrap();
         let models = &schema["properties"]["subtasks"]["items"]["properties"]["model"]["enum"];
         assert_eq!(models.as_array().unwrap().len(), MODELS.len());
-    }
-
-    #[test]
-    fn claude_is_found_in_the_first_folder_that_has_it() {
-        let base = std::env::temp_dir().join(format!("orion-claude-{}", std::process::id()));
-        let (a, b) = (base.join("a"), base.join("b"));
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-        std::fs::write(b.join("claude.cmd"), "").unwrap();
-        let dirs = [a.clone(), b.clone()];
-        assert_eq!(
-            find_in(&dirs, &["claude.exe", "claude.cmd"]),
-            Some(b.join("claude.cmd"))
-        );
-        // El primer nombre gana aunque esté en una carpeta posterior.
-        std::fs::write(b.join("claude.exe"), "").unwrap();
-        assert_eq!(
-            find_in(&dirs, &["claude.exe", "claude.cmd"]),
-            Some(b.join("claude.exe"))
-        );
-        assert_eq!(find_in(&[a], &["claude"]), None);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -130,7 +130,6 @@ fn check(path: PathBuf) -> Located {
 }
 
 /// Dónde está `base` y si sirve; `None` si no está instalado.
-#[allow(dead_code)] // ponytail: lo usan otros agentes; quitar al conectarlos
 pub(crate) fn locate(base: &str) -> Option<Located> {
     find_binary(base, &search_dirs()).map(check)
 }
