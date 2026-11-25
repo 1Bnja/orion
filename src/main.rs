@@ -17,6 +17,7 @@ mod blocks;
 mod colors;
 mod config;
 mod fonts;
+mod git_graph;
 mod grid;
 mod icon;
 mod input;
