@@ -5,7 +5,7 @@ use super::Orion;
 use super::chrome::{Icon, RADIUS, draw_icon, icon_button, medium};
 use super::menu::{self, SettingsMenu, color_table};
 use crate::backdrop::BACKDROPS;
-use crate::colors::{THEMES, surface, theme};
+use crate::colors::{THEMES, theme};
 use crate::config::{Settings, config_path};
 use crate::links::{Link, open};
 use crate::pty::{SHELLS, installed_shells};
@@ -167,12 +167,16 @@ impl Orion {
                     }) {
                         still_open = false;
                     }
-                    ui.ctx()
-                        .send_viewport_cmd(ViewportCommand::SetTheme(if theme().is_light() {
-                            egui::SystemTheme::Light
-                        } else {
-                            egui::SystemTheme::Dark
-                        }));
+                    let dark = !theme().is_light();
+                    if menu.theme_sent != Some(dark) {
+                        menu.theme_sent = Some(dark);
+                        ui.ctx()
+                            .send_viewport_cmd(ViewportCommand::SetTheme(if dark {
+                                egui::SystemTheme::Dark
+                            } else {
+                                egui::SystemTheme::Light
+                            }));
+                    }
 
                     let mut body = |ui: &mut egui::Ui| {
                         settings_title_bar(ui, &mut still_open);
@@ -222,7 +226,9 @@ impl Orion {
                         egui::CentralPanel::default()
                             .frame(
                                 egui::Frame::new()
-                                    .fill(surface(theme().sidebar()))
+                                    // Opaco: esta ventana no lleva Mica ni acrílico detrás, así que
+                                    // el alfa de `surface()` dejaría ver lo que haya debajo sin desenfocar.
+                                    .fill(theme().sidebar())
                                     .inner_margin(egui::Margin::symmetric(12, 8)),
                             )
                             .show(ui, body);
@@ -231,6 +237,9 @@ impl Orion {
             );
         }
         self.menu.open = still_open;
+        if !still_open {
+            self.menu.theme_sent = None; // la próxima ventana es nueva y hay que pedirle el tema
+        }
         if new != self.settings {
             self.change_settings(ctx, new);
         }
