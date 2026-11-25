@@ -105,7 +105,7 @@ fn parse(text: &str) -> Vec<Commit> {
 fn layout(commits: &[Commit]) -> Vec<Row> {
     // `lanes[j]` es el id del commit que el carril j está esperando (o None si está libre).
     let mut lanes: Vec<Option<String>> = Vec::new();
-    let mut rows = Vec::with_capacity(commits.len());
+    let mut rows: Vec<Row> = Vec::with_capacity(commits.len());
 
     for commit in commits {
         let before = lanes.clone();
@@ -131,6 +131,16 @@ fn layout(commits: &[Commit]) -> Vec<Row> {
         };
 
         // Los carriles duplicados quedan libres: convergen al carril elegido.
+        // La convergencia se dibuja en la fila anterior, que es la que baja hacia esta.
+        if expecting.len() > 1
+            && let Some(previous) = rows.last_mut()
+        {
+            for (_, to) in &mut previous.edges {
+                if *to != lane && expecting.contains(to) {
+                    *to = lane;
+                }
+            }
+        }
         for &j in &expecting {
             lanes[j] = None;
         }
@@ -179,12 +189,6 @@ fn layout(commits: &[Commit]) -> Vec<Row> {
         // El commit hacia cada padre.
         for &parent_lane in &parent_lanes {
             edges.push((lane, parent_lane));
-        }
-        // Los hijos duplicados que convergen al carril elegido.
-        for &other in &expecting {
-            if other != lane {
-                edges.push((other, lane));
-            }
         }
 
         rows.push(Row { lane, edges });
@@ -242,14 +246,16 @@ mod tests {
         assert!(rows[0].edges.contains(&(0, 0)));
         assert!(rows[0].edges.contains(&(0, 1)));
 
-        // La rama lateral ocupa el carril 1 y el principal sigue en el 0.
+        // La rama lateral ocupa el carril 1 y converge al 0 en su propia fila.
         assert_eq!(rows[1].lane, 0);
         assert_eq!(rows[2].lane, 1);
         assert!(rows[2].edges.contains(&(0, 0)));
+        assert!(rows[2].edges.contains(&(1, 0)));
 
-        // Al llegar a la raíz, el carril 1 converge al 0 y queda libre.
+        // La raíz recibe la convergencia y no tiene líneas propias.
         assert_eq!(rows[3].lane, 0);
-        assert!(rows[3].edges.contains(&(1, 0)));
+        assert!(rows[3].edges.is_empty());
+        assert!(rows.last().unwrap().edges.is_empty());
     }
 
     fn run(repo: &Path, args: &[&str]) {
@@ -272,14 +278,14 @@ mod tests {
         run(&repo, &["init", "-q"]);
         run(&repo, &["config", "user.name", "t"]);
         run(&repo, &["config", "user.email", "t@t"]);
-        add_commit(&repo, "a.txt", "base\n", "base");
+        add_commit(&repo, "raiz.txt", "raiz\n", "raiz");
         run(&repo, &["branch", "-M", "main"]);
 
-        // Una rama lateral que avanza en paralelo a main.
+        // Un segundo commit en main y, desde ahí, una rama lateral.
+        add_commit(&repo, "base.txt", "base\n", "base");
         run(&repo, &["checkout", "-q", "-b", "lateral"]);
         add_commit(&repo, "lateral.txt", "lado\n", "lateral");
         run(&repo, &["checkout", "-q", "main"]);
-        add_commit(&repo, "main.txt", "principal\n", "principal");
         run(&repo, &["merge", "--no-ff", "-q", "-m", "merge", "lateral"]);
 
         let graph = load(&repo, 100).unwrap();
@@ -296,22 +302,24 @@ mod tests {
         assert!(graph.rows[merge].edges.contains(&(0, 0)));
         assert!(graph.rows[merge].edges.contains(&(0, 1)));
 
-        // La rama lateral ocupa el carril 1.
+        // La rama lateral ocupa el carril 1 y converge al 0 en su propia fila.
         let lateral = graph
             .commits
             .iter()
             .position(|c| c.subject == "lateral")
             .unwrap();
         assert_eq!(graph.rows[lateral].lane, 1);
+        assert!(graph.rows[lateral].edges.contains(&(1, 0)));
 
-        // Al volver a unirse en la raíz, el carril 1 converge al 0 y se libera.
+        // La raíz recibe la convergencia y no tiene líneas propias.
         let root = graph
             .commits
             .iter()
             .position(|c| c.parents.is_empty())
             .unwrap();
         assert_eq!(graph.rows[root].lane, 0);
-        assert!(graph.rows[root].edges.contains(&(1, 0)));
+        assert!(graph.rows[root].edges.is_empty());
+        assert!(graph.rows.last().unwrap().edges.is_empty());
 
         let _ = std::fs::remove_dir_all(&base);
     }
