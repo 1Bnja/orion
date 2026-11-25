@@ -101,11 +101,7 @@ impl Orion {
                 Action::Split(false),
             ),
             ("Cerrar panel".into(), keys!("+Shift+W"), Action::ClosePane),
-            (
-                "Mostrar/ocultar barra lateral".into(),
-                keys!("+B"),
-                Action::ToggleSidebar,
-            ),
+            ("Barra lateral".into(), keys!("+B"), Action::ToggleSidebar),
             ("Configuración".into(), keys!("+,"), Action::OpenSettings),
             ("Agrandar letra".into(), "", Action::FontSize(1.0)),
             ("Achicar letra".into(), "", Action::FontSize(-1.0)),

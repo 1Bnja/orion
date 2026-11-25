@@ -23,6 +23,8 @@ macro_rules! keys {
     };
 }
 
+mod chrome;
+mod home;
 #[cfg(target_os = "macos")]
 mod macmenu;
 mod menu;
@@ -34,12 +36,13 @@ mod render;
 mod review;
 mod session;
 mod settings;
+mod sidebar;
 mod titlebar;
 
-use crate::colors::{opaque, surface, theme};
+use crate::colors::{surface, theme};
 use crate::config::{Settings, config_modified, reload_settings};
 use crate::fonts::{apply_font, is_font_file};
-use crate::pty::{Error, SHELLS, find_shell, installed_shells, usable_shell};
+use crate::pty::{Error, find_shell, usable_shell};
 use crate::update::{self, State as UpdateState, Updater};
 use alacritty_terminal::term::TermMode;
 use eframe::egui;
@@ -146,6 +149,8 @@ pub(crate) struct Orion {
     update_asked: bool,
     /// El ícono de Orion, para la barra de arriba.
     logo: egui::TextureHandle,
+    /// Fallback grid size when no tab is open yet (from the initial window estimate).
+    default_grid: (u16, u16),
     /// Mac: la barra de menú del sistema, con las opciones de Orion.
     #[cfg(target_os = "macos")]
     mac_menu: macmenu::MacMenu,
@@ -180,11 +185,17 @@ impl Perf {
     }
 }
 
+/// Space between the terminal panes and the window edges, and between two panes.
+const PANE_GAP: f32 = 8.0;
+/// Corner radius of a terminal pane.
+const PANE_RADIUS: f32 = 10.0;
+
 /// Cada cuánto se revisa si config.toml cambió.
 /// ponytail: se pregunta la fecha del archivo (stdlib); el crate `notify` avisaría al instante, sin preguntar.
 const CONFIG_POLL: Duration = Duration::from_secs(1);
 
 /// Algo que se pidió sobre las pestañas o los paneles en este frame.
+#[derive(Clone)]
 enum Action {
     /// Pestaña nueva con esa shell (índice en `pty::SHELLS`), o con la de config.toml.
     NewTab(Option<usize>),
@@ -310,50 +321,6 @@ fn folder_name(path: &std::path::Path) -> String {
     )
 }
 
-/// Encabezado de un grupo de la barra lateral; salvo el primero, lo separa una línea fina.
-fn group_header(
-    ui: &mut egui::Ui,
-    width: f32,
-    label: &str,
-    tip: Option<&std::path::Path>,
-    first: bool,
-) -> Option<egui::Response> {
-    if !first {
-        ui.add_space(4.0);
-        let (line, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
-        ui.painter().rect_filled(line, 0.0, theme().line());
-    }
-    let (rect, row) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::hover());
-    ui.painter().text(
-        rect.left_center() + egui::vec2(10.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        label,
-        egui::FontId::proportional(11.0),
-        theme().ansi[8],
-    );
-    // Los grupos de un repo llevan un "+" a la derecha: abre otro agente en ese repo.
-    let path = tip?;
-    let plus_rect = egui::Rect::from_center_size(
-        rect.right_center() - egui::vec2(14.0, 0.0),
-        egui::vec2(20.0, 20.0),
-    );
-    let plus = ui.interact(plus_rect, row.id.with("mas"), egui::Sense::click());
-    let color = if plus.hovered() {
-        theme().fg
-    } else {
-        theme().ansi[8]
-    };
-    ui.painter().text(
-        plus_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        "+",
-        egui::FontId::proportional(14.0),
-        color,
-    );
-    row.on_hover_text(path.display().to_string());
-    Some(plus.on_hover_text("Otro agente en este proyecto"))
-}
-
 impl Orion {
     /// Prepara la app cuando egui ya creó la ventana: la fuente y la primera pestaña.
     pub(crate) fn new(
@@ -363,9 +330,11 @@ impl Orion {
     ) -> Result<Self, Error> {
         apply_font(&cc.egui_ctx, &settings.font.family);
         menu::apply_theme(&cc.egui_ctx, &settings);
-        let first = Session::new(&cc.egui_ctx, grid, default_shell(&settings))?;
+        // Real OS windows for child viewports (settings), not popups trapped in the terminal.
+        cc.egui_ctx.set_embed_viewports(false);
         let orion = Self {
-            tabs: vec![Tab::new(first)],
+            // Start on the empty home; the first terminal opens from a shortcut or the sidebar.
+            tabs: Vec::new(),
             active: 0,
             settings,
             menu: SettingsMenu::default(),
@@ -389,6 +358,7 @@ impl Orion {
                 egui::ColorImage::from_rgba_unmultiplied([64, 64], &crate::icon::render(64)),
                 egui::TextureOptions::LINEAR,
             ),
+            default_grid: grid,
             #[cfg(target_os = "macos")]
             mac_menu: macmenu::MacMenu::install(&cc.egui_ctx),
         };
@@ -409,6 +379,9 @@ impl Orion {
     /// La pestaña `by` lugares después de la activa, en el orden de la barra (con vuelta).
     fn tab_step(&self, by: isize) -> usize {
         let order = self.tab_order();
+        if order.is_empty() {
+            return 0;
+        }
         let at = order.iter().position(|&i| i == self.active).unwrap_or(0) as isize;
         order[(at + by).rem_euclid(order.len() as isize) as usize]
     }
@@ -467,7 +440,11 @@ impl Orion {
     /// Abre una pestaña nueva del mismo tamaño que la actual, y la deja activa.
     /// `kind`: qué shell (índice en `pty::SHELLS`); None = la de config.toml.
     fn new_tab(&mut self, ctx: &egui::Context, kind: Option<usize>) {
-        let grid = self.session().grid;
+        let grid = self
+            .tabs
+            .get(self.active)
+            .map(|t| t.focused().grid)
+            .unwrap_or(self.default_grid);
         let kind = kind.unwrap_or_else(|| default_shell(&self.settings));
         match Session::new(ctx, grid, kind) {
             Ok(session) => {
@@ -483,7 +460,10 @@ impl Orion {
         let Some(agent) = self.settings.agents.get(index).cloned() else {
             return;
         };
-        let cwd = self.session().cwd.clone();
+        let cwd = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.focused().cwd.clone());
         self.launch_agent(ctx, cwd, &agent.name, agent.worktree, |_| {
             agent.command.clone()
         });
@@ -494,7 +474,10 @@ impl Orion {
         let Some(provider) = crate::agents::PROVIDERS.get(index) else {
             return;
         };
-        let cwd = self.session().cwd.clone();
+        let cwd = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.focused().cwd.clone());
         self.launch_agent(ctx, cwd, provider.name, false, |_| {
             provider.command.to_string()
         });
@@ -689,7 +672,7 @@ impl Orion {
         self.show_toast(format!("Worktrees limpiados: {removed}{kept}"));
     }
 
-    /// Cierra una pestaña (y las shells de todos sus paneles). Si era la última, se cierra la ventana.
+    /// Cierra una pestaña (y las shells de todos sus paneles). Si era la última, queda el inicio vacío.
     fn close_tab(&mut self, ctx: &egui::Context, index: usize) {
         let mut tab = self.tabs.remove(index);
         for session in tab.panes.leaves_mut() {
@@ -712,7 +695,11 @@ impl Orion {
             }
         }
         if self.tabs.is_empty() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.active = 0;
+            if self.window_title != "Orion" {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title("Orion".into()));
+                self.window_title = "Orion".into();
+            }
             return;
         }
         self.active = active_after_close(self.active, index, self.tabs.len());
@@ -806,393 +793,6 @@ impl Orion {
         }
     }
 
-    /// Barra lateral de pestañas:
-    /// "+ Nueva pestaña" arriba y una fila por pestaña con un punto de estado y el nombre de la carpeta.
-    /// Se puede ensanchar o angostar arrastrando su borde.
-    fn tab_sidebar(&self, ui: &mut egui::Ui) -> Option<Action> {
-        // Oculta: el panel no se dibuja y la terminal ocupa todo el ancho.
-        if self.sidebar_hidden {
-            return None;
-        }
-        let mut action = None;
-        let frame = egui::Frame::new()
-            .fill(surface(theme().sidebar()))
-            .inner_margin(egui::Margin::symmetric(6, 8));
-        let panel = egui::Panel::left("pestañas")
-            .resizable(true)
-            .default_size(190.0)
-            .min_size(120.0)
-            .max_size(360.0)
-            // Monocromo (Vercel): una línea fina separa la barra de la terminal.
-            .show_separator_line(theme().mono)
-            .frame(frame);
-        panel.show(ui, |ui| {
-            let width = ui.available_width();
-            let font = egui::FontId::proportional(13.0);
-
-            // Fila "+ Nueva pestaña".
-            let (rect, new) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::click());
-            if new.hovered() {
-                ui.painter().rect_filled(rect, 6.0, theme().bg);
-            }
-            let color = if new.hovered() {
-                theme().fg
-            } else {
-                theme().ansi[8]
-            };
-            let text_pos = rect.left_center() + egui::vec2(10.0, 0.0);
-            ui.painter().text(
-                text_pos,
-                egui::Align2::LEFT_CENTER,
-                "+  Nueva pestaña",
-                font.clone(),
-                color,
-            );
-            // Clic = terminal nueva. El menú (proyecto, otra shell, agente) abre con ▾ o clic derecho.
-            let more_rect = egui::Rect::from_center_size(
-                rect.right_center() - egui::vec2(14.0, 0.0),
-                egui::vec2(20.0, 20.0),
-            );
-            let more = ui.interact(more_rect, new.id.with("menu"), egui::Sense::click());
-            let more_color = if more.hovered() {
-                theme().fg
-            } else {
-                theme().ansi[8]
-            };
-            ui.painter().text(
-                more_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "▾",
-                font.clone(),
-                more_color,
-            );
-            if new.clicked() {
-                action = Some(Action::NewTab(None));
-            }
-            let open = if new.secondary_clicked() {
-                Some(egui::SetOpenCommand::Bool(true))
-            } else if more.clicked() {
-                Some(egui::SetOpenCommand::Toggle)
-            } else {
-                None
-            };
-            let providers = self.providers();
-            let broken = self.broken_providers();
-            egui::Popup::menu(&new).open_memory(open).show(|ui| {
-                ui.weak("Proyecto");
-                if ui
-                    .button("Nuevo proyecto (repo + agente)…")
-                    .on_hover_text("Elige un repo y un agente; con worktree, cada uno en su rama.")
-                    .clicked()
-                {
-                    action = Some(Action::NewProject);
-                    ui.close();
-                }
-                ui.separator();
-                ui.weak("Terminal");
-                let default = default_shell(&self.settings);
-                if ui
-                    .button(format!("Terminal ({})", SHELLS[default].name))
-                    .clicked()
-                {
-                    action = Some(Action::NewTab(None));
-                    ui.close();
-                }
-                for &i in installed_shells() {
-                    if i != default && ui.button(format!("Terminal: {}", SHELLS[i].name)).clicked()
-                    {
-                        action = Some(Action::NewTab(Some(i)));
-                        ui.close();
-                    }
-                }
-                if !providers.is_empty() || !broken.is_empty() || !self.settings.agents.is_empty() {
-                    ui.separator();
-                    ui.weak("Agente en esta carpeta");
-                }
-                for &i in &providers {
-                    let provider = &crate::agents::PROVIDERS[i];
-                    let button = ui.button(format!("Agente: {}", provider.name));
-                    if button.on_hover_text(provider.about).clicked() {
-                        action = Some(Action::Provider(i));
-                        ui.close();
-                    }
-                }
-                for (i, missing) in &broken {
-                    let provider = &crate::agents::PROVIDERS[*i];
-                    ui.add_enabled(
-                        false,
-                        egui::Button::new(format!("Agente: {} (roto)", provider.name)),
-                    )
-                    .on_disabled_hover_text(format!(
-                        "Instalación rota: falta {}. Reinstálalo ({})",
-                        missing.display(),
-                        provider.about
-                    ));
-                }
-                for (i, agent) in self.settings.agents.iter().enumerate() {
-                    if ui.button(format!("Agente: {}", agent.name)).clicked() {
-                        action = Some(Action::Agent(i));
-                        ui.close();
-                    }
-                }
-            });
-            let tip = keys!(
-                "",
-                "+Shift+T",
-                "\n▾ o clic derecho: proyecto, shell o agente"
-            );
-            new.on_hover_text(tip);
-            ui.add_space(6.0);
-
-            // Pestañas agrupadas por repo: los repos en el orden en que aparecen y, al final,
-            // las terminales sueltas. Sin ningún repo abierto la lista queda plana, como siempre.
-            let has_repos = self.tabs.iter().any(|t| t.repo.is_some());
-            let order = self.tab_order();
-            let choices = self.agent_choices();
-            let mut shown: Option<Option<&PathBuf>> = None;
-            for i in order {
-                let tab = &self.tabs[i];
-                if has_repos && shown != Some(tab.repo.as_ref()) {
-                    let label = tab.repo.as_deref().map_or("Terminales".into(), folder_name);
-                    let plus =
-                        group_header(ui, width, &label, tab.repo.as_deref(), shown.is_none());
-                    if let Some(plus) = plus {
-                        egui::Popup::menu(&plus).show(|ui| {
-                            for (worktree, title) in [
-                                (true, format!("Nueva rama en {label}")),
-                                (false, "En la carpeta del repo".to_string()),
-                            ] {
-                                ui.weak(title);
-                                for &choice in &choices {
-                                    let name = choice.name(&self.settings);
-                                    if ui.button(name).clicked() {
-                                        action = Some(Action::InProject(i, choice, worktree));
-                                        ui.close();
-                                    }
-                                }
-                                if choices.is_empty() {
-                                    ui.weak("No hay agentes");
-                                }
-                                ui.separator();
-                            }
-                            if ui.button("Terminal en la carpeta del repo").clicked() {
-                                action = Some(Action::TerminalIn(i));
-                                ui.close();
-                            }
-                        });
-                    }
-                    shown = Some(tab.repo.as_ref());
-                }
-                // Con splits, la fila muestra el panel con foco.
-                let session = tab.focused();
-                let (rect, row) =
-                    ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
-                let active = i == self.active;
-                let painter = ui.painter();
-                if active {
-                    // La activa: fondo como el de la terminal y una línea del acento a la izquierda.
-                    painter.rect_filled(rect, 6.0, theme().bg);
-                    let accent = egui::Rect::from_min_size(
-                        rect.min + egui::vec2(0.0, 7.0),
-                        egui::vec2(3.0, 16.0),
-                    );
-                    painter.rect_filled(accent, 1.5, theme().accent());
-                } else if row.hovered() {
-                    painter.rect_filled(rect, 6.0, theme().hover());
-                }
-
-                // Punto de estado: cómo terminó el último comando (o amarillo si algo corre).
-                // Si un panel de la pestaña pide atención, el punto es azul y late.
-                let center = rect.left_center() + egui::vec2(14.0, 0.0);
-                let alert = tab
-                    .panes
-                    .leaves()
-                    .into_iter()
-                    .find_map(|s| s.attention.clone());
-                if alert.is_some() {
-                    let t = ui.input(|i| i.time) as f32;
-                    let pulse = (t * 4.0).sin() * 0.5 + 0.5; // de 0 a 1 y vuelta
-                    let ring = theme().accent().gamma_multiply(0.35 * (1.0 - pulse));
-                    painter.circle_filled(center, 4.0 + 4.0 * pulse, ring);
-                    painter.circle_filled(center, 4.0, theme().accent());
-                    ui.ctx()
-                        .request_repaint_after(std::time::Duration::from_millis(50));
-                } else {
-                    let dot = session
-                        .activity()
-                        .map_or(theme().ansi[8], render::status_color);
-                    painter.circle_filled(center, 3.5, dot);
-                }
-
-                // × a la derecha, solo al pasar el mouse por la fila.
-                let close_rect = egui::Rect::from_center_size(
-                    rect.right_center() - egui::vec2(14.0, 0.0),
-                    egui::vec2(20.0, 20.0),
-                );
-                let close = ui.interact(close_rect, row.id.with("cerrar"), egui::Sense::click());
-
-                // Nombre de la carpeta, recortado para que no pise la ×.
-                let color = if active { theme().fg } else { theme().ansi[7] };
-                let title_rect = egui::Rect::from_min_max(
-                    rect.min + egui::vec2(26.0, 0.0),
-                    egui::pos2(close_rect.min.x - 4.0, rect.max.y),
-                );
-                let galley = ui.painter().layout_no_wrap(
-                    tab_label(tab.agent.as_deref(), &session.title()),
-                    font.clone(),
-                    color,
-                );
-                ui.painter().with_clip_rect(title_rect).galley(
-                    title_rect.left_center() - egui::vec2(0.0, galley.size().y / 2.0),
-                    galley,
-                    color,
-                );
-
-                if row.hovered() || close.hovered() {
-                    let x_color = if close.hovered() {
-                        theme().fg
-                    } else {
-                        theme().ansi[8]
-                    };
-                    ui.painter().text(
-                        close_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "×",
-                        font.clone(),
-                        x_color,
-                    );
-                }
-                if close.on_hover_text("Cerrar pestaña").clicked() {
-                    action = Some(Action::CloseTab(i));
-                }
-                let mut tip = match session.last_command() {
-                    Some(command) => {
-                        format!("Último comando: {command}\nClic del medio para cerrar")
-                    }
-                    None => "Clic del medio para cerrar".into(),
-                };
-                if let Some(alert) = &alert {
-                    tip = format!("🔔 {alert}\n{tip}");
-                }
-                let row = row.on_hover_text(tip);
-                // Clic derecho en una pestaña con worktree: ver, fusionar o descartar lo del agente.
-                if let (Some(_), Some(repo)) = (&tab.worktree, &tab.repo) {
-                    row.context_menu(|ui| {
-                        if ui.button("Ver cambios").clicked() {
-                            action = Some(Action::Review(i));
-                            ui.close();
-                        }
-                        // ponytail: git en el hilo de la ventana, solo mientras el menú está abierto.
-                        let into =
-                            crate::agents::current_branch(repo).unwrap_or_else(|_| "?".into());
-                        if ui.button(format!("Fusionar en {into}")).clicked() {
-                            action = Some(Action::Merge(i));
-                            ui.close();
-                        }
-                        if ui.button("Descartar rama…").clicked() {
-                            action = Some(Action::Review(i));
-                            ui.close();
-                        }
-                    });
-                }
-                if row.clicked() {
-                    action = Some(Action::SelectTab(i));
-                }
-                if row.middle_clicked() {
-                    action = Some(Action::CloseTab(i));
-                }
-                ui.add_space(2.0);
-            }
-
-            // Proyectos guardados que no tienen pestaña abierta: un clic los reabre.
-            let closed: Vec<usize> = (0..self.saved.len())
-                .filter(|&i| !self.repo_busy(&self.saved[i].dir))
-                .collect();
-            if !closed.is_empty() {
-                group_header(ui, width, "Guardados", None, self.tabs.is_empty());
-            }
-            for i in closed {
-                let saved = &self.saved[i];
-                let (rect, row) =
-                    ui.allocate_exact_size(egui::vec2(width, 26.0), egui::Sense::click());
-                if row.hovered() {
-                    ui.painter().rect_filled(rect, 6.0, theme().hover());
-                }
-                let close_rect = egui::Rect::from_center_size(
-                    rect.right_center() - egui::vec2(14.0, 0.0),
-                    egui::vec2(20.0, 20.0),
-                );
-                let close = ui.interact(close_rect, row.id.with("olvidar"), egui::Sense::click());
-                let title_rect = egui::Rect::from_min_max(
-                    rect.min + egui::vec2(10.0, 0.0),
-                    egui::pos2(close_rect.min.x - 4.0, rect.max.y),
-                );
-                let text = format!("{}  ·  {}", folder_name(&saved.dir), saved.agent);
-                let color = theme().ansi[7];
-                let galley = ui.painter().layout_no_wrap(text, font.clone(), color);
-                ui.painter().with_clip_rect(title_rect).galley(
-                    title_rect.left_center() - egui::vec2(0.0, galley.size().y / 2.0),
-                    galley,
-                    color,
-                );
-                if row.hovered() || close.hovered() {
-                    let x_color = if close.hovered() {
-                        theme().fg
-                    } else {
-                        theme().ansi[8]
-                    };
-                    ui.painter().text(
-                        close_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "×",
-                        font.clone(),
-                        x_color,
-                    );
-                }
-                if close.on_hover_text("Quitar de los guardados").clicked() {
-                    action = Some(Action::ForgetSaved(i));
-                }
-                if row.on_hover_text(saved.dir.display().to_string()).clicked() {
-                    action = Some(Action::OpenSaved(i));
-                }
-                ui.add_space(2.0);
-            }
-
-            // Abajo de todo: el aviso de actualización, si hay una.
-            let (text, next) = match self.updater.state() {
-                UpdateState::Available(v) => (
-                    format!("↑  Actualizar a {v}"),
-                    Some(Action::InstallUpdate(v)),
-                ),
-                UpdateState::Installing(v) => (format!("Descargando {v}…"), None),
-                UpdateState::Ready => ("↻  Reiniciar Orion".into(), Some(Action::RestartForUpdate)),
-                _ => return,
-            };
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                let (rect, row) =
-                    ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::CLICK);
-                if row.hovered() && next.is_some() {
-                    ui.painter().rect_filled(rect, 6.0, theme().hover());
-                }
-                let pos = rect.left_center() + egui::vec2(10.0, 0.0);
-                let color = theme().ansi[2];
-                ui.painter()
-                    .text(pos, egui::Align2::LEFT_CENTER, text, font.clone(), color);
-                let tip = match next {
-                    Some(Action::RestartForUpdate) => {
-                        "Se cierran las pestañas y Orion abre la versión nueva"
-                    }
-                    Some(_) => "Descarga la versión nueva, la verifica y la deja lista",
-                    None => "Puedes seguir usando Orion mientras tanto",
-                };
-                if row.on_hover_text(tip).clicked() {
-                    action = next;
-                }
-            });
-        });
-        action
-    }
-
     /// Atajos de pestañas y paneles. Se "consumen": así no llegan a la shell.
     /// `COMMAND` es Ctrl en Windows y Cmd en Mac.
     fn shortcuts(&self, ui: &mut egui::Ui) -> Option<Action> {
@@ -1272,6 +872,32 @@ impl Orion {
     }
 
     fn apply_action(&mut self, ctx: &egui::Context, action: Action) {
+        // Home (no tabs): only actions that open something or tweak the chrome.
+        if self.tabs.is_empty()
+            && !matches!(
+                action,
+                Action::NewTab(_)
+                    | Action::Agent(_)
+                    | Action::Provider(_)
+                    | Action::Orchestrate
+                    | Action::NewProject
+                    | Action::OpenSaved(_)
+                    | Action::ForgetSaved(_)
+                    | Action::Palette
+                    | Action::ToggleSidebar
+                    | Action::OpenSettings
+                    | Action::FontSize(_)
+                    | Action::Theme(_)
+                    | Action::TogglePerf
+                    | Action::Backdrop(_)
+                    | Action::CheckUpdates
+                    | Action::InstallUpdate(_)
+                    | Action::RestartForUpdate
+                    | Action::CleanWorktrees
+            )
+        {
+            return;
+        }
         match action {
             Action::NewTab(kind) => self.new_tab(ctx, kind),
             Action::Agent(i) => self.open_agent(ctx, i),
@@ -1425,14 +1051,20 @@ impl Orion {
         let ctx = ui.ctx().clone();
         // Con el menú o la paleta abiertos, la rueda y el mouse son para ellos.
         let menu_open = self.menu.open || self.palette.open || self.orchestrate.open;
+        // The panes float inside the frame: a gap on the right, below and between them. The
+        // title bar and the sidebar already frame the other two sides.
+        let left = if self.sidebar_hidden { PANE_GAP } else { 0.0 };
+        let inner = egui::Rect::from_min_max(
+            area.min + egui::vec2(left, 0.0),
+            area.max - egui::Vec2::splat(PANE_GAP),
+        );
         let tab = &mut self.tabs[self.active];
-        // Entre panel y panel queda una línea de 2 px del color de la barra lateral.
-        // Con Mica o acrílico no: los paneles semitransparentes se oscurecerían de más al pintarse encima.
-        if opaque() {
-            ui.painter().rect_filled(area, 0.0, theme().sidebar());
-        }
         tab.rects.clear();
-        tab.panes.layout(area, 2.0, &mut tab.rects);
+        tab.panes.layout(inner, PANE_GAP, &mut tab.rects);
+        // The frame goes one pixel under each pane, so no seam shows between them.
+        let holes = tab.rects.iter().map(|(_, rect)| rect.shrink(1.0));
+        let frame = surface(theme().sidebar());
+        chrome::paint_around(ui.painter(), area, holes, PANE_RADIUS - 1.0, frame);
 
         // Clic en un panel: pasa a tener el foco (si el clic no fue en un menú o ventana de encima).
         let press = ui.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()));
@@ -1455,15 +1087,20 @@ impl Orion {
             open_menu |= session.draw(&mut pane_ui, &self.settings.font, menu_open, active);
             if several && !active {
                 // Los paneles sin foco, un poco más oscuros: se ve dónde vas a escribir.
-                let dim = egui::Color32::from_black_alpha(60);
-                ui.painter().rect_filled(rect, 0.0, dim);
+                let dim = egui::Color32::from_black_alpha(if theme().is_light() { 16 } else { 60 });
+                ui.painter().rect_filled(rect, PANE_RADIUS, dim);
             }
-            if session.attention.is_some() {
-                // Un panel de al lado pide atención: borde del acento.
-                let stroke = egui::Stroke::new(2.0, theme().accent());
-                ui.painter()
-                    .rect_stroke(rect.shrink(1.0), 4.0, stroke, egui::StrokeKind::Inside);
-            }
+            // A thin border. It takes the accent on the pane that asks for attention and,
+            // with several panes, a softer accent on the one that has the focus.
+            let stroke = if session.attention.is_some() {
+                egui::Stroke::new(2.0, theme().accent())
+            } else if several && active {
+                egui::Stroke::new(1.0, theme().accent().gamma_multiply(0.6))
+            } else {
+                egui::Stroke::new(1.0, theme().line())
+            };
+            ui.painter()
+                .rect_stroke(rect, PANE_RADIUS, stroke, egui::StrokeKind::Inside);
             if let Some(right) = session.split_request.take() {
                 tab.focus = id;
                 split = Some(right);
@@ -1502,9 +1139,24 @@ impl eframe::App for Orion {
 
     // logic corre antes de cada ui y también con la ventana oculta: así ningún canal se acumula.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Se cerró la última pestaña y la ventana se está cerrando: este cuadro no tiene nada que hacer
-        // (sin esto, el título de abajo buscaba la pestaña activa, que ya no existe, y Orion se caía).
         if self.tabs.is_empty() {
+            self.watch_config(ctx);
+            match self.updater.state() {
+                UpdateState::UpToDate if self.update_asked => {
+                    self.show_toast(format!("Orion está al día ({})", update::CURRENT));
+                    self.update_asked = false;
+                }
+                UpdateState::CheckFailed(e) if self.update_asked => {
+                    self.show_toast(format!("Actualización: {e}"));
+                    self.update_asked = false;
+                    self.updater.dismiss();
+                }
+                UpdateState::Failed(e) => {
+                    self.show_toast(format!("Actualización: {e}"));
+                    self.updater.dismiss();
+                }
+                _ => {}
+            }
             return;
         }
         // Todos los paneles de todas las pestañas: los de atrás siguen recibiendo su salida.
@@ -1569,19 +1221,19 @@ impl eframe::App for Orion {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if self.tabs.is_empty() {
-            return; // la ventana se está cerrando
-        }
         let ctx = ui.ctx().clone();
+        let empty = self.tabs.is_empty();
 
         // Si la app lo pidió (ESC[?1004h, ej. vim), avisarle cuando la ventana gana o pierde el foco.
         let focused = ui.input(|i| i.focused);
-        if focused != self.focused {
+        if !empty && focused != self.focused {
             self.focused = focused;
             let session = self.session();
             if session.term.mode().contains(TermMode::FOCUS_IN_OUT) {
                 session.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
             }
+        } else {
+            self.focused = focused;
         }
 
         // Archivos arrastrados: las fuentes se instalan; el resto se escribe como rutas, como un pegado.
@@ -1595,7 +1247,7 @@ impl eframe::App for Orion {
         for path in fonts {
             self.font_dropped(&ctx, &path);
         }
-        if !others.is_empty() {
+        if !empty && !others.is_empty() {
             let session = self.session();
             let shell = &crate::pty::SHELLS[session.kind];
             let paths: Vec<String> = others
@@ -1619,10 +1271,8 @@ impl eframe::App for Orion {
         let (menu_bar, menu_toggle) = self.menu_bar(&ctx);
         if let Some(action) = menu_bar.or(self.tab_sidebar(ui)).or(bar).or(shortcut) {
             self.apply_action(&ctx, action);
-            if self.tabs.is_empty() {
-                return;
-            }
         }
+        let empty = self.tabs.is_empty();
 
         // Ctrl+, (Cmd+, en Mac) abre o cierra la configuración; Escape la cierra.
         let (toggle, escape) = ui.input(|i| {
@@ -1634,13 +1284,22 @@ impl eframe::App for Orion {
             self.open_menu();
         } else if self.menu.open && (toggle || escape) {
             self.menu.open = false;
-        } else if !self.menu.open && !self.palette.open && !self.orchestrate.open && !toggle {
+        } else if !empty
+            && !self.menu.open
+            && !self.palette.open
+            && !self.orchestrate.open
+            && !toggle
+        {
             self.session().send_input(ui);
         }
         // Con el menú, la paleta o el orquestador abiertos, el teclado es para ellos, no para la shell.
 
         let area = ui.available_rect_before_wrap();
-        if self.draw_panes(ui, area) {
+        if empty {
+            if let Some(action) = self.draw_home(ui, area) {
+                self.apply_action(&ctx, action);
+            }
+        } else if self.draw_panes(ui, area) {
             self.open_menu();
         }
         if let Some(toast) = &self.toast {

@@ -1,8 +1,9 @@
 //! Configuración del usuario: leer y guardar %APPDATA%\orion\config.toml.
 
 use crate::backdrop::{BACKDROPS, find_backdrop};
-use crate::colors::{Overrides, THEMES, find_theme, parse_hex};
+use crate::colors::{Overrides, THEMES, Theme, find_theme, parse_hex, to_hex};
 use crate::pty::{SHELLS, find_shell};
+use eframe::egui::Color32;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -53,6 +54,13 @@ pub(crate) fn config_text(settings: &Settings) -> String {
     let backdrops: Vec<&str> = BACKDROPS.iter().map(|b| b.0).collect();
     let backdrops = backdrops.join(", ");
     let check_updates = settings.check_updates;
+    let mut themes_extra = String::new();
+    for t in &settings.custom_themes {
+        themes_extra += &t.to_toml();
+    }
+    if themes_extra.is_empty() {
+        themes_extra = "\n# Temas propios (Apariencia → Guardar como tema).\n# [[custom_theme]]\n# name = \"Mio\"\n# fg = \"#DCE3EE\"\n# bg = \"#121821\"\n# selection = \"#263A5C\"\n".into();
+    }
     let mut agents = String::new();
     for agent in &settings.agents {
         let name = toml::Value::String(agent.name.clone());
@@ -128,7 +136,7 @@ line_height = {:.2}
 "#,
         settings.font.size, settings.font.line_height
     );
-    text + &agents + &executors
+    text + &themes_extra + &agents + &executors
 }
 
 /// Guarda la configuración en config.toml (creando la carpeta si hace falta).
@@ -152,12 +160,174 @@ pub(crate) struct Settings {
     /// Cambios de color de la interfaz ([colors]); lo que falte usa el tema.
     pub(crate) colors: ColorSettings,
     pub(crate) font: FontSettings,
+    /// Temas propios ([[custom_theme]] en el archivo).
+    #[serde(rename = "custom_theme", default)]
+    pub(crate) custom_themes: Vec<SavedTheme>,
     /// Perfiles de agente ([[agent]] en el archivo).
     #[serde(rename = "agent")]
     pub(crate) agents: Vec<Agent>,
     /// Ejecutores extra del orquestador ([[executor]] en el archivo).
     #[serde(rename = "executor")]
     pub(crate) executors: Vec<Executor>,
+}
+
+/// Un tema guardado por el usuario: colores completos, no solo overrides.
+#[derive(serde::Deserialize, Clone, PartialEq, Debug)]
+pub(crate) struct SavedTheme {
+    pub(crate) name: String,
+    pub(crate) fg: String,
+    pub(crate) bg: String,
+    pub(crate) selection: String,
+    #[serde(default)]
+    pub(crate) mono: bool,
+    pub(crate) cursor: Option<String>,
+    pub(crate) sidebar: Option<String>,
+    pub(crate) accent: Option<String>,
+    pub(crate) line: Option<String>,
+    pub(crate) hover: Option<String>,
+    pub(crate) ansi0: String,
+    pub(crate) ansi1: String,
+    pub(crate) ansi2: String,
+    pub(crate) ansi3: String,
+    pub(crate) ansi4: String,
+    pub(crate) ansi5: String,
+    pub(crate) ansi6: String,
+    pub(crate) ansi7: String,
+    pub(crate) ansi8: String,
+    pub(crate) ansi9: String,
+    pub(crate) ansi10: String,
+    pub(crate) ansi11: String,
+    pub(crate) ansi12: String,
+    pub(crate) ansi13: String,
+    pub(crate) ansi14: String,
+    pub(crate) ansi15: String,
+}
+
+impl SavedTheme {
+    /// Snapshot of the resolved theme under a new name.
+    pub(crate) fn from_resolved(name: String, theme: &Theme) -> Self {
+        let ansi = |i: usize| to_hex(theme.ansi[i]);
+        Self {
+            name,
+            fg: to_hex(theme.fg),
+            bg: to_hex(theme.bg),
+            selection: to_hex(theme.selection),
+            mono: theme.mono,
+            cursor: Some(to_hex(theme.cursor())),
+            sidebar: Some(to_hex(theme.sidebar())),
+            accent: Some(to_hex(theme.accent())),
+            line: Some(to_hex(theme.line())),
+            hover: Some(to_hex(theme.hover())),
+            ansi0: ansi(0),
+            ansi1: ansi(1),
+            ansi2: ansi(2),
+            ansi3: ansi(3),
+            ansi4: ansi(4),
+            ansi5: ansi(5),
+            ansi6: ansi(6),
+            ansi7: ansi(7),
+            ansi8: ansi(8),
+            ansi9: ansi(9),
+            ansi10: ansi(10),
+            ansi11: ansi(11),
+            ansi12: ansi(12),
+            ansi13: ansi(13),
+            ansi14: ansi(14),
+            ansi15: ansi(15),
+        }
+    }
+
+    fn ansi_hex(&self) -> [&str; 16] {
+        [
+            &self.ansi0,
+            &self.ansi1,
+            &self.ansi2,
+            &self.ansi3,
+            &self.ansi4,
+            &self.ansi5,
+            &self.ansi6,
+            &self.ansi7,
+            &self.ansi8,
+            &self.ansi9,
+            &self.ansi10,
+            &self.ansi11,
+            &self.ansi12,
+            &self.ansi13,
+            &self.ansi14,
+            &self.ansi15,
+        ]
+    }
+
+    /// Parses into a runtime Theme. `name` should already be `'static` (leak once when applying).
+    pub(crate) fn as_theme(&self, name: &'static str) -> Option<Theme> {
+        let mut ansi = [Color32::BLACK; 16];
+        for (slot, hex) in ansi.iter_mut().zip(self.ansi_hex()) {
+            *slot = parse_hex(hex)?;
+        }
+        Some(Theme {
+            name,
+            fg: parse_hex(&self.fg)?,
+            bg: parse_hex(&self.bg)?,
+            selection: parse_hex(&self.selection)?,
+            ansi,
+            mono: self.mono,
+            cursor: self.cursor.as_deref().and_then(parse_hex),
+            derived: crate::colors::Derived {
+                sidebar: self.sidebar.as_deref().and_then(parse_hex),
+                accent: self.accent.as_deref().and_then(parse_hex),
+                line: self.line.as_deref().and_then(parse_hex),
+                hover: self.hover.as_deref().and_then(parse_hex),
+            },
+        })
+    }
+
+    fn to_toml(&self) -> String {
+        let name = toml::Value::String(self.name.clone());
+        let opt = |key: &str, value: &Option<String>| {
+            value
+                .as_ref()
+                .filter(|v| parse_hex(v).is_some())
+                .map(|v| format!("{key} = {}\n", toml::Value::String(v.clone())))
+                .unwrap_or_default()
+        };
+        let mut body = format!(
+            "\n[[custom_theme]]\nname = {name}\nfg = {}\nbg = {}\nselection = {}\nmono = {}\n",
+            toml::Value::String(self.fg.clone()),
+            toml::Value::String(self.bg.clone()),
+            toml::Value::String(self.selection.clone()),
+            self.mono,
+        );
+        body += &opt("cursor", &self.cursor);
+        body += &opt("sidebar", &self.sidebar);
+        body += &opt("accent", &self.accent);
+        body += &opt("line", &self.line);
+        body += &opt("hover", &self.hover);
+        for (i, hex) in self.ansi_hex().into_iter().enumerate() {
+            body += &format!("ansi{i} = {}\n", toml::Value::String(hex.to_string()));
+        }
+        body
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("theme.name vacío".into());
+        }
+        for (key, value) in [
+            ("fg", self.fg.as_str()),
+            ("bg", self.bg.as_str()),
+            ("selection", self.selection.as_str()),
+        ] {
+            if parse_hex(value).is_none() {
+                return Err(format!("theme.{}: '{value}' no es #RRGGBB", key));
+            }
+        }
+        for (i, hex) in self.ansi_hex().into_iter().enumerate() {
+            if parse_hex(hex).is_none() {
+                return Err(format!("theme.ansi{i}: '{hex}' no es #RRGGBB"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Algo que ejecuta subtareas del orquestador, además de los modelos de Claude.
@@ -190,6 +360,7 @@ impl Default for Settings {
             check_updates: true,
             colors: ColorSettings::default(),
             font: FontSettings::default(),
+            custom_themes: Vec::new(),
             agents: Vec::new(),
             executors: Vec::new(),
         }
@@ -375,10 +546,21 @@ pub(crate) fn parse_settings(text: &str) -> Result<Settings, String> {
     settings.font.size = settings.font.size.clamp(6.0, 72.0);
     settings.font.line_height = settings.font.line_height.clamp(1.0, 3.0);
     settings.colors.validate()?;
+    for custom in &settings.custom_themes {
+        custom.validate()?;
+    }
     // El nombre queda escrito como en la lista ("dracula" → "Dracula").
-    let theme = find_theme(&settings.theme)
-        .ok_or_else(|| format!("no hay un tema \"{}\"", settings.theme))?;
-    settings.theme = THEMES[theme].name.into();
+    if let Some(i) = find_theme(&settings.theme) {
+        settings.theme = THEMES[i].name.into();
+    } else if let Some(custom) = settings
+        .custom_themes
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case(settings.theme.trim()))
+    {
+        settings.theme = custom.name.clone();
+    } else {
+        return Err(format!("no hay un tema \"{}\"", settings.theme));
+    }
     let shell = find_shell(&settings.shell)
         .ok_or_else(|| format!("no conozco la shell \"{}\"", settings.shell))?;
     settings.shell = SHELLS[shell].name.into();
