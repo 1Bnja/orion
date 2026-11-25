@@ -147,6 +147,8 @@ impl Orion {
         let (mut plan_now, mut launch, mut back, mut forget) = (false, false, false, false);
         // Elegiste otro ejecutor para una subtarea: (índice, id).
         let mut pick: Option<(usize, String)> = None;
+        // Diste por terminada a mano la subtarea con ese índice.
+        let mut finish: Option<usize> = None;
         let mut open = !escape;
         let model = |s: &Subtask| {
             egui::RichText::new(short_name(&s.executor))
@@ -176,6 +178,18 @@ impl Orion {
                                 _ => ui.visuals().weak_text_color(),
                             };
                             ui.colored_label(color, text);
+                            // Plan B si la shell no avisa cuándo termina el agente (cmd, WSL).
+                            if matches!(run, Run::Working { .. })
+                                && ui
+                                    .small_button("Ya terminó")
+                                    .on_hover_text(
+                                        "Darla por terminada: las que dependen de ella \
+                                         arrancan si dejó commits en su rama",
+                                    )
+                                    .clicked()
+                            {
+                                finish = Some(i);
+                            }
                         });
                     }
                     ui.weak(
@@ -269,6 +283,18 @@ impl Orion {
             && let Some(s) = subtasks.get_mut(i)
         {
             s.executor = id;
+        }
+        if let Some(i) = finish
+            && let Some((_, run)) = o.plan.get_mut(i)
+            && let Run::Working { branch, base, .. } = run
+        {
+            let commits = has_commits(&o.dir, base, branch);
+            let branch = std::mem::take(branch);
+            *run = Run::Done {
+                branch,
+                code: None,
+                commits,
+            };
         }
         if forget {
             (o.plan, o.open) = (Vec::new(), false);
@@ -392,7 +418,7 @@ impl Orion {
 
     /// Si el agente del panel `pane` terminó (o se cerró su pestaña), su nuevo estado.
     fn check_agent(&self, pane: u64, branch: &str, base: &str) -> Option<Run> {
-        let mine = |t: &&Tab| t.agent_run.as_ref().is_some_and(|(_, p)| *p == pane);
+        let mine = |t: &&Tab| t.agent_run == Some(pane);
         match self.tabs.iter().find(mine).and_then(Tab::agent_status) {
             None => Some(Run::Closed),
             Some(AgentStatus::Done(code)) => Some(Run::Done {
@@ -420,7 +446,7 @@ impl Orion {
         // `launch_agent` la tomó por una terminal en esa carpeta: es un worktree de `repo`.
         let tab = &mut self.tabs[self.active];
         (tab.repo, tab.worktree) = (Some(repo), Some(path));
-        let pane = tab.agent_run.as_ref().map_or(tab.focus, |(_, p)| *p);
+        let pane = tab.agent_run.unwrap_or(tab.focus);
         Run::Working { pane, branch, base }
     }
 }
