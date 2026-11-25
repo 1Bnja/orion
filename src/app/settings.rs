@@ -237,9 +237,6 @@ impl Orion {
             );
         }
         self.menu.open = still_open;
-        if !still_open {
-            self.menu.theme_sent = None; // la próxima ventana es nueva y hay que pedirle el tema
-        }
         if new != self.settings {
             self.change_settings(ctx, new);
         }

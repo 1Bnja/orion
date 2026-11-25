@@ -156,6 +156,7 @@ impl Orion {
             self.menu.fonts = font_choices();
         }
         self.menu.open = true;
+        self.menu.theme_sent = None; // puede ser una ventana nueva: hay que pedirle el tema
     }
 
     /// Aplica una configuración nueva al instante (la fuente solo si cambió) y la guarda en config.toml.
