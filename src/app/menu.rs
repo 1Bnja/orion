@@ -33,6 +33,9 @@ pub(crate) struct SettingsMenu {
     pub(crate) theme_error: Option<String>,
     /// Whether "Más colores" is expanded in the Colores section.
     pub(crate) more_colors: bool,
+    /// El tema (oscuro o no) que ya se le pidió a la ventana de ajustes: pedirlo en cada frame
+    /// hace que Windows la vuelva a pintar entera (SetWindowTheme) y la ventana tiembla.
+    pub(crate) theme_sent: Option<bool>,
 }
 
 /// Resolves the theme the settings would show (built-in or custom + overrides), without applying it.
@@ -153,6 +156,7 @@ impl Orion {
             self.menu.fonts = font_choices();
         }
         self.menu.open = true;
+        self.menu.theme_sent = None; // puede ser una ventana nueva: hay que pedirle el tema
     }
 
     /// Aplica una configuración nueva al instante (la fuente solo si cambió) y la guarda en config.toml.
