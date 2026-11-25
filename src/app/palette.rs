@@ -140,8 +140,10 @@ impl Orion {
             list.push((format!("Agente: {}", agent.name), "", Action::Agent(i)));
         }
         // Proyecto de la pestaña activa: una terminal u otro agente, sin tocar el mouse.
-        if let Some(repo) = self.tabs[a].repo.as_deref() {
+        // (`get`: en el inicio no hay pestañas.)
+        if let Some(repo) = self.tabs.get(a).and_then(|t| t.repo.as_deref()) {
             let project = super::folder_name(repo);
+            list.push(("Ver grafo de ramas".into(), "", Action::Graph(a)));
             list.push((format!("Terminal en {project}"), "", Action::TerminalIn(a)));
             for choice in self.agent_choices() {
                 let name = choice.name(&self.settings);
@@ -174,7 +176,7 @@ impl Orion {
             list.push((format!("Tema: {}", t.name), "", Action::Theme(i)));
         }
         for (pos, i) in self.tab_order().into_iter().enumerate() {
-            let name = format!("Ir a pestaña: {}", self.tabs[i].focused().title());
+            let name = format!("Ir a pestaña: {}", self.tabs[i].title());
             let key = numbers.get(pos).copied().unwrap_or("");
             list.push((name, key, Action::SelectTab(i)));
         }

@@ -120,7 +120,7 @@ impl Orion {
             o.open = true;
             return;
         }
-        let root = match self.session().cwd.clone() {
+        let root = match self.session().and_then(|s| s.cwd.clone()) {
             None => Err(
                 "abre el orquestador desde una pestaña de PowerShell o zsh dentro del repo".into(),
             ),

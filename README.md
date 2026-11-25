@@ -36,6 +36,8 @@ its own branch, and Orion tells you when one of them needs you.
 - Worktrees are never deleted behind your back. Palette → "Limpiar worktrees de Orion" removes the
   ones no tab uses, skipping any with unsaved changes; a branch is deleted only once merged.
 - Split any pane to the right or downward, each with its own shell.
+- **Grafo tab**: the branch icon on a project header (or palette → "Ver grafo de ramas") shows the
+  repo's branches and commits as a graph, with search, ref chips and commit details.
 - A command palette (`Ctrl+Shift+P`) finds any action by name and shows its shortcut.
 
 ### Built for coding agents
