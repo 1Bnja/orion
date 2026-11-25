@@ -146,7 +146,7 @@ impl Orion {
     /// folders in a quiet color and the last one in the text color. If the shell did not report
     /// a folder, the title of the pane.
     fn draw_location(&self, ui: &egui::Ui, space: Rect, center: f32) {
-        let Some(session) = self.tabs.get(self.active).map(|tab| tab.focused()) else {
+        let Some(session) = self.tabs.get(self.active).and_then(|tab| tab.focused()) else {
             return;
         };
         let (mut parents, name) = match &session.cwd {

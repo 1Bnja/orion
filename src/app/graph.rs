@@ -1,126 +1,13 @@
 //! La vista "Grafo" (solo lectura): las ramas y los commits del repo, uno por fila, con las
 //! líneas del grafo a la izquierda.
 
-// La integración quitará este allow cuando la pestaña "Grafo" use la vista.
-#![allow(dead_code)]
-
 use super::chrome::{RADIUS, label, medium};
 use crate::colors::theme;
+use crate::git_graph::{self, Commit, Graph, Row};
 use eframe::egui::{self, Color32, FontId, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
-use mock::{Commit, Graph, Row};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{SystemTime, UNIX_EPOCH};
-
-// ponytail: mock temporal, la integración lo reemplaza por crate::git_graph
-mod mock {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[derive(Clone, Debug)]
-    pub struct Commit {
-        pub id: String,
-        pub parents: Vec<String>,
-        pub refs: Vec<String>,
-        pub author: String,
-        pub time: i64,
-        pub subject: String,
-    }
-
-    #[derive(Clone, Debug)]
-    pub struct Row {
-        pub lane: usize,
-        /// Líneas desde los carriles de esta fila hacia los de la fila siguiente.
-        pub edges: Vec<(usize, usize)>,
-    }
-
-    #[derive(Clone, Debug)]
-    pub struct Graph {
-        pub commits: Vec<Commit>,
-        /// `rows[i]` corresponde a `commits[i]`.
-        pub rows: Vec<Row>,
-        pub lanes: usize,
-    }
-
-    /// Datos de ejemplo: `main` con una rama lateral que se fusiona.
-    pub fn sample() -> Graph {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
-        let id = |n: usize| format!("{:08x}", 0x9e37_79b9_u32.wrapping_mul(n as u32 + 1)).repeat(5);
-        // (padres, refs, horas de antigüedad, asunto, carril, líneas)
-        type Entry<'a> = (
-            &'a [usize],
-            &'a [&'a str],
-            i64,
-            &'a str,
-            usize,
-            &'a [(usize, usize)],
-        );
-        let entries: [Entry; 8] = [
-            (
-                &[1],
-                &["HEAD -> main"],
-                0,
-                "docs: explica la pestaña Grafo",
-                0,
-                &[(0, 0)],
-            ),
-            (
-                &[2, 3],
-                &["origin/main", "origin/HEAD"],
-                3,
-                "Merge branch 'orion/tarea-1'",
-                0,
-                &[(0, 0), (0, 1)],
-            ),
-            (
-                &[5],
-                &[],
-                5,
-                "fix: el panel no pierde el foco",
-                0,
-                &[(0, 0), (1, 1)],
-            ),
-            (
-                &[4],
-                &["orion/tarea-1", "origin/orion/tarea-1"],
-                8,
-                "feat: filtro por autor",
-                1,
-                &[(0, 0), (1, 1)],
-            ),
-            (
-                &[5],
-                &[],
-                26,
-                "feat: lista de commits",
-                1,
-                &[(0, 0), (1, 0)],
-            ),
-            (&[6], &["tag: v0.1"], 50, "release: v0.1", 0, &[(0, 0)]),
-            (&[7], &[], 24 * 40, "feat: lee el log de git", 0, &[(0, 0)]),
-            (&[], &[], 24 * 400, "Commit inicial", 0, &[]),
-        ];
-        let mut graph = Graph {
-            commits: Vec::new(),
-            rows: Vec::new(),
-            lanes: 2,
-        };
-        for (n, (parents, refs, hours, subject, lane, edges)) in entries.into_iter().enumerate() {
-            graph.commits.push(Commit {
-                id: id(n),
-                parents: parents.iter().map(|&p| id(p)).collect(),
-                refs: refs.iter().map(|r| r.to_string()).collect(),
-                author: if lane == 0 { "Ana Pérez" } else { "Claude" }.into(),
-                time: now - hours * 3600,
-                subject: subject.into(),
-            });
-            graph.rows.push(Row {
-                lane,
-                edges: edges.to_vec(),
-            });
-        }
-        graph
-    }
-}
 
 /// Alto fijo de cada fila (lo necesita `show_rows`).
 const ROW: f32 = 28.0;
@@ -135,7 +22,7 @@ const LANE_COLORS: [usize; 12] = [4, 2, 5, 3, 6, 1, 12, 10, 13, 11, 14, 9];
 /// El estado de la vista.
 pub(super) struct GraphView {
     pub(super) graph: Graph,
-    /// Índice en `graph.commits`. Al recargar el grafo hay que volver a ubicarlo.
+    /// Índice en `graph.commits`. Al recargar el grafo se vuelve a ubicar por id (ver `replace`).
     pub(super) selected: Option<usize>,
     pub(super) filter: String,
     pub(super) show_remotes: bool,
@@ -278,9 +165,17 @@ impl GraphView {
         }
     }
 
-    /// Dibuja la vista. Devuelve true si se pidió refrescar.
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> bool {
-        let refresh = self.toolbar(ui);
+    /// Cambia el grafo por uno recién leído. La selección sigue al mismo commit (por su id: los
+    /// índices cambian si entraron commits nuevos) y se pierde si ese commit ya no está.
+    pub(super) fn replace(&mut self, graph: Graph) {
+        let id = self.selected.and_then(|i| self.graph.commits.get(i));
+        self.selected = id.and_then(|old| graph.commits.iter().position(|c| c.id == old.id));
+        self.graph = graph;
+    }
+
+    /// Dibuja la vista; `busy` = se está recargando. Devuelve true si se pidió refrescar.
+    pub fn ui(&mut self, ui: &mut egui::Ui, busy: bool) -> bool {
+        let refresh = self.toolbar(ui, busy);
         ui.separator();
         // El panel de abajo va antes que la lista: así la lista ocupa lo que sobra.
         self.details(ui);
@@ -288,7 +183,7 @@ impl GraphView {
         refresh
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui) -> bool {
+    fn toolbar(&mut self, ui: &mut egui::Ui, busy: bool) -> bool {
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
@@ -299,7 +194,13 @@ impl GraphView {
             ui.checkbox(&mut self.show_remotes, "Remotas");
             ui.checkbox(&mut self.show_tags, "Tags");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.button("Refrescar").clicked()
+                let refresh = ui
+                    .add_enabled(!busy, egui::Button::new("Refrescar"))
+                    .clicked();
+                if busy {
+                    ui.spinner();
+                }
+                refresh
             })
             .inner
         })
@@ -430,9 +331,185 @@ impl GraphView {
     }
 }
 
+/// Cuántos commits se leen: alcanza para la historia reciente y carga rápido.
+/// ponytail: tope fijo; si hace falta más historia, cargar más al llegar al final de la lista.
+const LIMIT: usize = 2000;
+
+/// Una pestaña "Grafo": el grafo de un repo, leído con git en un hilo aparte.
+pub(super) struct GraphTab {
+    repo: PathBuf,
+    /// None hasta que termina la primera carga.
+    view: Option<GraphView>,
+    /// Una carga en camino.
+    loading: Option<Receiver<Result<Graph, String>>>,
+    /// La última carga falló (se sigue mostrando el grafo anterior, si había).
+    error: Option<String>,
+    /// Era la pestaña activa en el frame anterior (para recargar cuando vuelve a serlo).
+    pub(super) shown: bool,
+}
+
+impl GraphTab {
+    /// Una pestaña vacía: carga el grafo la primera vez que queda activa.
+    pub(super) fn new(repo: PathBuf) -> Self {
+        Self {
+            repo,
+            view: None,
+            loading: None,
+            error: None,
+            shown: false,
+        }
+    }
+
+    /// Vuelve a leer el grafo en un hilo (si ya hay una carga en camino, no hace nada).
+    pub(super) fn reload(&mut self, ctx: &egui::Context) {
+        if self.loading.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let (repo, ctx) = (self.repo.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(git_graph::load(&repo, LIMIT));
+            ctx.request_repaint(); // para que `poll` lo vea aunque nada más pase
+        });
+        self.loading = Some(rx);
+    }
+
+    /// Recoge la carga si terminó.
+    pub(super) fn poll(&mut self) {
+        let Some(rx) = &self.loading else { return };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("la carga se interrumpió".into()),
+        };
+        self.loading = None;
+        match result {
+            Ok(graph) => {
+                self.error = None;
+                match &mut self.view {
+                    Some(view) => view.replace(graph),
+                    None => self.view = Some(GraphView::new(graph)),
+                }
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// La segunda línea de su fila en la barra lateral.
+    pub(super) fn detail(&self) -> String {
+        match (&self.view, &self.error) {
+            (_, Some(_)) => "No se pudo leer".into(),
+            (None, None) => "Cargando…".into(),
+            (Some(view), None) => format!("{} commits", view.graph.commits.len()),
+        }
+    }
+
+    /// Dibuja la pestaña: un spinner hasta la primera carga, después la vista.
+    pub(super) fn ui(&mut self, ui: &mut egui::Ui) {
+        let busy = self.loading.is_some();
+        if let Some(e) = &self.error {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("No pude leer el grafo: {e}"),
+            );
+        }
+        let Some(view) = &mut self.view else {
+            if busy {
+                ui.centered_and_justified(|ui| ui.spinner());
+            }
+            return;
+        };
+        if view.ui(ui, busy) {
+            self.reload(ui.ctx());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Datos de ejemplo: `main` con una rama lateral que se fusiona.
+    fn sample() -> Graph {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let id = |n: usize| format!("{:08x}", 0x9e37_79b9_u32.wrapping_mul(n as u32 + 1)).repeat(5);
+        // (padres, refs, horas de antigüedad, asunto, carril, líneas)
+        type Entry<'a> = (
+            &'a [usize],
+            &'a [&'a str],
+            i64,
+            &'a str,
+            usize,
+            &'a [(usize, usize)],
+        );
+        let entries: [Entry; 8] = [
+            (
+                &[1],
+                &["HEAD -> main"],
+                0,
+                "docs: explica la pestaña Grafo",
+                0,
+                &[(0, 0)],
+            ),
+            (
+                &[2, 3],
+                &["origin/main", "origin/HEAD"],
+                3,
+                "Merge branch 'orion/tarea-1'",
+                0,
+                &[(0, 0), (0, 1)],
+            ),
+            (
+                &[5],
+                &[],
+                5,
+                "fix: el panel no pierde el foco",
+                0,
+                &[(0, 0), (1, 1)],
+            ),
+            (
+                &[4],
+                &["orion/tarea-1", "origin/orion/tarea-1"],
+                8,
+                "feat: filtro por autor",
+                1,
+                &[(0, 0), (1, 1)],
+            ),
+            (
+                &[5],
+                &[],
+                26,
+                "feat: lista de commits",
+                1,
+                &[(0, 0), (1, 0)],
+            ),
+            (&[6], &["tag: v0.1"], 50, "release: v0.1", 0, &[(0, 0)]),
+            (&[7], &[], 24 * 40, "feat: lee el log de git", 0, &[(0, 0)]),
+            (&[], &[], 24 * 400, "Commit inicial", 0, &[]),
+        ];
+        let mut graph = Graph {
+            commits: Vec::new(),
+            rows: Vec::new(),
+            lanes: 2,
+        };
+        for (n, (parents, refs, hours, subject, lane, edges)) in entries.into_iter().enumerate() {
+            graph.commits.push(Commit {
+                id: id(n),
+                parents: parents.iter().map(|&p| id(p)).collect(),
+                refs: refs.iter().map(|r| r.to_string()).collect(),
+                author: if lane == 0 { "Ana Pérez" } else { "Claude" }.into(),
+                time: now - hours * 3600,
+                subject: subject.into(),
+            });
+            graph.rows.push(Row {
+                lane,
+                edges: edges.to_vec(),
+            });
+        }
+        graph
+    }
 
     #[test]
     fn relative_dates() {
@@ -456,7 +533,7 @@ mod tests {
 
     #[test]
     fn search_and_ref_kinds() {
-        let commit = &mock::sample().commits[3];
+        let commit = &sample().commits[3];
         for needle in ["filtro", "claude", &commit.id[..7], "orion/tarea"] {
             assert!(matches(commit, needle), "{needle}");
         }
@@ -470,15 +547,37 @@ mod tests {
 
     #[test]
     fn view_draws_without_input() {
-        let mut view = GraphView::new(mock::sample());
+        let mut view = GraphView::new(sample());
         view.selected = Some(1);
         view.filter = "merge".into();
         let mut refresh = true;
         let mut output = egui::Context::default().run_ui(Default::default(), |ui| {
-            refresh = view.ui(ui);
+            refresh = view.ui(ui, false);
         });
         assert!(!refresh);
         assert!(!output.shapes.is_empty());
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn reloading_keeps_the_selection_by_id() {
+        let mut view = GraphView::new(sample());
+        view.selected = Some(3);
+        let id = view.graph.commits[3].id.clone();
+        // Entró un commit nuevo arriba: el elegido baja una fila.
+        let mut newer = sample();
+        let mut top = newer.commits[0].clone();
+        top.id = "nuevo".into();
+        newer.commits.insert(0, top);
+        newer.rows.insert(0, newer.rows[0].clone());
+        view.replace(newer);
+        assert_eq!(view.selected, Some(4));
+        assert_eq!(view.graph.commits[4].id, id);
+        // El commit ya no está (ej. se reescribió la rama): no queda nada elegido.
+        let mut gone = sample();
+        gone.commits.remove(3);
+        gone.rows.remove(3);
+        view.replace(gone);
+        assert_eq!(view.selected, None);
     }
 }

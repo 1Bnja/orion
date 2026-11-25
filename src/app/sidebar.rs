@@ -3,7 +3,7 @@
 
 use super::chrome::{Icon, RADIUS, draw_icon, icon_button, label, medium};
 use super::session::AgentStatus;
-use super::{Action, MAC, Orion, Tab, default_shell, folder_name, render, tab_label};
+use super::{Action, Content, MAC, Orion, Tab, default_shell, folder_name, render, tab_label};
 use crate::blocks::Status;
 use crate::colors::{surface, theme};
 use crate::pty::{SHELLS, installed_shells};
@@ -22,9 +22,13 @@ const ROW: f32 = 26.0;
 const TEXT_X: f32 = 26.0;
 
 /// The second line of a tab row: how its agent is doing or, without one, the last command
-/// (the name of the shell if nothing ran yet).
+/// (the name of the shell if nothing ran yet). A Grafo tab says how its load went.
 fn tab_detail(tab: &Tab) -> String {
-    let session = tab.focused();
+    let session = match (&tab.content, tab.focused()) {
+        (Content::Graph(graph), _) => return graph.detail(),
+        (_, Some(session)) => session,
+        (_, None) => return String::new(),
+    };
     match tab.agent_status() {
         Some(AgentStatus::Running) => "En ejecución".into(),
         Some(AgentStatus::Done(Some(code))) if code != 0 => format!("Falló (código {code})"),
@@ -65,21 +69,65 @@ fn side_button(row: Rect, line_y: f32) -> Rect {
     Rect::from_center_size(pos2(row.max.x - 15.0, row.min.y + line_y), vec2(20.0, 20.0))
 }
 
-/// The name of a group of tabs. Repo groups have a "+" on the right (returned): it opens
-/// another agent in that repo.
-fn group_header(ui: &mut egui::Ui, name: &str, repo: Option<&Path>) -> Option<egui::Response> {
+/// A button with a small branch drawn in lines: two commits on a trunk and a side branch.
+/// ponytail: drawn by hand because there is no Tabler PNG for it in `assets/icons`.
+fn graph_button(ui: &egui::Ui, rect: Rect, id: egui::Id) -> egui::Response {
+    let response = ui.interact(rect, id, Sense::click());
+    let color = if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, RADIUS - 1.0, theme().hover());
+        theme().fg
+    } else {
+        theme().muted()
+    };
+    let painter = ui.painter();
+    let c = rect.center();
+    let (top, bottom, side) = (
+        c + vec2(-3.0, -5.0),
+        c + vec2(-3.0, 5.0),
+        c + vec2(4.0, -2.0),
+    );
+    let stroke = Stroke::new(1.5, color);
+    painter.line_segment([top, bottom], stroke);
+    painter.line_segment([side, c + vec2(-3.0, 3.0)], stroke);
+    for node in [top, bottom, side] {
+        painter.circle_filled(node, 2.0, color);
+    }
+    response
+}
+
+/// The buttons of a repo header.
+struct HeaderButtons {
+    /// Another agent or a terminal in that repo.
+    plus: egui::Response,
+    /// Its Grafo tab.
+    graph: egui::Response,
+}
+
+/// The name of a group of tabs. Repo groups have two buttons on the right (returned).
+fn group_header(ui: &mut egui::Ui, name: &str, repo: Option<&Path>) -> Option<HeaderButtons> {
     ui.add_space(6.0);
     let (rect, row) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
     let plus_rect = side_button(rect, ROW / 2.0);
+    let graph_rect = plus_rect.translate(vec2(-22.0, 0.0));
+    let end = if repo.is_some() {
+        graph_rect
+    } else {
+        plus_rect
+    };
     let text = Rect::from_min_max(
         rect.min + vec2(10.0, 0.0),
-        pos2(plus_rect.min.x - 4.0, rect.max.y),
+        pos2(end.min.x - 4.0, rect.max.y),
     );
     label(ui.painter(), text, name, medium(11.5), theme().muted());
     let repo = repo?;
+    let graph = graph_button(ui, graph_rect, row.id.with("grafo"));
     let plus = icon_button(ui, plus_rect, row.id.with("mas"), Icon::Plus);
     row.on_hover_text(repo.display().to_string());
-    Some(plus.on_hover_text("Otro agente en este proyecto"))
+    Some(HeaderButtons {
+        plus: plus.on_hover_text("Otro agente en este proyecto"),
+        graph: graph.on_hover_text("Ver grafo de ramas"),
+    })
 }
 
 impl Orion {
@@ -244,8 +292,11 @@ impl Orion {
             let tab = &self.tabs[i];
             if has_repos && shown != Some(tab.repo.as_ref()) {
                 let name = tab.repo.as_deref().map_or("Terminales".into(), folder_name);
-                if let Some(plus) = group_header(ui, &name, tab.repo.as_deref()) {
-                    self.repo_menu(&plus, i, &name, action);
+                if let Some(buttons) = group_header(ui, &name, tab.repo.as_deref()) {
+                    self.repo_menu(&buttons.plus, i, &name, action);
+                    if buttons.graph.clicked() {
+                        *action = Some(Action::Graph(i));
+                    }
                 }
                 shown = Some(tab.repo.as_ref());
             }
@@ -290,7 +341,7 @@ impl Orion {
     /// The row of tab `i`, which is in that `place` of the sidebar.
     fn tab_row(&self, ui: &mut egui::Ui, i: usize, place: usize, action: &mut Option<Action>) {
         let tab = &self.tabs[i];
-        // With splits, the row shows the focused pane.
+        // With splits, the row shows the focused pane (a Grafo tab has none).
         let session = tab.focused();
         let size = vec2(ui.available_width(), TAB_ROW);
         let (rect, row) = ui.allocate_exact_size(size, Sense::click());
@@ -309,9 +360,9 @@ impl Orion {
         // A pane of the tab asking for attention replaces the dot with a pulse of the accent.
         let dot = rect.min + vec2(14.0, TITLE_Y);
         let alert = tab
-            .panes
-            .leaves()
+            .panes()
             .into_iter()
+            .flat_map(|p| p.leaves())
             .find_map(|s| s.attention.clone());
         if alert.is_some() {
             let time = ui.input(|i| i.time) as f32;
@@ -322,7 +373,7 @@ impl Orion {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(50));
         } else {
-            draw_status(painter, dot, session.activity());
+            draw_status(painter, dot, session.and_then(|s| s.activity()));
         }
 
         // On the right of the first line: the shortcut or, under the mouse, the close button.
@@ -348,7 +399,7 @@ impl Orion {
                 rect.min.y + y - 9.0..=rect.min.y + y + 9.0,
             )
         };
-        let title = tab_label(tab.agent.as_deref(), &session.title());
+        let title = tab_label(tab.agent.as_deref(), &tab.title());
         let (font, color) = if active {
             (medium(13.0), theme().fg)
         } else {
@@ -365,7 +416,7 @@ impl Orion {
                 *action = Some(Action::CloseTab(i));
             }
         }
-        let mut tip = match session.last_command() {
+        let mut tip = match session.and_then(|s| s.last_command()) {
             Some(command) => format!("Último comando: {command}\nClic del medio para cerrar"),
             None => "Clic del medio para cerrar".into(),
         };

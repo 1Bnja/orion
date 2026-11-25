@@ -1,8 +1,5 @@
-//! Datos para la futura pestaña "Grafo": las ramas y commits del repo, en filas
+//! Datos para la pestaña "Grafo" (`app::graph`): las ramas y commits del repo, en filas
 //! con su carril y las líneas que bajan a la fila siguiente (estilo GitKraken, solo lectura).
-//!
-//! La integración con la pestaña todavía no existe: mientras tanto el módulo está sin usar.
-#![allow(dead_code)] // la pestaña "Grafo" lo usará; al integrarla se quita este allow.
 
 use std::path::Path;
 

@@ -1,7 +1,7 @@
 //! La app: las pestañas, la configuración y lo que pasa en cada frame.
 //!
-//! Cada pestaña tiene uno o más paneles (splits) y cada panel es una `Session` (su shell, su grilla,
-//! sus bloques). `session`, `panes`, `render` y `menu` son submódulos: al ser hijos de `app`,
+//! Cada pestaña es una terminal o un grafo de commits (`graph`). Una terminal tiene uno o más
+//! paneles (splits) y cada panel es una `Session` (su shell, su grilla, sus bloques). `session`, `panes`, `render` y `menu` son submódulos: al ser hijos de `app`,
 //! pueden usar los campos privados de `Orion`.
 
 /// En macOS los atajos de Orion van con Cmd y Control queda para la terminal (Ctrl+C interrumpe).
@@ -55,10 +55,17 @@ use session::{AgentStatus, Session, agent_status_of};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
+/// Lo que muestra una pestaña.
+enum Content {
+    Terminal(Split<Session>),
+    /// El grafo de commits de `Tab::repo`: sin shell, sin splits y sin teclado para una terminal.
+    Graph(Box<graph::GraphTab>),
+}
+
 /// Una pestaña: sus paneles y cuál tiene el foco.
 struct Tab {
-    panes: Split<Session>,
-    /// El `id` del panel que recibe el teclado.
+    content: Content,
+    /// El `id` del panel que recibe el teclado (en una pestaña Grafo no apunta a nada).
     focus: u64,
     /// Dónde se dibujó cada panel en el último frame (para mover el foco con Ctrl+Alt+flechas).
     rects: Vec<(u64, egui::Rect)>,
@@ -73,39 +80,74 @@ struct Tab {
     agent_run: Option<(String, u64)>,
     /// Ya se avisó que el agente terminó con error (para no repetir el aviso cada frame).
     agent_notified: bool,
+    /// El cwd con que se calculó `repo` por última vez (ver `repo_to_check`).
+    repo_cwd: Option<PathBuf>,
 }
 
 impl Tab {
     fn new(session: Session) -> Self {
+        let focus = session.id;
+        Self::with(Content::Terminal(Split::new(session)), focus)
+    }
+
+    /// Una pestaña Grafo del repo `repo`.
+    fn graph(repo: PathBuf) -> Self {
+        let graph = Box::new(graph::GraphTab::new(repo.clone()));
+        let mut tab = Self::with(Content::Graph(graph), 0);
+        tab.repo = Some(repo);
+        tab
+    }
+
+    fn with(content: Content, focus: u64) -> Self {
         Self {
             repo: None,
             agent: None,
             worktree: None,
             agent_run: None,
             agent_notified: false,
-            focus: session.id,
-            panes: Split::new(session),
+            repo_cwd: None,
+            focus,
+            content,
             rects: Vec::new(),
         }
     }
 
-    fn focused(&self) -> &Session {
-        self.panes
-            .get(self.focus)
-            .expect("el foco apunta a un panel")
+    /// Los paneles, si es una terminal.
+    fn panes(&self) -> Option<&Split<Session>> {
+        match &self.content {
+            Content::Terminal(panes) => Some(panes),
+            Content::Graph(_) => None,
+        }
     }
 
-    fn focused_mut(&mut self) -> &mut Session {
-        self.panes
-            .get_mut(self.focus)
-            .expect("el foco apunta a un panel")
+    fn panes_mut(&mut self) -> Option<&mut Split<Session>> {
+        match &mut self.content {
+            Content::Terminal(panes) => Some(panes),
+            Content::Graph(_) => None,
+        }
+    }
+
+    /// El panel con foco; None en una pestaña Grafo.
+    fn focused(&self) -> Option<&Session> {
+        self.panes()?.get(self.focus)
+    }
+
+    fn focused_mut(&mut self) -> Option<&mut Session> {
+        let focus = self.focus;
+        self.panes_mut()?.get_mut(focus)
+    }
+
+    /// El título del panel con foco, o "Grafo".
+    fn title(&self) -> String {
+        self.focused()
+            .map_or_else(|| "Grafo".into(), Session::title)
     }
 
     /// Cómo va el agente de esta pestaña; None si no es de agente (o su panel ya se cerró).
     /// Solo PowerShell y zsh mandan OSC 133: en cmd y WSL no hay bloques y se queda en `Starting`.
     pub(super) fn agent_status(&self) -> Option<AgentStatus> {
         let (command, pane) = self.agent_run.as_ref()?;
-        let session = self.panes.get(*pane)?;
+        let session = self.panes()?.get(*pane)?;
         let blocks = session
             .blocks
             .list
@@ -243,6 +285,8 @@ enum Action {
     ForgetSaved(usize),
     /// Abrir "Ver cambios" de la pestaña con worktree.
     Review(usize),
+    /// Abrir (o enfocar, si ya está) la pestaña Grafo del repo de esa pestaña.
+    Graph(usize),
     /// Fusionar la rama de esa pestaña en la rama del repo principal.
     Merge(usize),
     /// Borrar el worktree y la rama de esa pestaña, y cerrarla.
@@ -307,6 +351,18 @@ fn tab_label(agent: Option<&str>, title: &str) -> String {
         Some(a) if !title.to_lowercase().contains(&a.to_lowercase()) => format!("{a} · {title}"),
         _ => title.to_string(),
     }
+}
+
+/// La carpeta en que hay que volver a buscar el repo de una pestaña, si hace falta: solo las
+/// terminales sin worktree ni agente siguen su cwd, y solo cuando cambió desde la última vez
+/// (`checked`), para no llamar a git cada frame.
+fn repo_to_check<'a>(
+    worktree: bool,
+    agent: bool,
+    cwd: Option<&'a std::path::Path>,
+    checked: Option<&std::path::Path>,
+) -> Option<&'a std::path::Path> {
+    cwd.filter(|&c| !worktree && !agent && checked != Some(c))
 }
 
 /// Una ruta en una forma que sirva para compararla (git usa `/`, Windows `\`, y no distingue mayúsculas).
@@ -429,9 +485,9 @@ impl Orion {
         (None, false)
     }
 
-    /// El panel con foco de la pestaña activa.
-    fn session(&mut self) -> &mut Session {
-        self.tabs[self.active].focused_mut()
+    /// El panel con foco de la pestaña activa; None en el inicio o en una pestaña Grafo.
+    fn session(&mut self) -> Option<&mut Session> {
+        self.tabs.get_mut(self.active)?.focused_mut()
     }
 
     fn show_toast(&mut self, text: impl Into<String>) {
@@ -444,7 +500,8 @@ impl Orion {
         let grid = self
             .tabs
             .get(self.active)
-            .map(|t| t.focused().grid)
+            .and_then(|t| t.focused())
+            .map(|s| s.grid)
             .unwrap_or(self.default_grid);
         let kind = kind.unwrap_or_else(|| default_shell(&self.settings));
         match Session::new(ctx, grid, kind) {
@@ -464,7 +521,7 @@ impl Orion {
         let cwd = self
             .tabs
             .get(self.active)
-            .and_then(|t| t.focused().cwd.clone());
+            .and_then(|t| t.focused()?.cwd.clone());
         self.launch_agent(ctx, cwd, &agent.name, agent.worktree, |_| {
             agent.command.clone()
         });
@@ -478,7 +535,7 @@ impl Orion {
         let cwd = self
             .tabs
             .get(self.active)
-            .and_then(|t| t.focused().cwd.clone());
+            .and_then(|t| t.focused()?.cwd.clone());
         self.launch_agent(ctx, cwd, provider.name, false, |_| {
             provider.command.to_string()
         });
@@ -519,14 +576,17 @@ impl Orion {
         }
         let tab = &mut self.tabs[self.active];
         tab.repo = repo;
-        let shell = &crate::pty::SHELLS[tab.focused().kind];
+        let Some(session) = tab.focused() else {
+            return false; // `new_tab` siempre abre una terminal
+        };
+        let shell = &crate::pty::SHELLS[session.kind];
         let command = command(shell);
+        let input = crate::agents::launch_input(shell, dir.as_deref(), &command);
+        session.write(input.as_bytes());
         // Una terminal sola (sin comando) no es un agente.
         tab.agent = (!command.is_empty()).then(|| name.to_string());
         tab.worktree = if worktree { dir.clone() } else { None };
-        tab.agent_run = (!command.is_empty()).then(|| (command.clone(), tab.focus));
-        let input = crate::agents::launch_input(shell, dir.as_deref(), &command);
-        tab.focused().write(input.as_bytes());
+        tab.agent_run = (!command.is_empty()).then_some((command, tab.focus));
         true
     }
 
@@ -570,7 +630,7 @@ impl Orion {
         self.project.open = true;
         self.project.error = None;
         // La carpeta de la vez anterior, o el repo de la pestaña actual; se vuelve a mirar si es repo.
-        let cwd = self.session().cwd.clone();
+        let cwd = self.session().and_then(|s| s.cwd.clone());
         let dir = self
             .project
             .dir
@@ -676,7 +736,7 @@ impl Orion {
     /// Cierra una pestaña (y las shells de todos sus paneles). Si era la última, queda el inicio vacío.
     fn close_tab(&mut self, ctx: &egui::Context, index: usize) {
         let mut tab = self.tabs.remove(index);
-        for session in tab.panes.leaves_mut() {
+        for session in tab.panes_mut().into_iter().flat_map(Split::leaves_mut) {
             let _ = session.shell.child.kill();
         }
         // Un worktree sin trabajo (nada sin commitear ni commits propios) se borra sin preguntar.
@@ -704,6 +764,22 @@ impl Orion {
             return;
         }
         self.active = active_after_close(self.active, index, self.tabs.len());
+    }
+
+    /// Enfoca la pestaña Grafo del repo de la pestaña `i`, o abre una (queda activa: así carga).
+    fn open_graph(&mut self, i: usize) {
+        let Some(repo) = self.tabs.get(i).and_then(|t| t.repo.clone()) else {
+            return;
+        };
+        let graph =
+            |t: &Tab| matches!(t.content, Content::Graph(_)) && t.repo == Some(repo.clone());
+        self.active = match self.tabs.iter().position(graph) {
+            Some(open) => open,
+            None => {
+                self.tabs.push(Tab::graph(repo));
+                self.tabs.len() - 1
+            }
+        };
     }
 
     /// Abre "Ver cambios" para la pestaña `i` (que tiene worktree).
@@ -758,12 +834,17 @@ impl Orion {
     /// Divide el panel con foco con una shell nueva, que queda con el foco.
     fn split(&mut self, ctx: &egui::Context, right: bool) {
         // El panel nuevo abre la misma shell, y se ajusta a su tamaño al dibujarse.
-        let (grid, kind) = (self.session().grid, self.session().kind);
+        let Some(&mut Session { grid, kind, .. }) = self.session() else {
+            return; // una pestaña Grafo no se divide
+        };
         match Session::new(ctx, grid, kind) {
             Ok(session) => {
                 let id = session.id;
                 let tab = &mut self.tabs[self.active];
-                if tab.panes.split(tab.focus, right, session).is_ok() {
+                let focus = tab.focus;
+                if let Some(panes) = tab.panes_mut()
+                    && panes.split(focus, right, session).is_ok()
+                {
                     tab.focus = id;
                 }
             }
@@ -771,26 +852,29 @@ impl Orion {
         }
     }
 
-    /// Cierra el panel `id` de la pestaña `index` (y su shell). Si era el único, se cierra la pestaña.
+    /// Cierra el panel `id` de la pestaña `index` (y su shell). Si era el único (o la pestaña es
+    /// un Grafo, que no tiene paneles), se cierra la pestaña.
     fn close_pane(&mut self, ctx: &egui::Context, index: usize, id: u64) {
         let tab = &mut self.tabs[index];
-        if tab.panes.leaves().len() == 1 {
+        let (focus, rects) = (tab.focus, &tab.rects);
+        let Some(panes) = (match &mut tab.content {
+            Content::Terminal(panes) if panes.leaves().len() > 1 => Some(panes),
+            _ => None,
+        }) else {
             self.close_tab(ctx, index);
             return;
-        }
+        };
         // El foco pasa al vecino más cercano: el de la izquierda, arriba, derecha o abajo.
         let dirs = [(-1.0, 0.0), (0.0, -1.0), (1.0, 0.0), (0.0, 1.0)];
         let next = dirs
             .into_iter()
-            .find_map(|(x, y)| panes::neighbor(&tab.rects, id, egui::vec2(x, y)));
-        if let Some(mut session) = tab.panes.remove(id) {
+            .find_map(|(x, y)| panes::neighbor(rects, id, egui::vec2(x, y)));
+        if let Some(mut session) = panes.remove(id) {
             let _ = session.shell.child.kill();
         }
-        if tab.panes.get(tab.focus).is_none() {
-            let first = tab.panes.leaves()[0].id;
-            tab.focus = next
-                .filter(|&n| tab.panes.get(n).is_some())
-                .unwrap_or(first);
+        if panes.get(focus).is_none() {
+            let first = panes.leaves()[0].id;
+            tab.focus = next.filter(|&n| panes.get(n).is_some()).unwrap_or(first);
         }
     }
 
@@ -918,6 +1002,7 @@ impl Orion {
             Action::CleanWorktrees => self.clean_worktrees(),
             Action::OpenSaved(i) => self.open_saved(ctx, i),
             Action::Review(i) => self.open_review(i),
+            Action::Graph(i) => self.open_graph(i),
             Action::Merge(i) => self.merge_tab(i),
             Action::Discard(i) => self.discard_tab(ctx, i),
             Action::ForgetSaved(i) => {
@@ -1015,15 +1100,15 @@ impl Orion {
                 && code != 0
                 && let Some(name) = tab.agent.clone()
                 && let Some((_, pane)) = tab.agent_run
-                && let Some(session) = tab.panes.get_mut(pane)
+                && let Some(session) = tab.panes_mut().and_then(|p| p.get_mut(pane))
             {
-                tab.agent_notified = true;
                 session.alert = Some(format!(
                     "El agente {name} terminó con error (código {code})"
                 ));
                 failed = session.alert.clone();
+                tab.agent_notified = true;
             }
-            for session in tab.panes.leaves_mut() {
+            for session in tab.panes_mut().into_iter().flat_map(Split::leaves_mut) {
                 let Some(alert) = session.alert.take() else {
                     continue;
                 };
@@ -1037,8 +1122,8 @@ impl Orion {
             self.show_toast(text);
         }
         // Lo que estás mirando ya no pide atención.
-        if focused {
-            self.session().attention = None;
+        if focused && let Some(session) = self.session() {
+            session.attention = None;
         }
         if new_alert && !focused {
             let blink = egui::UserAttentionType::Informational;
@@ -1061,7 +1146,26 @@ impl Orion {
         );
         let tab = &mut self.tabs[self.active];
         tab.rects.clear();
-        tab.panes.layout(inner, PANE_GAP, &mut tab.rects);
+        let panes = match &mut tab.content {
+            Content::Terminal(panes) => panes,
+            Content::Graph(graph) => {
+                // Un solo "panel", con el mismo marco y fondo que una terminal.
+                let frame = surface(theme().sidebar());
+                let hole = [inner.shrink(1.0)];
+                chrome::paint_around(ui.painter(), area, hole, PANE_RADIUS - 1.0, frame);
+                let builder = egui::UiBuilder::new().max_rect(inner).id_salt("grafo");
+                let mut pane_ui = ui.new_child(builder);
+                egui::Frame::central_panel(pane_ui.style())
+                    .fill(surface(theme().bg))
+                    .corner_radius(PANE_RADIUS)
+                    .show(&mut pane_ui, |ui| graph.ui(ui));
+                let stroke = egui::Stroke::new(1.0, theme().line());
+                ui.painter()
+                    .rect_stroke(inner, PANE_RADIUS, stroke, egui::StrokeKind::Inside);
+                return false;
+            }
+        };
+        panes.layout(inner, PANE_GAP, &mut tab.rects);
         // The frame goes one pixel under each pane, so no seam shows between them.
         let holes = tab.rects.iter().map(|(_, rect)| rect.shrink(1.0));
         let frame = surface(theme().sidebar());
@@ -1079,7 +1183,7 @@ impl Orion {
         let several = tab.rects.len() > 1;
         let (mut open_menu, mut split, mut toast) = (false, None, None);
         for &(id, rect) in &tab.rects {
-            let Some(session) = tab.panes.get_mut(id) else {
+            let Some(session) = panes.get_mut(id) else {
                 continue;
             };
             // Cada panel dibuja en su pedazo; id_salt separa los ids de egui de un panel y otro.
@@ -1164,7 +1268,7 @@ impl eframe::App for Orion {
         let mut pending = false;
         let mut copied = None;
         for tab in &mut self.tabs {
-            for session in tab.panes.leaves_mut() {
+            for session in tab.panes_mut().into_iter().flat_map(Split::leaves_mut) {
                 pending |= session.process_output();
                 copied = session.take_copied().or(copied);
             }
@@ -1185,12 +1289,35 @@ impl eframe::App for Orion {
         }
         // Paneles cuya shell terminó (escribiste `exit`): se cierran solos.
         while let Some((t, id)) = self.tabs.iter_mut().enumerate().find_map(|(t, tab)| {
-            let mut sessions = tab.panes.leaves_mut().into_iter();
+            let mut sessions = tab.panes_mut().into_iter().flat_map(Split::leaves_mut);
             sessions.find_map(|s| s.exited().then_some((t, s.id)))
         }) {
             self.close_pane(ctx, t, id);
             if self.tabs.is_empty() {
                 return;
+            }
+        }
+        // Una terminal suelta que hizo cd a un repo pasa a agruparse bajo él (y al revés).
+        // ponytail: git en el hilo de la ventana, solo cuando cambia el cwd (tarda poco).
+        for tab in &mut self.tabs {
+            let cwd = tab.focused().and_then(|s| s.cwd.as_deref());
+            let worktree = tab.worktree.is_some();
+            let agent = tab.agent.is_some();
+            if let Some(cwd) = repo_to_check(worktree, agent, cwd, tab.repo_cwd.as_deref()) {
+                let cwd = cwd.to_path_buf();
+                tab.repo = crate::agents::repo_root(&cwd).ok();
+                tab.repo_cwd = Some(cwd);
+            }
+        }
+        // Pestañas Grafo: recoger la carga que terminó y recargar la que vuelve a estar activa.
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            if let Content::Graph(graph) = &mut tab.content {
+                graph.poll();
+                let shown = i == self.active;
+                if shown && !graph.shown {
+                    graph.reload(ctx);
+                }
+                graph.shown = shown;
             }
         }
         self.watch_config(ctx);
@@ -1214,7 +1341,7 @@ impl eframe::App for Orion {
             _ => {}
         }
         // El título de la ventana sigue al del panel con foco.
-        let title = format!("{} — Orion", self.session().title());
+        let title = format!("{} — Orion", self.tabs[self.active].title());
         if title != self.window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.window_title = title;
@@ -1223,19 +1350,15 @@ impl eframe::App for Orion {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let empty = self.tabs.is_empty();
-
         // Si la app lo pidió (ESC[?1004h, ej. vim), avisarle cuando la ventana gana o pierde el foco.
         let focused = ui.input(|i| i.focused);
-        if !empty && focused != self.focused {
-            self.focused = focused;
-            let session = self.session();
-            if session.term.mode().contains(TermMode::FOCUS_IN_OUT) {
-                session.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
-            }
-        } else {
-            self.focused = focused;
+        if focused != self.focused
+            && let Some(session) = self.session()
+            && session.term.mode().contains(TermMode::FOCUS_IN_OUT)
+        {
+            session.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
         }
+        self.focused = focused;
 
         // Archivos arrastrados: las fuentes se instalan; el resto se escribe como rutas, como un pegado.
         let dropped: Vec<PathBuf> = ui.input(|i| {
@@ -1248,8 +1371,9 @@ impl eframe::App for Orion {
         for path in fonts {
             self.font_dropped(&ctx, &path);
         }
-        if !empty && !others.is_empty() {
-            let session = self.session();
+        if !others.is_empty()
+            && let Some(session) = self.session()
+        {
             let shell = &crate::pty::SHELLS[session.kind];
             let paths: Vec<String> = others
                 .iter()
@@ -1285,13 +1409,14 @@ impl eframe::App for Orion {
             self.open_menu();
         } else if self.menu.open && (toggle || escape) {
             self.menu.open = false;
-        } else if !empty
-            && !self.menu.open
+        } else if !self.menu.open
             && !self.palette.open
             && !self.orchestrate.open
             && !toggle
+            && let Some(session) = self.session()
         {
-            self.session().send_input(ui);
+            // En una pestaña Grafo no hay shell: el teclado queda para la vista.
+            session.send_input(ui);
         }
         // Con el menú, la paleta o el orquestador abiertos, el teclado es para ellos, no para la shell.
 
@@ -1358,6 +1483,26 @@ mod tests {
         let repos = [None, Some(&a), Some(&b), Some(&a), None];
         assert_eq!(grouped_order(&repos), vec![1, 3, 2, 0, 4]);
         assert_eq!(grouped_order(&[None, None]), vec![0, 1]);
+    }
+
+    #[test]
+    fn only_loose_terminals_follow_their_cwd_to_a_repo() {
+        let (a, b) = (PathBuf::from("/a"), PathBuf::from("/b"));
+        let check = |worktree, agent, cwd: Option<&PathBuf>, checked: Option<&PathBuf>| {
+            repo_to_check(
+                worktree,
+                agent,
+                cwd.map(|p| p.as_path()),
+                checked.map(|p| p.as_path()),
+            )
+            .map(PathBuf::from)
+        };
+        assert_eq!(check(false, false, Some(&a), None), Some(a.clone())); // primer cwd
+        assert_eq!(check(false, false, Some(&b), Some(&a)), Some(b.clone())); // hizo cd
+        assert_eq!(check(false, false, Some(&a), Some(&a)), None); // mismo cwd: sin git
+        assert_eq!(check(false, false, None, Some(&a)), None); // la shell no avisa cwd
+        assert_eq!(check(true, false, Some(&b), Some(&a)), None); // worktree: fijo
+        assert_eq!(check(false, true, Some(&b), Some(&a)), None); // agente: fijo
     }
 
     #[test]
