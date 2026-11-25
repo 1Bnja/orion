@@ -70,6 +70,8 @@ pub(super) struct Session {
     pub(super) attention: Option<String>,
     /// Carpeta actual, si la shell la informa (OSC 9;9). Para abrir rutas relativas.
     pub(super) cwd: Option<std::path::PathBuf>,
+    /// El agente que Orion escribió en este panel, seguido por las marcas de la shell.
+    pub(super) agent: Option<AgentWatch>,
 }
 
 /// Un comando que terminó en una pestaña que no miras avisa solo si tardó al menos esto
@@ -139,6 +141,7 @@ impl Session {
             alert: None,
             attention: None,
             cwd: None,
+            agent: None,
         })
     }
 
@@ -175,6 +178,9 @@ impl Session {
                     Piece::Mark(Mark::Cwd(dir)) => self.cwd = Some(dir.into()),
                     // La marca se aplica al llegar: el cursor está justo donde la shell la puso.
                     Piece::Mark(mark) => {
+                        if let Some(agent) = &mut self.agent {
+                            agent.on_mark(&mark);
+                        }
                         let finished = matches!(mark, Mark::Finished(_));
                         self.blocks.on_mark(mark, &self.term);
                         if let Some(block) = self.blocks.list.last().filter(|_| finished)
@@ -416,15 +422,21 @@ mod tests {
         let shell = &crate::pty::SHELLS[kind];
         let command = "'ok' | Set-Content listo.txt";
         session.write(crate::agents::launch_input(shell, Some(&dir), command).as_bytes());
+        session.agent = Some(AgentWatch::new(1)); // antes va el `cd`
         let start = Instant::now();
         // Comparadas ya resueltas: TEMP puede venir con nombres cortos (RUNNER~1) y la shell da los largos.
         let same =
             |a: &std::path::Path| std::fs::canonicalize(a).ok() == std::fs::canonicalize(&dir).ok();
-        while !dir.join("listo.txt").exists() || !session.cwd.as_deref().is_some_and(same) {
+        let done = |s: &Session| s.agent.map(|a| a.status) == Some(AgentStatus::Done(Some(0)));
+        while !dir.join("listo.txt").exists()
+            || !session.cwd.as_deref().is_some_and(same)
+            || !done(&session)
+        {
             assert!(
                 start.elapsed() < Duration::from_secs(20),
-                "cwd: {:?}",
-                session.cwd
+                "cwd: {:?}, agente: {:?}",
+                session.cwd,
+                session.agent
             );
             session.process_output();
             std::thread::sleep(Duration::from_millis(20));
@@ -434,97 +446,71 @@ mod tests {
     }
 }
 
-/// Cómo va un agente, según los bloques de su panel.
+/// Cómo va un agente.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AgentStatus {
-    /// Todavía no aparece el bloque de su comando.
+    /// Todavía no arrancó su comando.
     Starting,
     Running,
     /// Terminó, con su código si la shell lo informó.
     Done(Option<i32>),
 }
 
-/// Estado del agente que se lanzó con `command`, dados los `(comando, estado)` de los bloques del
-/// panel en orden. Gana el primer bloque cuyo comando coincide (ver `same_command`).
-pub(super) fn agent_status_of<'a>(
-    blocks: impl IntoIterator<Item = (&'a str, Status)>,
-    command: &str,
-) -> AgentStatus {
-    let found = blocks.into_iter().find(|(c, _)| same_command(c, command));
-    match found {
-        None | Some((_, Status::Editing)) => AgentStatus::Starting,
-        Some((_, Status::Running(_))) => AgentStatus::Running,
-        Some((_, Status::Done(code, _))) => AgentStatus::Done(code),
-    }
+/// Sigue el comando de un agente por las marcas OSC 133, no por la pantalla: un programa de
+/// pantalla completa o un `clear` borran lo que se ve, pero las marcas llegan igual. El comando
+/// del agente es el que arranca (marca C) después de saltar `skip` comandos: el `cd` que Orion
+/// escribe antes. Solo PowerShell y zsh mandan marcas: en cmd y WSL se queda en `Starting`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AgentWatch {
+    skip: usize,
+    pub(super) status: AgentStatus,
 }
 
-/// Si el comando leído de la pantalla (`read`) es el que Orion escribió. Un prompt largo se parte en
-/// varias filas y en el corte se pueden perder o sumar espacios: se compara sin espacios. Y si de la
-/// pantalla salió solo el comienzo, basta con que empiece igual y pase de las tres primeras palabras
-/// (`claude --model <id>`), para no confundirlo con otro comando corto.
-fn same_command(read: &str, written: &str) -> bool {
-    let compact = |s: &str| s.split_whitespace().collect::<String>();
-    let (read, full) = (compact(read), compact(written));
-    let head: String = written.split_whitespace().take(3).collect();
-    read == full || (read.len() > head.len() && full.starts_with(&read))
+impl AgentWatch {
+    pub(super) fn new(skip: usize) -> Self {
+        Self {
+            skip,
+            status: AgentStatus::Starting,
+        }
+    }
+
+    fn on_mark(&mut self, mark: &Mark) {
+        match (mark, self.status) {
+            (Mark::OutputStart, AgentStatus::Starting) if self.skip > 0 => self.skip -= 1,
+            (Mark::OutputStart, AgentStatus::Starting) => self.status = AgentStatus::Running,
+            (Mark::Finished(code), AgentStatus::Running) => self.status = AgentStatus::Done(*code),
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
 mod agent_tests {
     use super::*;
 
-    const D: Duration = Duration::ZERO;
-
     #[test]
-    fn agent_status_cases() {
-        let other = ("dir", Status::Done(Some(0), D));
-        assert_eq!(agent_status_of([other], "claude"), AgentStatus::Starting);
-        let running = [other, (" claude ", Status::Running(D))];
-        assert_eq!(agent_status_of(running, "claude"), AgentStatus::Running);
-        let ok = [("claude", Status::Done(Some(0), D))];
-        assert_eq!(agent_status_of(ok, "claude"), AgentStatus::Done(Some(0)));
-        let bad = [("claude", Status::Done(Some(1), D))];
-        assert_eq!(agent_status_of(bad, "claude"), AgentStatus::Done(Some(1)));
-        // Gana el primero que coincide, aunque haya uno posterior.
-        let two = [
-            ("claude", Status::Done(Some(1), D)),
-            ("claude", Status::Running(D)),
-        ];
-        assert_eq!(agent_status_of(two, "claude"), AgentStatus::Done(Some(1)));
-    }
-
-    #[test]
-    fn long_commands_match_even_when_the_screen_splits_them() {
-        let written =
-            "claude --model claude-sonnet-5-5 'Arregla ''el'' test de l''app y agrega docs'";
-        let ok = |read: &str| agent_status_of([(read, Status::Running(D))], written);
-        // Partido en filas: el corte cae en medio de una palabra o se come un espacio.
-        assert_eq!(
-            ok("claude --model claude-sonnet-5-5 'Arregla ''el'' te\nst de l''app y agrega docs'"),
-            AgentStatus::Running
-        );
-        assert_eq!(
-            ok("claude  --model claude-sonnet-5-5 'Arregla ''el''test de l''app y agrega docs'"),
-            AgentStatus::Running
-        );
-        // Solo el comienzo, pero más que `claude --model <id>`.
-        assert_eq!(
-            ok("claude --model claude-sonnet-5-5 'Arregla ''el''"),
-            AgentStatus::Running
-        );
-        // Otros comandos no cuentan: solo la cabeza, otro prompt, otro modelo.
-        assert_eq!(
-            ok("claude --model claude-sonnet-5-5"),
-            AgentStatus::Starting
-        );
-        assert_eq!(
-            ok("claude --model claude-sonnet-5-5 'Otra cosa'"),
-            AgentStatus::Starting
-        );
-        assert_eq!(
-            ok("claude --model claude-haiku-5-5 'Arregla'"),
-            AgentStatus::Starting
-        );
-        assert_eq!(ok("claude"), AgentStatus::Starting);
+    fn the_agent_is_the_command_after_the_cd() {
+        let mut watch = AgentWatch::new(1);
+        let mut feed = |marks: &[Mark]| {
+            for mark in marks {
+                watch.on_mark(mark);
+            }
+            watch.status
+        };
+        let prompt = [Mark::PromptStart, Mark::CommandStart];
+        assert_eq!(feed(&prompt), AgentStatus::Starting);
+        // El `cd`: arranca y termina, pero no es el agente.
+        let cd = [Mark::OutputStart, Mark::Finished(Some(0))];
+        assert_eq!(feed(&cd), AgentStatus::Starting);
+        // Un Enter vacío (D sin C) tampoco.
+        assert_eq!(feed(&prompt), AgentStatus::Starting);
+        assert_eq!(feed(&[Mark::Finished(None)]), AgentStatus::Starting);
+        assert_eq!(feed(&prompt), AgentStatus::Starting);
+        assert_eq!(feed(&[Mark::OutputStart]), AgentStatus::Running);
+        assert_eq!(feed(&[Mark::Finished(Some(2))]), AgentStatus::Done(Some(2)));
+        // Lo que se escriba después no cambia cómo terminó.
+        assert_eq!(feed(&prompt), AgentStatus::Done(Some(2)));
+        let again = [Mark::OutputStart, Mark::Finished(Some(0))];
+        assert_eq!(feed(&again), AgentStatus::Done(Some(2)));
     }
 }

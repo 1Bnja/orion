@@ -51,7 +51,7 @@ use menu::SettingsMenu;
 use palette::Palette;
 use panes::Split;
 use project::Project;
-use session::{AgentStatus, Session, agent_status_of};
+use session::{AgentStatus, AgentWatch, Session};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -75,9 +75,9 @@ struct Tab {
     agent: Option<String>,
     /// La carpeta del worktree si la pestaña nació en uno (para no limpiarlo mientras se usa).
     worktree: Option<PathBuf>,
-    /// El comando exacto que Orion escribió para el agente y el `id` del panel donde lo escribió
-    /// (con splits el foco cambia). None = pestaña que no es de agente.
-    agent_run: Option<(String, u64)>,
+    /// El `id` del panel donde Orion escribió el agente (con splits el foco cambia); su
+    /// `Session::agent` dice cómo va. None = pestaña que no es de agente.
+    agent_run: Option<u64>,
     /// Ya se avisó que el agente terminó con error (para no repetir el aviso cada frame).
     agent_notified: bool,
     /// El cwd con que se calculó `repo` por última vez (ver `repo_to_check`).
@@ -144,16 +144,9 @@ impl Tab {
     }
 
     /// Cómo va el agente de esta pestaña; None si no es de agente (o su panel ya se cerró).
-    /// Solo PowerShell y zsh mandan OSC 133: en cmd y WSL no hay bloques y se queda en `Starting`.
     pub(super) fn agent_status(&self) -> Option<AgentStatus> {
-        let (command, pane) = self.agent_run.as_ref()?;
-        let session = self.panes()?.get(*pane)?;
-        let blocks = session
-            .blocks
-            .list
-            .iter()
-            .map(|b| (b.command.as_str(), b.status()));
-        Some(agent_status_of(blocks, command))
+        let pane = self.agent_run?;
+        Some(self.panes()?.get(pane)?.agent?.status)
     }
 }
 
@@ -576,17 +569,22 @@ impl Orion {
         }
         let tab = &mut self.tabs[self.active];
         tab.repo = repo;
-        let Some(session) = tab.focused() else {
+        let Some(session) = tab.focused_mut() else {
             return false; // `new_tab` siempre abre una terminal
         };
         let shell = &crate::pty::SHELLS[session.kind];
         let command = command(shell);
         let input = crate::agents::launch_input(shell, dir.as_deref(), &command);
         session.write(input.as_bytes());
-        // Una terminal sola (sin comando) no es un agente.
-        tab.agent = (!command.is_empty()).then(|| name.to_string());
+        // Una terminal sola (sin comando) no es un agente. Con carpeta, `launch_input` escribe
+        // antes un `cd`: el agente es el segundo comando.
+        let agent = !command.is_empty();
+        if agent {
+            session.agent = Some(AgentWatch::new(usize::from(dir.is_some())));
+        }
+        tab.agent = agent.then(|| name.to_string());
         tab.worktree = if worktree { dir.clone() } else { None };
-        tab.agent_run = (!command.is_empty()).then_some((command, tab.focus));
+        tab.agent_run = agent.then_some(tab.focus);
         true
     }
 
@@ -1099,7 +1097,7 @@ impl Orion {
                 (tab.agent_status(), tab.agent_notified)
                 && code != 0
                 && let Some(name) = tab.agent.clone()
-                && let Some((_, pane)) = tab.agent_run
+                && let Some(pane) = tab.agent_run
                 && let Some(session) = tab.panes_mut().and_then(|p| p.get_mut(pane))
             {
                 session.alert = Some(format!(

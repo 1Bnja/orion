@@ -8,6 +8,7 @@ use alacritty_terminal::Term;
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
 use std::time::{Duration, Instant};
 
@@ -337,6 +338,10 @@ impl Blocks {
     /// ponytail: al llenarse el historial (10.000 líneas) las líneas viejas se descartan y los bloques más
     /// antiguos quedan corridos; arreglarlo pide marcar las filas dentro de la grilla misma.
     pub(crate) fn after_output<T: EventListener>(&mut self, term: &Term<T>) {
+        // La pantalla alternativa (vim, opencode) no tiene historial: que baje a 0 no es un `cls`.
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
         let history = term.grid().history_size();
         if history < self.history {
             self.list.clear();
@@ -553,6 +558,32 @@ mod tests {
         assert_eq!(done[1].exit_code, Some(3));
         // El último prompt queda abierto, esperando un comando.
         assert_eq!(blocks.list.last().unwrap().end, None);
+    }
+
+    #[test]
+    fn a_full_screen_app_keeps_the_blocks() {
+        // Un programa de pantalla completa (vim, opencode) pasa a la pantalla alternativa, que no
+        // tiene historial: no es un `cls`, los bloques (y el del programa mismo) tienen que seguir.
+        let mut term = Term::new(Config::default(), &term_size((40, 5)), VoidListener);
+        let mut blocks = Blocks::default();
+        let prompt: &[u8] = b"\x1b]133;A\x07PS> \x1b]133;B\x07";
+        run(
+            &mut term,
+            &mut blocks,
+            &[
+                prompt,
+                b"ls\r\n\x1b]133;C\x07a\r\nb\r\nc\r\nd\r\ne\r\nf\r\n\x1b]133;D;0\x07",
+                prompt,
+                b"vim\r\n\x1b]133;C\x07",
+                b"\x1b[?1049h\x1b[Heditando",
+                b"\x1b[?1049l\x1b]133;D;0\x07",
+                prompt,
+            ],
+        );
+        let done: Vec<_> = blocks.list.iter().filter(|b| b.end.is_some()).collect();
+        let commands: Vec<_> = done.iter().map(|b| b.command.as_str()).collect();
+        assert_eq!(commands, ["ls", "vim"]);
+        assert_eq!(done[1].exit_code, Some(0));
     }
 
     #[test]
