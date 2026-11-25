@@ -186,6 +186,42 @@ pub(crate) fn apply(window: Window, backdrop: Backdrop, dark: bool) {
 #[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn apply(_window: Window, _backdrop: Backdrop, _dark: bool) {}
 
+/// Title bar / traffic-light chrome for every OS window (main + settings).
+/// Call when a child window opens so it matches the theme (light title on dark bar).
+pub(crate) fn apply_chrome(dark: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::{
+            NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua,
+            NSAppearanceNameDarkAqua, NSApplication,
+        };
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let name = if dark {
+            // SAFETY: AppKit constant while AppKit is loaded.
+            unsafe { NSAppearanceNameDarkAqua }
+        } else {
+            // SAFETY: same.
+            unsafe { NSAppearanceNameAqua }
+        };
+        let appearance = NSAppearance::appearanceNamed(name);
+        let app = NSApplication::sharedApplication(mtm);
+        for window in app.windows().iter() {
+            window.setAppearance(appearance.as_deref());
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = dark; // Child windows get dark mode via the custom title bar instead.
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = dark;
+    }
+}
+
 /// La ventana nativa de lo que nos pase eframe: el HWND en Windows, la `NSView` en macOS.
 #[derive(Clone, Copy)]
 pub(crate) struct Window(RawWindowHandle);

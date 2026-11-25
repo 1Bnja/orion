@@ -86,11 +86,11 @@ const ITEMS: [(&str, &str, Keys, Command); 13] = [
     ),
     (
         "sidebar",
-        "Mostrar/ocultar barra lateral",
+        "Barra lateral",
         Some((false, Code::KeyB)),
         Command::ToggleSidebar,
     ),
-    ("theme", "Cambiar de tema", None, Command::NextTheme),
+    ("theme", "Siguiente tema", None, Command::NextTheme),
     ("font-bigger", "Agrandar letra", None, Command::FontBigger),
     ("font-smaller", "Achicar letra", None, Command::FontSmaller),
 ];
@@ -150,7 +150,7 @@ impl MacMenu {
         let submenu = |text: &str, items: &[&dyn IsMenuItem]| {
             Submenu::with_items(text, true, items).expect("submenú")
         };
-        // El primero es el de la app: macOS le pone el nombre de la app ("Orion").
+        // App menu: macOS shows the app name ("Orion") as the title.
         let app = submenu(
             "Orion",
             &[
@@ -168,22 +168,25 @@ impl MacMenu {
                 item("quit"),
             ],
         );
-        let shell = submenu(
-            "Shell",
+        // File-like: open things, then splits, then close.
+        let file = submenu(
+            "Archivo",
             &[
                 item("new-tab"),
                 item("new-project"),
                 &separator,
                 item("split-right"),
                 item("split-down"),
+                &separator,
                 item("close-pane"),
             ],
         );
+        // View: layout first, then look (theme / type size).
         let view = submenu(
             "Ver",
             &[
-                item("palette"),
                 item("sidebar"),
+                item("palette"),
                 &separator,
                 item("theme"),
                 item("font-bigger"),
@@ -191,7 +194,7 @@ impl MacMenu {
             ],
         );
         let window = submenu("Ventana", &[&minimize, &fullscreen, &separator, &front]);
-        let menu = Menu::with_items(&[&app, &shell, &view, &window]).expect("menú");
+        let menu = Menu::with_items(&[&app, &file, &view, &window]).expect("menú");
         menu.init_for_nsapp();
         window.set_as_windows_menu_for_nsapp();
 

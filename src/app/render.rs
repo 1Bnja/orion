@@ -163,10 +163,11 @@ pub(super) fn draw_toast(ui: &egui::Ui, area: egui::Rect, toast: &(String, Insta
     let galley = painter.layout_no_wrap(text.clone(), small, theme().fg);
     let pos = egui::pos2(
         area.center().x - galley.size().x / 2.0,
-        area.max.y - galley.size().y - 16.0,
+        area.max.y - galley.size().y - 24.0,
     );
-    let r = egui::Rect::from_min_size(pos, galley.size()).expand2(egui::vec2(10.0, 4.0));
-    painter.rect_filled(r, 6.0, theme().selection);
+    let r = egui::Rect::from_min_size(pos, galley.size()).expand2(egui::vec2(12.0, 6.0));
+    let stroke = egui::Stroke::new(1.0, theme().line());
+    painter.rect(r, 8.0, theme().sidebar(), stroke, egui::StrokeKind::Outside);
     painter.galley(pos, galley, theme().fg);
     ui.ctx().request_repaint_after(Duration::from_millis(100));
 }
@@ -251,6 +252,7 @@ impl Session {
         let mut open_menu = false;
         egui::Frame::central_panel(ui.style())
             .fill(surface(theme().bg)) // semitransparente con Mica o acrílico
+            .corner_radius(super::PANE_RADIUS)
             .show(ui, |ui| {
                 let size = settings.size;
                 // Fuente monoespaciada: todas las letras miden lo mismo, así que 'M' sirve de celda.
@@ -382,7 +384,8 @@ impl Session {
 
                 // --- Dónde va cada fila: con aire antes de cada bloque ---
                 let views = self.block_views();
-                let gap = (cell.y * 0.6).round();
+                // Quiet air between prompts — enough to breathe, not a hard separator.
+                let gap = (cell.y * 0.25).round();
                 let gap_rows: Vec<usize> = views
                     .iter()
                     .filter(|v| v.prompt_visible)
@@ -554,61 +557,26 @@ impl Session {
                         status,
                         first,
                         last,
-                        prompt_visible,
                         ..
                     } = *view;
                     let r = rows_rect(first, last);
                     let failed = matches!(status, Status::Done(Some(code), _) if code != 0);
-                    if theme().mono {
-                        // Monocromo: cada bloque es una tarjeta con borde fino. Un fallo, en rojo.
-                        let card = egui::Rect::from_x_y_ranges(
-                            area.min.x + 4.0..=area.max.x - 4.0,
-                            r.min.y - 2.0..=r.max.y + 2.0,
-                        );
-                        let red = theme().ansi[1];
-                        let (fill, border) = if marked == Some(view.index) {
-                            (theme().hover(), theme().fg)
-                        } else if failed {
-                            let tint = egui::Color32::from_rgba_unmultiplied(
-                                red.r(),
-                                red.g(),
-                                red.b(),
-                                12,
-                            );
-                            (tint, red.gamma_multiply(0.45))
-                        } else if hovered.is_some_and(|h| h.index == view.index) {
-                            (theme().hover(), theme().line())
-                        } else {
-                            (egui::Color32::TRANSPARENT, theme().line())
-                        };
-                        painter.rect_filled(card, 6.0, fill);
-                        let stroke = egui::Stroke::new(1.0, border);
-                        painter.rect_stroke(card, 6.0, stroke, egui::StrokeKind::Inside);
-                        continue;
-                    }
+                    // Continuous stream: no card borders — only hover, fail tint, and a thin status rail.
                     if marked == Some(view.index) {
-                        // Bloque marcado con Ctrl+↑/↓: fondo un poco más claro y borde azul.
-                        let glow = egui::Color32::from_rgba_unmultiplied(0x7a, 0xa2, 0xf7, 16);
-                        painter.rect_filled(r, 4.0, glow);
-                        let stroke = egui::Stroke::new(1.0, theme().ansi[4]);
+                        painter.rect_filled(r, 4.0, theme().hover());
+                        let stroke = egui::Stroke::new(1.0, theme().accent());
                         painter.rect_stroke(r.shrink(1.0), 4.0, stroke, egui::StrokeKind::Inside);
                     } else if hovered.is_some_and(|h| h.index == view.index) {
-                        // El bloque bajo el mouse se ilumina apenas: así se ve a cuál apuntan los botones.
-                        let glow = egui::Color32::from_rgba_unmultiplied(0xc0, 0xca, 0xf5, 6);
-                        painter.rect_filled(r, 0.0, glow);
+                        painter.rect_filled(r, 0.0, theme().hover());
                     }
-                    if matches!(status, Status::Done(Some(code), _) if code != 0) {
-                        // Un tinte rojo muy suave: los comandos que fallaron se encuentran de un vistazo.
-                        let tint = egui::Color32::from_rgba_unmultiplied(0xf7, 0x76, 0x8e, 14);
+                    if failed {
+                        let red = theme().ansi[1];
+                        let tint =
+                            egui::Color32::from_rgba_unmultiplied(red.r(), red.g(), red.b(), 14);
                         painter.rect_filled(r, 0.0, tint);
                     }
-                    if prompt_visible && first > 0 {
-                        // En medio del aire: lejos de la salida de arriba y del prompt de abajo.
-                        let y = (r.min.y - gap / 2.0).round();
-                        painter.hline(area.x_range(), y, egui::Stroke::new(1.0, theme().line()));
-                    }
                     let bar = egui::Rect::from_x_y_ranges(
-                        area.min.x + 6.0..=area.min.x + 9.0,
+                        area.min.x + 6.0..=area.min.x + 8.0,
                         r.min.y + 3.0..=r.max.y - 3.0,
                     );
                     painter.rect_filled(bar, 1.5, status_color(status));

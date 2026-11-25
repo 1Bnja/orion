@@ -68,8 +68,8 @@ Before launching, each subtask has a menu to switch its executor. See
 ### Everything else
 
 - **Suggestions from your history** as you type; `→` accepts them.
-- **Themes**: a monochrome default with color only where it means something, plus five more,
-  dark and light.
+- **Themes**: Orion (night sky) by default, a monochrome option with color only where it means
+  something, plus five more dark and light themes.
 - **Translucent background**: Mica or acrylic on Windows 11, native vibrancy on macOS.
 - **Any font**: pick an installed one, or drop a `.ttf` / `.otf` file onto the window.
 - **Several shells**: PowerShell, Windows PowerShell, cmd and WSL on Windows; zsh, bash, fish
@@ -141,7 +141,7 @@ Change everything from `Ctrl+,`, or edit `config.toml`:
 Changes apply as soon as you save the file, without restarting.
 
 ```toml
-theme = "Vercel"        # Vercel, Tokyo Night, Catppuccin Mocha, Dracula, Gruvbox, Catppuccin Latte
+theme = "Orion"         # Orion, Vercel, Tokyo Night, Catppuccin Mocha, Dracula, Gruvbox, Catppuccin Latte
 shell = "PowerShell"    # the shell for new tabs
 backdrop = "Mica"       # Ninguno, Mica, Acrílico
 check_updates = true    # look for a new version on launch

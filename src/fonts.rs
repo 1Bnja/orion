@@ -51,6 +51,27 @@ pub(crate) fn bold_family() -> egui::FontFamily {
     egui::FontFamily::Name("bold".into())
 }
 
+/// Font family for Orion's own text with a bit more weight (the active tab, the app name).
+pub(crate) fn medium_family() -> egui::FontFamily {
+    egui::FontFamily::Name("medium".into())
+}
+
+/// The system UI font, so Orion's own text (title bar, tabs, windows) looks native:
+/// SF on macOS, Segoe UI on Windows. None = keep the font that comes with egui.
+fn ui_font_file() -> Option<FontFile> {
+    #[cfg(target_os = "macos")]
+    let candidates = [PathBuf::from("/System/Library/Fonts/SFNS.ttf")];
+    #[cfg(windows)]
+    let candidates = {
+        let windows = std::env::var_os("WINDIR").unwrap_or_else(|| r"C:\Windows".into());
+        // Segoe UI Variable comes with Windows 11. Plain Segoe UI has a single weight.
+        ["SegUIVar.ttf", "segoeui.ttf"].map(|file| Path::new(&windows).join("Fonts").join(file))
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let candidates: [PathBuf; 0] = [];
+    candidates.into_iter().find(|p| p.exists()).map(Into::into)
+}
+
 /// ¿Esta entrada del registro de fuentes es de `family`? Some(false) = normal, Some(true) = negrita.
 /// Las entradas se ven como "Monocraft (TrueType)", "Cascadia Mono Regular (TrueType)"
 /// o, con Windows en español, "Consolas Negrita (TrueType)".
@@ -481,9 +502,35 @@ pub(crate) fn apply_font(ctx: &egui::Context, family: &str) {
 pub(crate) fn font_definitions(
     files: Option<&(FontFile, Option<FontFile>)>,
 ) -> egui::FontDefinitions {
-    use egui::{FontData, FontFamily, FontTweak, epaint::text::VariationCoords};
+    use egui::epaint::text::{Blob, VariationCoords};
+    use egui::{FontData, FontFamily, FontTweak};
     use std::sync::Arc;
     let mut fonts = egui::FontDefinitions::default();
+
+    // Orion's own text: the system UI font in two weights. Both share one copy of the file,
+    // which is read only once.
+    static UI_FONT: std::sync::OnceLock<Option<Blob>> = std::sync::OnceLock::new();
+    let ui_font = UI_FONT.get_or_init(|| Some(Arc::new(read_font(&ui_font_file()?)?) as Blob));
+    let mut regular = fonts.families[&FontFamily::Proportional].clone();
+    let mut medium = regular.clone();
+    if let Some(blob) = ui_font {
+        for (name, family, weight) in [
+            ("ui", &mut regular, 400.0),
+            ("ui-medium", &mut medium, 510.0),
+        ] {
+            let tweak = FontTweak {
+                coords: VariationCoords::new([(b"wght", weight)]),
+                ..Default::default()
+            };
+            let data = FontData::from_blob(blob.clone(), 0).tweak(tweak);
+            fonts.font_data.insert(name.into(), Arc::new(data));
+            family.insert(0, name.into());
+        }
+    }
+    fonts.families.insert(FontFamily::Proportional, regular);
+    // Without a system font both families are egui's font (but both must exist).
+    fonts.families.insert(medium_family(), medium);
+
     // Respaldos que ya trae egui (incluyen emoji en blanco y negro).
     let mut fallback = fonts.families[&FontFamily::Monospace].clone();
     // Y los del sistema (ver FALLBACK_FONTS), si están instalados. Se leen una sola vez:

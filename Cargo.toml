@@ -17,6 +17,8 @@ rfd = { version = "0.15", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
 toml = "1.2.1"
+# Decode the Tabler icon PNGs embedded at compile time.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # macOS: la barra de menú del sistema (la de la manzana), con las opciones de Orion.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -26,6 +28,7 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSAppearance",
+    "NSApplication",
     "NSColor",
     "NSGraphics",
     "NSResponder",

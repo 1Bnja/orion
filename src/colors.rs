@@ -19,24 +19,26 @@ pub(crate) struct Theme {
     pub(crate) bg: Color32,
     pub(crate) selection: Color32,
     pub(crate) ansi: [Color32; 16],
-    /// Estilo monocromo (como Vercel): los bloques van en grises con un borde fino, y el color
-    /// queda solo para lo que importa (un comando que falló). Si no, la barra de color de siempre.
+    /// Monochrome style (Orion / Vercel): muted UI chrome; color only when it means something
+    /// (failed command, status rail). No bordered cards between commands.
     pub(crate) mono: bool,
+    /// Cursor color. None = same as the text.
+    pub(crate) cursor: Option<Color32>,
     /// Overrides del usuario de los colores derivados (None = se calculan del tema).
-    derived: Derived,
+    pub(crate) derived: Derived,
 }
 
 /// Colores de interfaz que normalmente se derivan del tema y que el usuario puede fijar a mano.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Derived {
-    sidebar: Option<Color32>,
-    accent: Option<Color32>,
-    line: Option<Color32>,
-    hover: Option<Color32>,
+    pub(crate) sidebar: Option<Color32>,
+    pub(crate) accent: Option<Color32>,
+    pub(crate) line: Option<Color32>,
+    pub(crate) hover: Option<Color32>,
 }
 
 impl Derived {
-    const NONE: Self = Self {
+    pub(crate) const NONE: Self = Self {
         sidebar: None,
         accent: None,
         line: None,
@@ -73,7 +75,21 @@ const fn ansi(c: [u32; 16]) -> [Color32; 16] {
 }
 
 /// Los temas incluidos. El primero es el de siempre.
-pub(crate) static THEMES: [Theme; 6] = [
+pub(crate) static THEMES: [Theme; 7] = [
+    // Orion's own theme: the logo's near-black and a soft warm ivory (a hint of yellow, never pure white).
+    Theme {
+        name: "Orion",
+        fg: hex(0xf8f5f0),
+        bg: hex(0x020204),
+        selection: hex(0x2c2a27),
+        mono: true,
+        cursor: Some(hex(0xe8d9c0)),
+        derived: Derived::NONE,
+        ansi: ansi([
+            0x1a1918, 0xe8908a, 0x8fbf9a, 0xe0c48a, 0x8fadcf, 0xb89ec8, 0x7eb8b4, 0xb5b0a8, //
+            0x6e6a64, 0xf0a8a2, 0xa8d0b2, 0xedd4a0, 0xa8c4de, 0xceb4dc, 0x96ccc8, 0xf8f5f0,
+        ]),
+    },
     // Inspirado en Vercel (Geist): negro puro, grises y el color solo cuando significa algo.
     Theme {
         name: "Vercel",
@@ -81,6 +97,7 @@ pub(crate) static THEMES: [Theme; 6] = [
         bg: hex(0x000000),
         selection: hex(0x333333),
         mono: true,
+        cursor: None,
         derived: Derived::NONE,
         ansi: ansi([
             0x242424, 0xff6166, 0x4cc38a, 0xffb224, 0x52a8ff, 0xbf7af0, 0x0ac7b4, 0xa1a1a1, //
@@ -93,6 +110,7 @@ pub(crate) static THEMES: [Theme; 6] = [
         bg: hex(0x1a1b26),
         selection: hex(0x33467c),
         mono: false,
+        cursor: None,
         derived: Derived::NONE,
         ansi: ansi([
             0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6, //
@@ -105,6 +123,7 @@ pub(crate) static THEMES: [Theme; 6] = [
         bg: hex(0x1e1e2e),
         selection: hex(0x45475a),
         mono: false,
+        cursor: None,
         derived: Derived::NONE,
         ansi: ansi([
             0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, //
@@ -117,6 +136,7 @@ pub(crate) static THEMES: [Theme; 6] = [
         bg: hex(0x282a36),
         selection: hex(0x44475a),
         mono: false,
+        cursor: None,
         derived: Derived::NONE,
         ansi: ansi([
             0x21222c, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd, 0xf8f8f2, //
@@ -129,6 +149,7 @@ pub(crate) static THEMES: [Theme; 6] = [
         bg: hex(0x282828),
         selection: hex(0x504945),
         mono: false,
+        cursor: None,
         derived: Derived::NONE,
         ansi: ansi([
             0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984, //
@@ -141,6 +162,7 @@ pub(crate) static THEMES: [Theme; 6] = [
         bg: hex(0xeff1f5),
         selection: hex(0xacb0be),
         mono: false,
+        cursor: None,
         derived: Derived::NONE,
         ansi: ansi([
             0x5c5f77, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xacb0be, //
@@ -169,11 +191,9 @@ pub(crate) fn find_theme(name: &str) -> Option<usize> {
         .position(|t| t.name.eq_ignore_ascii_case(name.trim()))
 }
 
-/// Elige el tema base y le aplica los overrides del usuario.
-/// Se filtra un Theme por cambio (diminuto): así `theme()` sigue devolviendo `&'static`.
-pub(crate) fn set_theme(index: usize, overrides: Overrides) {
-    let base = &THEMES[index.min(THEMES.len() - 1)];
-    let theme: &'static Theme = Box::leak(Box::new(base.with_overrides(overrides)));
+/// Activa un tema ya resuelto (tema propio o built-in con overrides).
+pub(crate) fn set_active_theme(theme: Theme) {
+    let theme: &'static Theme = Box::leak(Box::new(theme));
     *active().write().unwrap_or_else(|e| e.into_inner()) = theme;
 }
 
@@ -198,11 +218,6 @@ pub(crate) fn set_surface_alpha(alpha: u8) {
     SURFACE_ALPHA.store(alpha, Ordering::Relaxed);
 }
 
-/// ¿Los fondos son opacos? (sin Mica ni acrílico).
-pub(crate) fn opaque() -> bool {
-    SURFACE_ALPHA.load(Ordering::Relaxed) == 255
-}
-
 /// Un color de fondo (la terminal, la barra lateral) con la opacidad actual.
 pub(crate) fn surface(c: Color32) -> Color32 {
     let alpha = SURFACE_ALPHA.load(Ordering::Relaxed);
@@ -217,7 +232,7 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 
 impl Theme {
     /// Este tema con los overrides del usuario encima. Solo cambia lo que venga en `overrides`.
-    fn with_overrides(&self, overrides: Overrides) -> Theme {
+    pub(crate) fn with_overrides(&self, overrides: Overrides) -> Theme {
         let mut ansi = self.ansi;
         for (color, over) in ansi.iter_mut().zip(overrides.ansi) {
             if let Some(c) = over {
@@ -231,6 +246,7 @@ impl Theme {
             selection: overrides.selection.unwrap_or(self.selection),
             ansi,
             mono: self.mono,
+            cursor: self.cursor,
             derived: Derived {
                 sidebar: overrides.sidebar,
                 accent: overrides.accent,
@@ -246,16 +262,33 @@ impl Theme {
         0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32 > 128.0
     }
 
-    /// Barra lateral: un poco más oscura que la terminal (con fondo negro, apenas más clara).
+    /// The frame around the terminal (title bar and sidebar): darker than the terminal, so the
+    /// terminal reads as a lit panel. Pure black cannot go darker, so there it is a bit lighter.
     pub(crate) fn sidebar(&self) -> Color32 {
         if let Some(c) = self.derived.sidebar {
             return c;
         }
         if self.mono {
-            mix(self.bg, self.fg, 0.04)
+            mix(self.bg, self.fg, 0.06)
+        } else if self.is_light() {
+            mix(self.bg, Color32::BLACK, 0.08)
         } else {
-            mix(self.bg, Color32::BLACK, 0.15)
+            mix(self.bg, Color32::BLACK, 0.25)
         }
+    }
+
+    /// Text that matters less than the main text (inactive tabs, paths).
+    pub(crate) fn secondary(&self) -> Color32 {
+        mix(self.fg, self.bg, 0.28)
+    }
+
+    /// The quietest text that is still readable (hints, group names).
+    pub(crate) fn muted(&self) -> Color32 {
+        mix(self.fg, self.bg, 0.45)
+    }
+
+    pub(crate) fn cursor(&self) -> Color32 {
+        self.cursor.unwrap_or(self.fg)
     }
 
     /// Fondo de una fila bajo el mouse.
@@ -278,6 +311,13 @@ impl Theme {
         self.derived
             .line
             .unwrap_or_else(|| mix(self.bg, self.fg, 0.12))
+    }
+
+    /// Lines and borders drawn on the frame (`sidebar`), which is not the color of the terminal.
+    pub(crate) fn frame_line(&self) -> Color32 {
+        self.derived
+            .line
+            .unwrap_or_else(|| mix(self.sidebar(), self.fg, 0.14))
     }
 
     /// La interfaz de egui (configuración, paleta, menús) con los colores del tema: el mismo
@@ -391,7 +431,8 @@ pub(crate) fn default_color(idx: usize) -> Color32 {
                 dim(theme().ansi[i - NamedColor::DimBlack as usize])
             }
             i if i == NamedColor::DimForeground as usize => dim(theme().fg),
-            _ => theme().fg, // Foreground, Cursor, BrightForeground
+            i if i == NamedColor::Cursor as usize => theme().cursor(),
+            _ => theme().fg, // Foreground, BrightForeground
         },
     }
 }

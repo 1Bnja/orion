@@ -2445,6 +2445,7 @@ dependencies = [
  "alacritty_terminal",
  "base64",
  "eframe",
+ "image",
  "muda",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",

@@ -1,74 +1,54 @@
-//! La barra de arriba: Orion dibuja la suya en vez de la del sistema. Logo, botones, el título
-//! de la pestaña y minimizar / maximizar / cerrar a la derecha (Windows). En Mac los tres círculos
-//! son los nativos de macOS (la barra solo les deja lugar a la izquierda) y los botones de
-//! Orion pasan a la barra de menú del sistema.
-//! Arrastrarla mueve la ventana; doble clic maximiza.
+//! The title bar. Orion draws its own instead of the system one: the logo and the name on the
+//! left, the folder of the focused pane in the middle and Orion's buttons on the right.
+//! On Windows it also draws minimize / maximize / close. On Mac the three circles are the native
+//! ones: the bar only leaves room for them on the left.
+//! Dragging the bar moves the window; a double click maximizes it.
 
+use super::chrome::{Icon, icon_button, medium};
 use super::{Action, MAC, Orion};
 use crate::colors::{surface, theme};
-use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, ViewportCommand, vec2};
+use eframe::egui::text::{LayoutJob, TextFormat};
+use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, ViewportCommand, vec2};
+use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 
 const HEIGHT: f32 = 34.0;
-/// Ancho de cada botón de la ventana (como los de Windows 11).
+/// Width of each window button (like the ones in Windows 11).
 const WINDOW_BUTTON: f32 = 46.0;
-/// Mac: lugar libre a la izquierda para los círculos nativos de macOS; el logo va después.
+/// Mac: room on the left for the native circles.
 const LIGHTS_WIDTH: f32 = 72.0;
+const BUTTON: egui::Vec2 = vec2(28.0, 24.0);
+const BUTTON_GAP: f32 = 2.0;
 
-#[derive(Clone, Copy)]
-enum Icon {
-    Gear,
-    Palette,
-    Sidebar,
-    Split,
-    Theme,
+/// The folder as (parents, name), with the home folder written as "~":
+/// "/home/ana/code/orion" is ("~/code/", "orion").
+fn breadcrumb(cwd: &Path, home: Option<&Path>) -> (String, String) {
+    let text = match home.and_then(|home| cwd.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~{MAIN_SEPARATOR}{}", rest.display()),
+        None => cwd.display().to_string(),
+    };
+    match text.rfind(MAIN_SEPARATOR) {
+        Some(i) if i + 1 < text.len() => (text[..=i].to_string(), text[i + 1..].to_string()),
+        _ => (String::new(), text),
+    }
 }
 
-/// Íconos dibujados con líneas, centrados en `c`: con letras de fuentes distintas cada uno
-/// quedaba a otra altura.
-fn draw_icon(painter: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
-    let stroke = Stroke::new(1.3, color);
-    match icon {
-        Icon::Gear => {
-            painter.circle_stroke(c, 3.2, stroke);
-            for i in 0..8 {
-                let angle = i as f32 * std::f32::consts::TAU / 8.0;
-                let dir = vec2(angle.cos(), angle.sin());
-                painter.line_segment([c + dir * 5.0, c + dir * 7.0], Stroke::new(2.0, color));
-            }
-            painter.circle_stroke(c, 5.2, stroke);
-        }
-        Icon::Palette => {
-            // Un prompt dentro de un recuadro: ">_".
-            let r = Rect::from_center_size(c, vec2(14.0, 12.0));
-            painter.rect_stroke(r, 2.5, stroke, egui::StrokeKind::Inside);
-            let o = r.min + vec2(3.5, 3.5);
-            painter.line_segment([o, o + vec2(2.5, 2.5)], stroke);
-            painter.line_segment([o + vec2(2.5, 2.5), o + vec2(0.0, 5.0)], stroke);
-            painter.hline(o.x + 4.5..=o.x + 7.5, o.y + 5.0, stroke);
-        }
-        Icon::Sidebar => {
-            // Una ventana con la barra lateral marcada a la izquierda.
-            let r = Rect::from_center_size(c, vec2(14.0, 12.0));
-            painter.rect_stroke(r, 2.5, stroke, egui::StrokeKind::Inside);
-            painter.vline(r.min.x + 5.0, r.y_range(), stroke);
-        }
-        Icon::Split => {
-            let r = Rect::from_center_size(c, vec2(14.0, 12.0));
-            painter.rect_stroke(r, 2.5, stroke, egui::StrokeKind::Inside);
-            painter.vline(c.x, r.y_range(), stroke);
-        }
-        Icon::Theme => {
-            // Medio círculo lleno: claro / oscuro.
-            painter.circle_stroke(c, 6.0, stroke);
-            let half: Vec<Pos2> = (0..=16)
-                .map(|i| {
-                    let a = std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 16.0;
-                    c + vec2(a.cos(), a.sin()) * 6.0
-                })
-                .collect();
-            painter.add(egui::Shape::convex_polygon(half, color, Stroke::NONE));
-        }
-    }
+/// `parents` without its first folder, with "…" in its place: "~/code/rust/" becomes
+/// "…/rust/". None when there is nothing left to drop.
+fn drop_first(parents: &str) -> Option<String> {
+    // "~" and "…" both stand for a folder already dropped; skip them the same way.
+    let rest = parents
+        .strip_prefix('…')
+        .or_else(|| parents.strip_prefix('~'))
+        .unwrap_or(parents);
+    let rest = rest.trim_start_matches(MAIN_SEPARATOR);
+    let cut = rest.find(MAIN_SEPARATOR)?;
+    Some(format!("…{MAIN_SEPARATOR}{}", &rest[cut + 1..]))
+}
+
+fn home() -> Option<PathBuf> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var).map(PathBuf::from)
 }
 
 impl Orion {
@@ -77,12 +57,12 @@ impl Orion {
         let frame = egui::Frame::new().fill(surface(theme().sidebar()));
         egui::Panel::top("barra")
             .exact_size(HEIGHT)
-            .show_separator_line(theme().mono)
+            .show_separator_line(false)
             .frame(frame)
             .show(ui, |ui| {
                 let bar = ui.max_rect();
                 let ctx = ui.ctx().clone();
-                // Primero el fondo que se arrastra: los botones van encima y se llevan sus clics.
+                // The draggable background goes first: the buttons sit on top and take their clicks.
                 let drag = ui.interact(
                     bar,
                     ui.scope_id().with("arrastrar"),
@@ -95,38 +75,23 @@ impl Orion {
                 if drag.double_clicked() {
                     ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
                 }
-
-                // En Mac, los círculos nativos ocupan la izquierda: el logo empieza después.
-                let start = bar.min.x + if MAC { LIGHTS_WIDTH } else { 0.0 };
-
-                // Logo: el ícono de Orion y el nombre.
-                let painter = ui.painter();
                 let mid = bar.center().y;
-                let font = egui::FontId::proportional(13.0);
-                let logo = Rect::from_center_size(Pos2::new(start + 20.0, mid), vec2(18.0, 18.0));
+
+                // Left: the logo and the name.
+                let left = bar.min.x + if MAC { LIGHTS_WIDTH + 8.0 } else { 12.0 };
+                let logo = Rect::from_min_size(Pos2::new(left, mid - 8.0), vec2(16.0, 16.0));
                 let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-                painter.image(self.logo.id(), logo, uv, Color32::WHITE);
-                painter.text(
-                    Pos2::new(start + 32.0, mid),
+                ui.painter().image(self.logo.id(), logo, uv, theme().fg);
+                let name = ui.painter().text(
+                    Pos2::new(logo.max.x + 7.0, mid),
                     egui::Align2::LEFT_CENTER,
                     "Orion",
-                    font.clone(),
+                    medium(13.0),
                     theme().fg,
                 );
 
-                // Botones de Orion.
-                let next_theme = self.next_theme();
+                // Right: Orion's buttons (before the window buttons on Windows).
                 let buttons = [
-                    (
-                        Icon::Gear,
-                        keys!("Configuración   ", "+,", ""),
-                        Action::OpenSettings,
-                    ),
-                    (
-                        Icon::Palette,
-                        keys!("Paleta de comandos   ", "+Shift+P", ""),
-                        Action::Palette,
-                    ),
                     (
                         Icon::Sidebar,
                         keys!("Mostrar/ocultar barra lateral   ", "+B", ""),
@@ -137,49 +102,38 @@ impl Orion {
                         keys!("Dividir a la derecha   ", "+Shift+D", ""),
                         Action::Split(true),
                     ),
-                    (Icon::Theme, "Cambiar de tema", Action::Theme(next_theme)),
+                    (
+                        Icon::Theme,
+                        "Siguiente tema",
+                        Action::Theme(self.next_theme()),
+                    ),
+                    (
+                        Icon::Palette,
+                        keys!("Paleta de comandos   ", "+Shift+P", ""),
+                        Action::Palette,
+                    ),
+                    (
+                        Icon::Gear,
+                        keys!("Configuración   ", "+,", ""),
+                        Action::OpenSettings,
+                    ),
                 ];
-                let mut x = start + 86.0;
-                // En Mac estas opciones están en la barra de menú del sistema (ver `macmenu`).
-                for (icon, tip, act) in buttons.into_iter().filter(|_| !MAC) {
-                    let r = Rect::from_center_size(Pos2::new(x, mid), vec2(28.0, 26.0));
-                    let button = ui.interact(r, ui.scope_id().with(tip), Sense::click());
-                    let color = if button.hovered() {
-                        ui.painter().rect_filled(r, 6.0, theme().hover());
-                        theme().fg
-                    } else {
-                        theme().ansi[7]
-                    };
-                    draw_icon(ui.painter(), icon, r.center(), color);
+                let right = bar.max.x - if MAC { 8.0 } else { 3.0 * WINDOW_BUTTON + 6.0 };
+                let buttons_left = right - buttons.len() as f32 * (BUTTON.x + BUTTON_GAP);
+                let mut x = buttons_left;
+                for (icon, tip, act) in buttons {
+                    let rect = Rect::from_min_size(Pos2::new(x, mid - BUTTON.y / 2.0), BUTTON);
+                    let button = icon_button(ui, rect, ui.scope_id().with(tip), icon);
                     if button.on_hover_text(tip).clicked() {
                         action = Some(act);
                     }
-                    x += 32.0;
+                    x += BUTTON.x + BUTTON_GAP;
                 }
 
-                // Título de la pestaña, al medio, sin pisar los botones.
-                let title = self
-                    .tabs
-                    .get(self.active)
-                    .map(|t| t.focused().title())
-                    .unwrap_or_default();
-                let left = x;
-                let right = if MAC {
-                    bar.max.x - 8.0
-                } else {
-                    bar.max.x - 3.0 * WINDOW_BUTTON - 8.0
-                };
-                let galley = ui.painter().layout_no_wrap(title, font, theme().ansi[7]);
-                let center = bar.center().x.clamp(
-                    left + galley.size().x / 2.0,
-                    (right - galley.size().x / 2.0).max(left),
-                );
-                let clip = Rect::from_x_y_ranges(left..=right.max(left), bar.y_range());
-                ui.painter().with_clip_rect(clip).galley(
-                    Pos2::new(center - galley.size().x / 2.0, mid - galley.size().y / 2.0),
-                    galley,
-                    theme().ansi[7],
-                );
+                // Middle: where the focused pane is.
+                let space =
+                    Rect::from_x_y_ranges(name.max.x + 16.0..=buttons_left - 16.0, bar.y_range());
+                self.draw_location(ui, space, bar.center().x);
 
                 if !MAC {
                     windows_buttons(ui, bar, maximized);
@@ -187,13 +141,56 @@ impl Orion {
             });
         action
     }
+
+    /// The folder of the focused pane, centered on `center` when it fits in `space`: the parent
+    /// folders in a quiet color and the last one in the text color. If the shell did not report
+    /// a folder, the title of the pane.
+    fn draw_location(&self, ui: &egui::Ui, space: Rect, center: f32) {
+        let Some(session) = self.tabs.get(self.active).map(|tab| tab.focused()) else {
+            return;
+        };
+        let (mut parents, name) = match &session.cwd {
+            Some(cwd) => breadcrumb(cwd, home().as_deref()),
+            None => (String::new(), session.title()),
+        };
+        let layout = |parents: &str| {
+            let quiet = TextFormat::simple(FontId::proportional(12.5), theme().muted());
+            let mut job = LayoutJob::default();
+            job.append(parents, 0.0, quiet);
+            job.append(&name, 0.0, TextFormat::simple(medium(12.5), theme().fg));
+            ui.painter().layout_job(job)
+        };
+        let mut galley = layout(&parents);
+        // Too long: drop folders from the left until it fits.
+        while galley.size().x > space.width()
+            && let Some(shorter) = drop_first(&parents)
+        {
+            parents = shorter;
+            galley = layout(&parents);
+        }
+        let half = galley.size().x / 2.0;
+        let x = center.clamp(
+            space.min.x + half,
+            (space.max.x - half).max(space.min.x + half),
+        );
+        let pos = Pos2::new(x - half, space.center().y - galley.size().y / 2.0);
+        ui.painter()
+            .with_clip_rect(space)
+            .galley(pos, galley, theme().fg);
+    }
 }
 
-/// Windows: minimizar, maximizar y cerrar a la derecha, dibujados con líneas (nítidos en cualquier escala).
+/// Windows: minimize, maximize and close on the right, drawn with lines (sharp at any scale).
 fn windows_buttons(ui: &egui::Ui, bar: Rect, maximized: bool) {
     let ctx = ui.ctx();
-    let stroke =
-        |hovered: bool| Stroke::new(1.0, if hovered { theme().fg } else { theme().ansi[7] });
+    let stroke = |hovered: bool| {
+        let color = if hovered {
+            theme().fg
+        } else {
+            theme().secondary()
+        };
+        Stroke::new(1.0, color)
+    };
     let window_button = |ui: &egui::Ui, i: f32, id: &str| {
         let r = Rect::from_min_size(
             Pos2::new(bar.max.x - (3.0 - i) * WINDOW_BUTTON, bar.min.y),
@@ -220,7 +217,7 @@ fn windows_buttons(ui: &egui::Ui, bar: Rect, maximized: bool) {
     }
     let square = Rect::from_center_size(r.center(), vec2(10.0, 10.0));
     if maximized {
-        // Restaurar: dos cuadrados encimados.
+        // Restore: two overlapping squares.
         ui.painter().rect_stroke(
             square.translate(vec2(2.0, -2.0)),
             1.0,
@@ -252,7 +249,7 @@ fn windows_buttons(ui: &egui::Ui, bar: Rect, maximized: bool) {
     }
 
     let (r, close) = window_button(ui, 2.0, "cerrar");
-    let red = Color32::from_rgb(0xc4, 0x2b, 0x1c); // el rojo de cerrar de Windows 11
+    let red = Color32::from_rgb(0xc4, 0x2b, 0x1c); // the close red of Windows 11
     if close.hovered() {
         ui.painter().rect_filled(r, 0.0, red);
     }
@@ -261,7 +258,7 @@ fn windows_buttons(ui: &egui::Ui, bar: Rect, maximized: bool) {
         if close.hovered() {
             Color32::WHITE
         } else {
-            theme().ansi[7]
+            theme().secondary()
         },
     );
     let c = r.center();
@@ -271,5 +268,41 @@ fn windows_buttons(ui: &egui::Ui, bar: Rect, maximized: bool) {
         .line_segment([c + vec2(-5.0, 5.0), c + vec2(5.0, -5.0)], x_stroke);
     if close.clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Close);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A path written with "/" in the form of this system.
+    fn native(path: &str) -> String {
+        path.replace('/', std::path::MAIN_SEPARATOR_STR)
+    }
+
+    #[test]
+    fn breadcrumb_splits_the_folder_and_shortens_home() {
+        let home = PathBuf::from(native("/home/ana"));
+        let crumb = |path: &str| breadcrumb(Path::new(&native(path)), Some(&home));
+        assert_eq!(
+            crumb("/home/ana/code/orion"),
+            (native("~/code/"), "orion".to_string())
+        );
+        assert_eq!(crumb("/home/ana"), (String::new(), "~".to_string()));
+        assert_eq!(crumb("/usr/local"), (native("/usr/"), "local".to_string()));
+        // Another user's folder only starts the same: it is not inside home.
+        assert_eq!(crumb("/home/anabel"), (native("/home/"), "anabel".into()));
+        let root = breadcrumb(Path::new(&native("/")), None);
+        assert_eq!(root, (String::new(), native("/")));
+    }
+
+    #[test]
+    fn long_paths_lose_folders_from_the_left() {
+        let step = |parents: &str| drop_first(&native(parents));
+        assert_eq!(step("~/code/rust/"), Some(native("…/rust/")));
+        assert_eq!(step("/usr/local/"), Some(native("…/local/")));
+        assert_eq!(step("…/rust/"), Some(native("…/")));
+        assert_eq!(step("…/"), None);
+        assert_eq!(step(""), None);
     }
 }
