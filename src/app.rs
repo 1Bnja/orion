@@ -24,6 +24,7 @@ macro_rules! keys {
 }
 
 mod chrome;
+mod graph;
 mod home;
 #[cfg(target_os = "macos")]
 mod macmenu;
