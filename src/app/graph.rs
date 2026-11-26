@@ -1,10 +1,11 @@
 //! La vista "Grafo" (solo lectura): las ramas y los commits del repo, uno por fila, con las
-//! líneas del grafo a la izquierda.
+//! refs a la izquierda y, junto a ellas, las líneas del grafo.
 
 use super::chrome::{RADIUS, label, medium};
 use crate::colors::theme;
 use crate::git_graph::{self, Commit, Graph, Row};
-use eframe::egui::{self, Color32, FontId, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use eframe::egui::epaint::{CubicBezierShape, RectShape};
+use eframe::egui::{self, Color32, FontId, Rect, Sense, Shape, Stroke, StrokeKind, pos2, vec2};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,12 +13,30 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Alto fijo de cada fila (lo necesita `show_rows`).
 const ROW: f32 = 28.0;
 /// Distancia entre carriles.
-const LANE: f32 = 16.0;
+const LANE: f32 = 24.0;
+/// Radio del nodo con las iniciales y del punto de un merge.
+const NODE: f32 = 10.0;
+const MERGE_NODE: f32 = 4.0;
+/// Ancho de la columna de refs, a la izquierda del grafo.
+const REFS_W: f32 = 160.0;
 /// Columnas de la derecha.
 const AUTHOR_W: f32 = 130.0;
 const DATE_W: f32 = 84.0;
 /// Colores ANSI para los carriles: sin negros, grises ni blancos (0, 7, 8 y 15).
 const LANE_COLORS: [usize; 12] = [4, 2, 5, 3, 6, 1, 12, 10, 13, 11, 14, 9];
+/// Rellenos de los nodos, según el autor: todos se leen con iniciales blancas.
+const AUTHOR_COLORS: [Color32; 10] = [
+    Color32::from_rgb(0xb9, 0x3c, 0x3c),
+    Color32::from_rgb(0xb4, 0x55, 0x09),
+    Color32::from_rgb(0x8a, 0x6d, 0x0b),
+    Color32::from_rgb(0x3f, 0x7d, 0x20),
+    Color32::from_rgb(0x0f, 0x76, 0x6e),
+    Color32::from_rgb(0x03, 0x69, 0xa1),
+    Color32::from_rgb(0x1d, 0x4e, 0xd8),
+    Color32::from_rgb(0x6d, 0x28, 0xd9),
+    Color32::from_rgb(0xa2, 0x1c, 0xaf),
+    Color32::from_rgb(0xbe, 0x18, 0x5d),
+];
 
 /// El estado de la vista.
 pub(super) struct GraphView {
@@ -27,6 +46,8 @@ pub(super) struct GraphView {
     pub(super) filter: String,
     pub(super) show_remotes: bool,
     pub(super) show_tags: bool,
+    /// Carril del commit bajo el puntero en el frame anterior: se resalta en todas las filas.
+    hovered_lane: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,11 +126,48 @@ fn lane_color(lane: usize) -> Color32 {
     theme().ansi[LANE_COLORS[lane % LANE_COLORS.len()]]
 }
 
-/// El grafo de la fila `i`: las líneas que entran desde la fila anterior, las que salen hacia
-/// la siguiente y el nodo. Cada línea va de centro a centro y se recorta a la fila, así se ve
-/// continua aunque `show_rows` solo pinte las visibles.
-fn draw_lanes(painter: &egui::Painter, rect: Rect, rows: &[Row], i: usize, opacity: f32) {
-    let mut painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+/// Hasta dos iniciales del autor (primera y última palabra), en mayúscula.
+fn initials(author: &str) -> String {
+    let mut words = author
+        .split_whitespace()
+        .filter_map(|word| word.chars().find(|c| c.is_alphanumeric()));
+    let first = words.next();
+    let letters: String = first
+        .into_iter()
+        .chain(words.next_back())
+        .flat_map(|c| c.to_uppercase().next())
+        .collect();
+    if letters.is_empty() {
+        "?".into()
+    } else {
+        letters
+    }
+}
+
+/// Color estable por autor: FNV-1a del nombre (el hasher de `std` no promete repetir valores).
+fn author_color(author: &str) -> Color32 {
+    let hash = author
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    AUTHOR_COLORS[(hash % AUTHOR_COLORS.len() as u64) as usize]
+}
+
+/// Grosor y opacidad de un carril según cuál está bajo el puntero.
+fn emphasis(lane: usize, hovered: Option<usize>) -> (f32, f32) {
+    match hovered {
+        None => (1.5, 1.0),
+        Some(h) if h == lane => (3.0, 1.0),
+        Some(_) => (1.5, 0.45),
+    }
+}
+
+/// Las líneas de la fila `i`: las que entran desde la fila anterior y las que salen hacia la
+/// siguiente. Cada línea va de centro a centro y se recorta a la fila, así se ve continua
+/// aunque `show_rows` solo pinte las visibles. Las que cambian de carril son curvas.
+fn draw_lanes(painter: &egui::Painter, rect: Rect, rows: &[Row], i: usize, hovered: Option<usize>) {
+    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
     let x = |lane: usize| rect.min.x + (lane as f32 + 0.5) * LANE;
     let y = rect.center().y;
     for (row, top) in [(i.checked_sub(1), y - ROW), (Some(i), y)] {
@@ -118,18 +176,51 @@ fn draw_lanes(painter: &egui::Painter, rect: Rect, rows: &[Row], i: usize, opaci
         };
         for &(from, to) in &row.edges {
             // Una línea que cambia de carril lleva el color del carril lateral.
-            let stroke = Stroke::new(1.5, lane_color(from.max(to)));
-            painter.line_segment([pos2(x(from), top), pos2(x(to), top + ROW)], stroke);
+            let lane = from.max(to);
+            let (width, alpha) = emphasis(lane, hovered);
+            let stroke = Stroke::new(width, lane_color(lane).gamma_multiply(alpha));
+            let (start, end) = (pos2(x(from), top), pos2(x(to), top + ROW));
+            if from == to {
+                painter.line_segment([start, end], stroke);
+            } else {
+                // Sale y llega en vertical, para empalmar con las rectas sin quiebres.
+                let middle = top + ROW / 2.0;
+                painter.add(CubicBezierShape::from_points_stroke(
+                    [start, pos2(start.x, middle), pos2(end.x, middle), end],
+                    false,
+                    Color32::TRANSPARENT,
+                    stroke,
+                ));
+            }
         }
-    }
-    if let Some(row) = rows.get(i) {
-        painter.multiply_opacity(opacity);
-        painter.circle_filled(pos2(x(row.lane), y), 4.5, lane_color(row.lane));
     }
 }
 
-/// Un chip de ref que empieza en `x`. Devuelve su ancho.
-fn chip(painter: &egui::Painter, x: f32, y: f32, kind: RefKind, text: &str) -> f32 {
+/// El nodo de un commit: las iniciales del autor, o un punto chico si es un merge.
+fn node(painter: &egui::Painter, center: egui::Pos2, commit: &Commit, color: Color32) {
+    if commit.parents.len() > 1 {
+        painter.circle_filled(center, MERGE_NODE, color);
+        return;
+    }
+    // El borde (2 px) queda centrado en el radio: el círculo mide `NODE` en total.
+    painter.circle(
+        center,
+        NODE - 1.0,
+        author_color(&commit.author),
+        Stroke::new(2.0, color),
+    );
+    painter.text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        initials(&commit.author),
+        medium(9.0),
+        Color32::WHITE,
+    );
+}
+
+/// Un chip de ref con el borde izquierdo en x = 0 y centrado en y = 0 (quien lo llama lo
+/// traslada). Devuelve su ancho y sus figuras.
+fn chip(painter: &egui::Painter, kind: RefKind, text: &str) -> (f32, [Shape; 2]) {
     let t = theme();
     let (fill, border, color) = match kind {
         RefKind::Head => (t.accent(), t.accent(), t.bg),
@@ -140,18 +231,18 @@ fn chip(painter: &egui::Painter, x: f32, y: f32, kind: RefKind, text: &str) -> f
     };
     let galley = painter.layout_no_wrap(text.to_string(), medium(11.0), color);
     let size = galley.size();
-    let rect = Rect::from_min_size(pos2(x, y - 9.0), vec2(size.x + 12.0, 18.0));
+    let rect = Rect::from_min_size(pos2(0.0, -9.0), vec2(size.x + 12.0, 18.0));
     // Las etiquetas (tags) van como píldora para distinguirlas de las ramas.
     let radius = if kind == RefKind::Tag { 9.0 } else { 4.0 };
-    painter.rect(
+    let frame = RectShape::new(
         rect,
         radius,
         fill,
         Stroke::new(1.0, border),
         StrokeKind::Inside,
     );
-    painter.galley(pos2(x + 6.0, y - size.y / 2.0), galley, color);
-    rect.width()
+    let text = Shape::galley(pos2(6.0, -size.y / 2.0), galley, color);
+    (rect.width(), [frame.into(), text])
 }
 
 impl GraphView {
@@ -162,6 +253,7 @@ impl GraphView {
             filter: String::new(),
             show_remotes: true,
             show_tags: true,
+            hovered_lane: None,
         }
     }
 
@@ -222,23 +314,32 @@ impl GraphView {
             .map_or(0, |d| d.as_secs() as i64);
         // Sin espacio entre filas, para que las líneas no se corten.
         ui.spacing_mut().item_spacing.y = 0.0;
+        // Las filas se pintan con el carril del frame anterior y anotan el de este.
+        let hovered = self.hovered_lane.take();
         egui::ScrollArea::vertical().auto_shrink(false).show_rows(
             ui,
             ROW,
             self.graph.commits.len(),
             |ui, visible| {
                 for i in visible {
-                    self.row(ui, i, &needle, now);
+                    self.row(ui, i, &needle, now, hovered);
                 }
             },
         );
+        if self.hovered_lane != hovered {
+            ui.ctx().request_repaint();
+        }
     }
 
-    fn row(&mut self, ui: &mut egui::Ui, i: usize, needle: &str, now: i64) {
+    fn row(&mut self, ui: &mut egui::Ui, i: usize, needle: &str, now: i64, hovered: Option<usize>) {
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
         if response.clicked() {
             self.selected = Some(i);
+        }
+        let lane = self.graph.rows[i].lane;
+        if response.hovered() {
+            self.hovered_lane = Some(lane);
         }
         let commit = &self.graph.commits[i];
         let selected = self.selected == Some(i);
@@ -256,9 +357,10 @@ impl GraphView {
         } else {
             0.3
         };
+        let graph_x = rect.min.x + REFS_W;
         let graph_w = self.graph.lanes as f32 * LANE;
-        let lanes = Rect::from_min_size(rect.min, vec2(graph_w, ROW));
-        draw_lanes(ui.painter(), lanes, &self.graph.rows, i, opacity);
+        let lanes = Rect::from_min_size(pos2(graph_x, rect.min.y), vec2(graph_w, ROW));
+        draw_lanes(ui.painter(), lanes, &self.graph.rows, i, hovered);
 
         let mut painter = ui.painter().clone();
         painter.multiply_opacity(opacity);
@@ -266,22 +368,41 @@ impl GraphView {
         let column = |from: f32, to: f32| {
             Rect::from_min_max(pos2(from, rect.min.y), pos2(to.max(from), rect.max.y))
         };
+        let center = pos2(graph_x + (lane as f32 + 0.5) * LANE, y);
+        let color = lane_color(lane).gamma_multiply(emphasis(lane, hovered).1);
+
+        // Chips: alineados a la derecha de su columna; si no caben, se recortan los últimos.
+        let chips: Vec<_> = commit
+            .refs
+            .iter()
+            .map(|name| ref_kind(name))
+            .filter(|&(kind, _)| {
+                (kind != RefKind::Remote || self.show_remotes)
+                    && (kind != RefKind::Tag || self.show_tags)
+            })
+            .map(|(kind, text)| chip(&painter, kind, text))
+            .collect();
+        if !chips.is_empty() {
+            let (left, end) = (rect.min.x + 4.0, graph_x - 4.0);
+            let total: f32 = chips.iter().map(|(width, _)| width + 4.0).sum::<f32>() - 4.0;
+            // La línea va antes que el nodo, que la tapa en la punta.
+            painter.line_segment([pos2(end, y), center], Stroke::new(1.0, color));
+            let clipped = painter.with_clip_rect(column(left, end).intersect(painter.clip_rect()));
+            let mut x = (end - total).max(left);
+            for (width, mut shapes) in chips {
+                for shape in &mut shapes {
+                    shape.translate(vec2(x, y));
+                }
+                clipped.extend(shapes);
+                x += width + 4.0;
+            }
+        }
+        node(&painter, center, commit, color);
+
         // En una ventana angosta las columnas de la derecha se achican.
         let author_x = right - DATE_W - AUTHOR_W.min(rect.width() * 0.2);
         let text_end = author_x - 8.0;
-
-        // Chips: recortados para que no pisen al autor.
-        let mut x = lanes.max.x + 8.0;
-        let chips = painter.with_clip_rect(column(x, text_end).intersect(painter.clip_rect()));
-        for name in &commit.refs {
-            let (kind, text) = ref_kind(name);
-            if (kind == RefKind::Remote && !self.show_remotes)
-                || (kind == RefKind::Tag && !self.show_tags)
-            {
-                continue;
-            }
-            x += chip(&chips, x, y, kind, text) + 4.0;
-        }
+        let x = lanes.max.x + 8.0;
 
         let font = FontId::proportional(13.0);
         let small = FontId::proportional(12.0);
@@ -546,16 +667,43 @@ mod tests {
     }
 
     #[test]
+    fn author_initials() {
+        assert_eq!(initials("Ana Pérez"), "AP");
+        assert_eq!(initials("juan de la cruz"), "JC");
+        assert_eq!(initials("Claude"), "C");
+        assert_eq!(initials("  (élise)  "), "É");
+        assert_eq!(initials(""), "?");
+    }
+
+    #[test]
+    fn author_colors_are_stable() {
+        assert_eq!(author_color("Ana Pérez"), author_color("Ana Pérez"));
+        // Valor fijo (FNV-1a("a") = 0xaf63dc4c8601ec8c): si cambia el hash, los autores
+        // cambian de color entre versiones.
+        let index = (0xaf63_dc4c_8601_ec8c_u64 % AUTHOR_COLORS.len() as u64) as usize;
+        assert_eq!(author_color("a"), AUTHOR_COLORS[index]);
+    }
+
+    #[test]
     fn view_draws_without_input() {
         let mut view = GraphView::new(sample());
         view.selected = Some(1);
         view.filter = "merge".into();
+        view.hovered_lane = Some(1);
         let mut refresh = true;
         let mut output = egui::Context::default().run_ui(Default::default(), |ui| {
             refresh = view.ui(ui, false);
         });
         assert!(!refresh);
-        assert!(!output.shapes.is_empty());
+        // Los cambios de carril salen como curvas.
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|s| matches!(s.shape, Shape::CubicBezier(_)))
+        );
+        // Sin puntero no queda ningún carril resaltado.
+        assert_eq!(view.hovered_lane, None);
         output.textures_delta.clear();
     }
 
