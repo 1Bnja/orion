@@ -39,12 +39,13 @@ pub(super) enum Target {
     Local(String),
     Remote(String),
     Tag(String),
-    Stash(usize),
+    /// El nombre (`stash@{0}: …`) y el commit al que apuntaba cuando se pulsó.
+    Stash(String, String),
     Worktree(PathBuf),
 }
 
 /// El índice de un stash a partir de su nombre (`stash@{2}: On main: …`).
-pub(super) fn stash_index(name: &str) -> Option<usize> {
+fn stash_index(name: &str) -> Option<usize> {
     name.strip_prefix("stash@{")?
         .split_once('}')?
         .0
@@ -576,11 +577,13 @@ impl Actions {
                             );
                         }
                         if icon_text_button(ui, Icon::Close, "Abortar", idle).clicked() && idle {
-                            self.run(
-                                &ctx,
-                                format!("Abortar el {}", op_name(op).to_lowercase()),
-                                move |r| git_ops::abort(r, op),
-                            );
+                            let name = op_name(op).to_lowercase();
+                            self.dialog = Some(confirm(
+                                format!("Abortar el {name}"),
+                                "Todo vuelve a como estaba antes de empezar: se pierden los                                  conflictos que ya resolviste. No se puede deshacer.",
+                                "Abortar",
+                                text(move |r| git_ops::abort(r, op)),
+                            ));
                         }
                         let (rect, _) = ui
                             .allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
@@ -984,21 +987,30 @@ impl Actions {
                     });
                 }
             }
-            &Target::Stash(i) => {
+            Target::Stash(stash, hash) => {
+                let Some(i) = stash_index(stash) else {
+                    return;
+                };
+                // Antes de tocarlo se comprueba que ese número siga siendo el mismo stash.
+                let on = |op: fn(&Path, usize) -> Result<String, String>| {
+                    let hash = hash.clone();
+                    move |r: &Path| git_ops::stash_check(r, i, &hash).and_then(|()| op(r, i))
+                };
                 if item(ui, Icon::PackageExport, "Aplicar", idle) {
-                    self.run(&ctx, "Aplicar el stash", move |r| {
-                        git_ops::stash_apply(r, i)
-                    });
+                    self.run(&ctx, "Aplicar el stash", on(git_ops::stash_apply));
                 }
                 if item(ui, Icon::Archive, "Pop", idle) {
-                    self.run(&ctx, "Pop del stash", move |r| git_ops::stash_pop(r, i));
+                    self.run(&ctx, "Pop del stash", on(git_ops::stash_pop));
                 }
                 if item(ui, Icon::Trash, "Borrar…", idle) {
                     self.dialog = Some(confirm(
                         format!("Borrar stash@{{{i}}}"),
-                        "Se pierden los cambios guardados en este stash.",
+                        format!(
+                            "Se pierden los cambios guardados en este stash:
+{stash}"
+                        ),
                         "Borrar",
-                        text(move |r| git_ops::stash_drop(r, i)),
+                        text(on(git_ops::stash_drop)),
                     ));
                 }
             }

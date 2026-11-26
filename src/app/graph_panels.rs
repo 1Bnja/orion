@@ -5,7 +5,7 @@ use super::chrome::{
     Icon, draw_icon, icon_button, icon_text_button, label, medium, section_header, selectable_row,
 };
 use super::graph::{GraphView, ROW, date_utc};
-use super::graph_actions::{Actions, Target, stash_index};
+use super::graph_actions::{Actions, Target};
 use crate::colors::{surface, theme};
 use crate::git_graph::{self, Commit, Details, FileChange, RefItem, Refs};
 use eframe::egui::{self, FontId, RichText, Sense, pos2, vec2};
@@ -311,7 +311,9 @@ impl Panels {
                                     "Ramas" => Some(Target::Local(item.name.clone())),
                                     "Remotas" => Some(Target::Remote(item.name.clone())),
                                     "Tags" => Some(Target::Tag(item.name.clone())),
-                                    "Stashes" => stash_index(&item.name).map(Target::Stash),
+                                    "Stashes" => {
+                                        Some(Target::Stash(item.name.clone(), item.target.clone()))
+                                    }
                                     _ => Some(Target::Worktree(PathBuf::from(&item.name))),
                                 };
                                 if title == "Ramas" && response.double_clicked() {

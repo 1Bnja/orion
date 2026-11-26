@@ -326,6 +326,21 @@ fn stash(repo: &Path, action: &str, index: usize) -> Result<String, String> {
     run(repo, &["stash", action, &format!("stash@{{{index}}}")])
 }
 
+/// Error si `stash@{index}` ya no es el commit `hash`: los números se corren cuando alguien
+/// guarda o borra un stash, y la pila la comparten todos los worktrees.
+/// ponytail: queda un instante entre esta comprobación y la operación; git no ofrece hacer
+/// ambas de una vez por hash.
+pub fn stash_check(repo: &Path, index: usize, hash: &str) -> Result<(), String> {
+    let now = read(
+        repo,
+        &["rev-parse", "--verify", "-q", &format!("stash@{{{index}}}")],
+    );
+    match now {
+        Ok(now) if now.trim() == hash => Ok(()),
+        _ => Err("la pila de stashes cambió: vuelve a elegir el stash".to_string()),
+    }
+}
+
 pub fn stash_apply(repo: &Path, index: usize) -> Result<String, String> {
     stash(repo, "apply", index)
 }
@@ -723,6 +738,13 @@ mod tests {
         assert!(!repo.join("nuevo.txt").exists());
         let count = || git(&repo, &["stash", "list"]).lines().count();
         assert_eq!(count(), 2);
+
+        // El número solo vale mientras apunte al mismo commit.
+        let newest = git(&repo, &["rev-parse", "stash@{0}"]);
+        let newest = newest.trim();
+        assert!(stash_check(&repo, 0, newest).is_ok());
+        assert!(stash_check(&repo, 1, newest).is_err());
+        assert!(stash_check(&repo, 2, newest).is_err());
 
         // El índice 1 es el más viejo.
         stash_apply(&repo, 1).unwrap();
