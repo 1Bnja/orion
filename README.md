@@ -54,7 +54,9 @@ its own branch, and Orion tells you when one of them needs you.
   relative path per line, files or folders.
 - **Orchestrator** (palette → "Orquestar tarea con agentes…"): describe a task, and it gets split
   into independent subtasks, each with a model suited to it. Review the plan, and Orion opens one
-  agent per subtask, each in its own worktree and branch. Requires
+  agent per subtask, each in its own worktree and branch. While it runs, subtasks are grouped by
+  round, the next one is marked, and each working agent shows how long it has been going (`12 s`,
+  `3 min`, `1 h 5 min`) and its latest line of activity. Requires
   [Claude Code](https://code.claude.com), installed and signed in.
 - **Alerts**: a tab shows a pulsing dot when an agent finishes or asks for permission, even if
   you're looking at another tab.
@@ -173,6 +175,10 @@ editor (`code`, if installed) or to the default app.
 > Saving from the Settings window rewrites `config.toml` from scratch, so comments you added by
 > hand are not kept. If you edit the file yourself, keep your notes somewhere else.
 
+Orion also remembers the window size and whether it was maximized, in `window.json` next to
+`config.toml`. The position is not saved, so the window never ends up off-screen with several
+monitors.
+
 ## Configuring agents
 
 Agents are set up in `config.toml` (see [Settings](#settings) for where it lives). There are two
@@ -241,6 +247,8 @@ command = "junie --model=mix.normal --prompt={prompt}"
 - The agent must finish by **committing** on its branch. Without a commit, the subtasks that depend
   on it stay blocked.
 - Each subtask has a menu in the plan window to switch its executor before launching.
+- While the plan runs, each subtask row shows the executor it uses, next to its time and last line of
+  activity.
 
 To check a command before relying on it, replace `{prompt}` with a short text and run it in a
 normal Orion tab: it should open the agent with that text already submitted.
