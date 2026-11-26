@@ -204,6 +204,8 @@ pub(crate) struct Orion {
     window: Option<crate::backdrop::Window>,
     /// El tamaño de la ventana en el último frame, para saber cuándo cambió.
     window_size: Option<egui::Vec2>,
+    /// Cuándo volver a limpiar la capa GDI (ver `clear_gdi_layer`).
+    gdi_recheck: Option<Instant>,
     updater: Updater,
     /// Buscaste actualizaciones a mano: avisar también si está al día o si falló.
     /// (La revisión automática al abrir es silenciosa: sin internet no hay nada que molestar.)
@@ -254,6 +256,9 @@ const PANE_RADIUS: f32 = 10.0;
 /// Cada cuánto se revisa si config.toml cambió.
 /// ponytail: se pregunta la fecha del archivo (stdlib); el crate `notify` avisaría al instante, sin preguntar.
 const CONFIG_POLL: Duration = Duration::from_secs(1);
+/// Cuánto después de un cambio de tamaño se vuelve a limpiar la capa GDI de la ventana.
+/// ponytail: medido a ojo; si al abrir todavía se ve claro, subirlo.
+const GDI_RECHECK: Duration = Duration::from_millis(500);
 
 /// Algo que se pidió sobre las pestañas o los paneles en este frame.
 #[derive(Clone)]
@@ -464,6 +469,7 @@ impl Orion {
             perf: None,
             window: crate::backdrop::Window::of(cc),
             window_size: None,
+            gdi_recheck: None,
             updater: Updater::new(),
             update_asked: false,
             logo: cc.egui_ctx.load_texture(
@@ -1335,13 +1341,21 @@ impl eframe::App for Orion {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Al cambiar de tamaño, Windows deja vieja la capa GDI de la ventana (ver `clear_gdi_layer`).
         let size = ctx.input(|i| i.viewport().inner_rect).map(|r| r.size());
-        if size != self.window_size {
+        // Se limpia al cambiar y otra vez un rato después: al abrir, eframe muestra la ventana
+        // después del primer frame y Windows vuelve a llenar la capa.
+        let changed = size != self.window_size;
+        let recheck = self.gdi_recheck.is_some_and(|t| Instant::now() >= t);
+        if changed || recheck {
             self.window_size = size;
+            self.gdi_recheck = changed.then(|| Instant::now() + GDI_RECHECK);
             if let Some(window) = self.window
                 && crate::renderer::active() == crate::renderer::Gpu::DirectX12
             {
                 crate::backdrop::clear_gdi_layer(window);
             }
+        }
+        if self.gdi_recheck.is_some() {
+            ctx.request_repaint_after(GDI_RECHECK);
         }
         // Ctrl+= / Ctrl+- / Ctrl+0 son el zoom de egui: lo guardamos como ui_scale.
         let zoom = ctx.zoom_factor();
