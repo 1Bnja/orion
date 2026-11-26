@@ -21,8 +21,7 @@ pub(crate) struct Provider {
     pub(crate) executor: Option<&'static str>,
     /// Para qué tareas conviene (le llega al planificador).
     pub(crate) use_for: &'static str,
-    /// Comando o documentación oficial de instalación, para futuras interfaces.
-    #[allow(dead_code)]
+    /// Comando o documentación oficial de instalación (se muestra en Configuración → Agentes).
     pub(crate) install: &'static str,
 }
 

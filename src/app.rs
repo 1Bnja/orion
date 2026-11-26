@@ -39,6 +39,7 @@ mod render;
 mod review;
 mod session;
 mod settings;
+mod settings_agents;
 mod sidebar;
 mod titlebar;
 
@@ -253,6 +254,8 @@ enum Action {
     /// Mostrar u ocultar la barra lateral de pestañas.
     ToggleSidebar,
     OpenSettings,
+    /// Abrir Configuración en la sección Agentes.
+    AddAgent,
     /// Cambiar el tamaño de la letra en tantos puntos.
     FontSize(f32),
     /// Usar el tema con ese índice en `colors::THEMES`.
@@ -978,6 +981,7 @@ impl Orion {
                     | Action::Palette
                     | Action::ToggleSidebar
                     | Action::OpenSettings
+                    | Action::AddAgent
                     | Action::FontSize(_)
                     | Action::Theme(_)
                     | Action::TogglePerf
@@ -1034,6 +1038,7 @@ impl Orion {
             Action::Palette => self.palette.toggle(),
             Action::ToggleSidebar => self.sidebar_hidden = !self.sidebar_hidden,
             Action::OpenSettings => self.open_menu(),
+            Action::AddAgent => self.open_agents_settings(ctx),
             Action::FontSize(delta) => {
                 let mut new = self.settings.clone();
                 new.font.size = (new.font.size + delta).clamp(8.0, 48.0);

@@ -27,6 +27,8 @@ pub(crate) struct SettingsMenu {
     pub(crate) filter: String,
     /// La última sección elegida: se recuerda mientras Orion siga abierto.
     pub(crate) section: Section,
+    /// Estado de la sección Agentes (formulario y modelos de Ollama).
+    pub(super) agents: super::settings_agents::AgentsPanel,
     /// Name typed in "Guardar como tema".
     pub(crate) theme_name: String,
     /// Last error from saving a theme, if any.
@@ -157,6 +159,15 @@ impl Orion {
         }
         self.menu.open = true;
         self.menu.theme_sent = None; // puede ser una ventana nueva: hay que pedirle el tema
+    }
+
+    /// Abre Configuración en la sección Agentes (y la trae al frente si ya estaba abierta).
+    pub(crate) fn open_agents_settings(&mut self, ctx: &egui::Context) {
+        self.open_menu();
+        self.menu.section = Section::Agentes;
+        self.menu.filter.clear(); // una búsqueda anterior podría ocultar la sección
+        ctx.send_viewport_cmd_to(super::settings::viewport_id(), egui::ViewportCommand::Focus);
+        ctx.request_repaint();
     }
 
     /// Aplica una configuración nueva al instante (la fuente solo si cambió) y la guarda en config.toml.

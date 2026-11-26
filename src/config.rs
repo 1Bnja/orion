@@ -55,6 +55,14 @@ pub(crate) fn config_text(settings: &Settings) -> String {
     let backdrops = backdrops.join(", ");
     let check_updates = settings.check_updates;
     let auto_executors = settings.auto_executors;
+    let disabled_executors = toml::Value::Array(
+        settings
+            .disabled_executors
+            .iter()
+            .cloned()
+            .map(toml::Value::String)
+            .collect(),
+    );
     let mut themes_extra = String::new();
     for t in &settings.custom_themes {
         themes_extra += &t.to_toml();
@@ -112,6 +120,9 @@ check_updates = {check_updates}
 # Ofrecer automáticamente los CLIs conocidos como ejecutores cuando estén instalados.
 # false conserva los modelos de Claude y los perfiles/ejecutores definidos aquí.
 auto_executors = {auto_executors}
+# Ids de los CLIs detectados que no quieres en el orquestador (Configuración → Agentes).
+# No afecta a tus [[agent]] ni [[executor]].
+disabled_executors = {disabled_executors}
 # Shell de las pestañas nuevas ({key}+Shift+T). Hay: {shells}.
 # Para abrir una pestaña con otro proyecto o shell: clic en "+ Nueva pestaña",
 # o la paleta ({key}+Shift+P).
@@ -177,6 +188,8 @@ pub(crate) struct Settings {
     pub(crate) check_updates: bool,
     /// Incluir los providers con plantilla interactiva en el catálogo del orquestador.
     pub(crate) auto_executors: bool,
+    /// Ids de providers detectados que el usuario sacó del orquestador.
+    pub(crate) disabled_executors: Vec<String>,
     /// Cambios de color de la interfaz ([colors]); lo que falte usa el tema.
     pub(crate) colors: ColorSettings,
     pub(crate) font: FontSettings,
@@ -385,6 +398,7 @@ impl Default for Settings {
             backdrop: BACKDROPS[0].0.into(),
             check_updates: true,
             auto_executors: true,
+            disabled_executors: Vec::new(),
             colors: ColorSettings::default(),
             font: FontSettings::default(),
             custom_themes: Vec::new(),
@@ -647,6 +661,7 @@ mod tests {
         // Un config viejo, sin line_height, toma el valor por defecto.
         assert_eq!(s.font.line_height, 1.2);
         assert!(s.auto_executors); // los configs anteriores activan la detección automática
+        assert!(s.disabled_executors.is_empty());
     }
 
     #[test]
@@ -717,6 +732,7 @@ mod tests {
             command: r#"mi-agente --modo "revisar""#.into(),
             worktree: true,
         }];
+        s.disabled_executors = vec!["codex".into(), r#"raro "id" \x"#.into()];
         s.executors = vec![Executor {
             id: "junie".into(),
             use_for: r#"cambios "grandes" en C:\repo"#.into(),

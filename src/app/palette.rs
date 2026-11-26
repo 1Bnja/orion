@@ -132,6 +132,7 @@ impl Orion {
             "",
             Action::Orchestrate,
         ));
+        list.push(("Agregar agente…".into(), "", Action::AddAgent));
         for i in self.providers() {
             let name = format!("Agente: {}", crate::agents::PROVIDERS[i].name);
             list.push((name, "", Action::Provider(i)));

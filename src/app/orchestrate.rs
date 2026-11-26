@@ -242,6 +242,13 @@ fn after_text(after: &[usize]) -> String {
     format!("después de {}", n.join(", "))
 }
 
+/// El atajo a Configuración → Agentes, para sumar ejecutores sin editar config.toml.
+fn add_agents_button(ui: &mut egui::Ui) -> bool {
+    ui.button("Agregar agentes…")
+        .on_hover_text("Abre Configuración en la sección Agentes")
+        .clicked()
+}
+
 impl Orion {
     /// Abre la ventana para la pestaña actual, que tiene que estar dentro de un repo git.
     pub(super) fn open_orchestrate(&mut self) {
@@ -276,6 +283,7 @@ impl Orion {
         let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         let step = o.step();
         let (mut plan_now, mut launch, mut back, mut forget) = (false, false, false, false);
+        let mut add_agents = false;
         // Elegiste otro ejecutor para una subtarea: (índice, id).
         let mut pick: Option<(usize, String)> = None;
         // Diste por terminada a mano la subtarea con ese índice.
@@ -393,6 +401,7 @@ impl Orion {
                             let button = ui.add_enabled(ready, egui::Button::new("Planificar"));
                             plan_now = ready && (button.clicked() || enter);
                             ui.weak(keys!("+Enter"));
+                            add_agents = add_agents_button(ui);
                         });
                     }
                     Step::Planning => {
@@ -443,6 +452,7 @@ impl Orion {
                             };
                             launch = ui.button(text).clicked();
                             back = ui.button("Volver").clicked();
+                            add_agents = add_agents_button(ui);
                         });
                     }
                     Step::Failed(e) => {
@@ -452,6 +462,12 @@ impl Orion {
                 }
             });
         o.open = open;
+        if add_agents {
+            // La tarea y el plan se conservan: al volver a Orquestar siguen ahí.
+            o.open = false;
+            self.open_agents_settings(ctx);
+            return None;
+        }
         if let Some((i, id)) = pick
             && let Step::Ready(subtasks, ..) = &mut *o.step.lock().unwrap()
             && let Some(s) = subtasks.get_mut(i)

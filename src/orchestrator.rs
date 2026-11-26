@@ -74,10 +74,13 @@ pub(crate) fn catalog_with_sources(settings: &Settings) -> Vec<(Executor, Execut
         };
     if settings.auto_executors {
         for provider in PROVIDERS {
-            if let Some(command) = provider.executor {
+            let id = slug(provider.name);
+            if let Some(command) = provider.executor
+                && !settings.disabled_executors.contains(&id)
+            {
                 insert(
                     Executor {
-                        id: slug(provider.name),
+                        id,
                         use_for: provider.use_for.into(),
                         command: command.into(),
                     },
@@ -492,6 +495,22 @@ mod tests {
         assert!(all.iter().any(|e| e.id == "mi-agente"));
         assert!(all.iter().any(|e| e.id == "manual"));
         assert!(!all.iter().any(|e| e.id == "codex"));
+    }
+
+    #[test]
+    fn disabled_executors_hide_only_the_detected_provider() {
+        let mut settings = Settings {
+            disabled_executors: vec!["codex".into(), "opencode".into(), CLAUDE[2].0.into()],
+            executors: vec![executor("opencode", "manual", "otro {prompt}")],
+            ..Settings::default()
+        };
+        let all = catalog(&settings);
+        assert!(!all.iter().any(|e| e.id == "codex"));
+        // Lo definido a mano y los modelos de Claude no se apagan con esa lista.
+        assert!(all.iter().any(|e| e.id == "opencode"));
+        assert!(all.iter().any(|e| e.id == CLAUDE[2].0));
+        settings.disabled_executors.clear();
+        assert!(catalog(&settings).iter().any(|e| e.id == "codex"));
     }
 
     #[test]
