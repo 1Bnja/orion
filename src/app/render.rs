@@ -26,6 +26,7 @@ use alacritty_terminal::index::Point;
 use alacritty_terminal::selection::Selection;
 use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::TermMode;
+use alacritty_terminal::term::cell::Cell;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Color;
 use alacritty_terminal::vte::ansi::CursorShape;
@@ -48,19 +49,11 @@ const PADDING: f32 = 10.0;
 
 /// Borde de arriba de cada fila en pantalla. Antes de cada fila de `gap_rows` (prompts de bloques)
 /// se deja `gap` de aire, salvo en la fila 0. Las filas con `hidden[fila]` (salida de un bloque
-/// colapsado) no ocupan lugar. Si con todo eso la fila `keep` (la del cursor) quedaría debajo
-/// de `bottom`, todo sube lo necesario: igual que cuando la salida hace scroll.
-fn row_tops(
-    cell_h: f32,
-    gap: f32,
-    gap_rows: &[usize],
-    hidden: &[bool],
-    keep: Option<usize>,
-    (top, bottom): (f32, f32),
-) -> Vec<f32> {
-    let rows = hidden.len();
+/// colapsado) no ocupan lugar. El `gap` tiene que venir de `fit_gap`: si no, las filas de abajo
+/// pueden quedar fuera del panel.
+fn row_tops(cell_h: f32, gap: f32, gap_rows: &[usize], hidden: &[bool], top: f32) -> Vec<f32> {
     let mut y = top;
-    let mut tops = Vec::with_capacity(rows);
+    let mut tops = Vec::with_capacity(hidden.len());
     for (row, &is_hidden) in hidden.iter().enumerate() {
         if row > 0 && gap_rows.contains(&row) {
             y += gap;
@@ -70,13 +63,99 @@ fn row_tops(
             y += cell_h;
         }
     }
-    if let Some(row) = keep.filter(|&r| r < rows) {
-        let overflow = tops[row] + cell_h - bottom;
-        if overflow > 0.0 {
-            tops.iter_mut().for_each(|t| *t -= overflow);
-        }
-    }
     tops
+}
+
+/// El aire entre bloques que cabe de verdad. La grilla (y la shell) usan todo el alto del panel,
+/// así que el aire solo puede ocupar lo que sobra hasta `last_used`, la última fila con algo
+/// que ver (texto o cursor). Con la pantalla llena, el aire se achica en vez de cortar filas.
+fn fit_gap(
+    cell_h: f32,
+    gap: f32,
+    gap_rows: &[usize],
+    hidden: &[bool],
+    last_used: usize,
+    height: f32,
+) -> f32 {
+    let used = &hidden[..hidden.len().min(last_used + 1)];
+    let gaps = (1..used.len()).filter(|r| gap_rows.contains(r)).count();
+    if gaps == 0 {
+        return gap;
+    }
+    let shown = used.iter().filter(|&&is_hidden| !is_hidden).count();
+    let spare = height - shown as f32 * cell_h;
+    gap.min((spare / gaps as f32).floor()).max(0.0)
+}
+
+/// ¿La celda no pinta nada? (un espacio sin fondo ni líneas).
+fn is_blank(cell: &Cell) -> bool {
+    cell.c == ' '
+        && cell.bg == Color::Named(NamedColor::Background)
+        && !cell
+            .flags
+            .intersects(Flags::INVERSE | Flags::ALL_UNDERLINES | Flags::STRIKEOUT)
+}
+
+/// Cómo meter un glifo que avanza `advance` en un hueco de ancho `slot`: (escala, margen
+/// izquierdo). None si ya mide justo lo que su hueco.
+fn glyph_fit(advance: f32, slot: f32) -> Option<(f32, f32)> {
+    if (advance - slot).abs() < 0.01 {
+        None
+    } else if advance > slot {
+        Some((slot / advance, 0.0))
+    } else {
+        Some((1.0, (slot - advance) / 2.0))
+    }
+}
+
+/// Un glifo que se dibuja aparte, en su propia columna.
+struct LooseGlyph {
+    c: char,
+    font: egui::FontId,
+    color: egui::Color32,
+    /// Desde el borde izquierdo de la celda.
+    dx: f32,
+    scaled: bool,
+}
+
+/// Agrega a la fila el carácter de una celda que ocupa `cells` columnas de ancho `cell_w`.
+///
+/// egui avanza el texto según lo que mida cada glifo. Los que vienen de una fuente de respaldo
+/// (⏵, emoji, CJK) no miden un número exacto de celdas: corren el resto de la fila y las últimas
+/// columnas quedan fuera del panel. A esos se les deja el hueco con espacios y se devuelven para
+/// dibujarlos aparte, achicados si no caben.
+fn push_cell(
+    ctx: &egui::Context,
+    job: &mut LayoutJob,
+    c: char,
+    format: TextFormat,
+    cells: usize,
+    cell_w: f32,
+) -> Option<LooseGlyph> {
+    // El ASCII es de la fuente monoespaciada: ya mide una celda.
+    let fit = if c.is_ascii() {
+        None
+    } else {
+        let advance = ctx.fonts_mut(|fonts| fonts.glyph_width(&format.font_id, c));
+        glyph_fit(advance, cells as f32 * cell_w)
+    };
+    let Some((scale, dx)) = fit else {
+        push_char(job, c, format);
+        return None;
+    };
+    let mut font = format.font_id.clone();
+    font.size *= scale;
+    let color = format.color;
+    for _ in 0..cells {
+        push_char(job, ' ', format.clone());
+    }
+    Some(LooseGlyph {
+        c,
+        font,
+        color,
+        dx,
+        scaled: scale < 1.0,
+    })
 }
 
 /// Qué fila hay en la altura `y`. El aire entre bloques cuenta como parte de la fila de arriba.
@@ -385,7 +464,7 @@ impl Session {
                 // --- Dónde va cada fila: con aire antes de cada bloque ---
                 let views = self.block_views();
                 // Quiet air between prompts — enough to breathe, not a hard separator.
-                let gap = (cell.y * 0.25).round();
+                let wanted_gap = (cell.y * 0.25).round();
                 let gap_rows: Vec<usize> = views
                     .iter()
                     .filter(|v| v.prompt_visible)
@@ -401,15 +480,20 @@ impl Session {
                 }
                 let offset = self.term.grid().display_offset();
                 let cursor_row = self.term.grid().cursor.point.line.0 + offset as i32;
-                let keep = usize::try_from(cursor_row).ok();
-                let tops = row_tops(
+                let last_text = visible_rows(&self.term)
+                    .iter()
+                    .rposition(|cells| !cells.iter().all(|c| is_blank(c)));
+                let last_cursor = usize::try_from(cursor_row).ok().filter(|&r| r < rows);
+                let last_used = last_text.max(last_cursor).unwrap_or(0);
+                let gap = fit_gap(
                     cell.y,
-                    gap,
+                    wanted_gap,
                     &gap_rows,
                     &hidden,
-                    keep,
-                    (rect.min.y, rect.max.y),
+                    last_used,
+                    rect.height(),
                 );
+                let tops = row_tops(cell.y, gap, &gap_rows, &hidden, rect.min.y);
                 let row_bottom = |row: usize| tops[row] + if hidden[row] { 0.0 } else { cell.y };
 
                 // Bloque bajo el mouse: para sus botones y para el menú de clic derecho.
@@ -542,7 +626,7 @@ impl Session {
                     }
                 }
 
-                // Recortado a la zona del texto: si todo subió por el aire, lo de arriba no pisa el margen.
+                // Recortado a la zona del texto: nada pisa el margen de arriba ni el de abajo.
                 let clip = egui::Rect::from_x_y_ranges(area.x_range(), rect.y_range());
                 let painter = ui.painter().with_clip_rect(clip);
                 let colors = self.term.colors();
@@ -590,6 +674,7 @@ impl Session {
                     // Cada fila se dibuja en su posición: fila * alto de celda + el aire de los bloques de arriba.
                     let origin = egui::pos2(rect.min.x, tops[row]);
                     let mut text = LayoutJob::default();
+                    let mut loose = Vec::new();
 
                     for (col, c) in cells.iter().enumerate() {
                         let (mut fg, mut bg) = cell_colors(c, colors);
@@ -598,14 +683,14 @@ impl Session {
                             bg = theme().selection;
                             fg = readable(fg, bg);
                         }
+                        let width = if c.flags.contains(Flags::WIDE_CHAR) {
+                            2
+                        } else {
+                            1
+                        };
                         if bg != theme().bg {
-                            let width = if c.flags.contains(Flags::WIDE_CHAR) {
-                                2.0
-                            } else {
-                                1.0
-                            };
                             let min = origin + egui::vec2(col as f32 * cell.x, 0.0);
-                            let size = egui::vec2(width * cell.x, cell.y);
+                            let size = egui::vec2(width as f32 * cell.x, cell.y);
                             painter.rect_filled(egui::Rect::from_min_size(min, size), 0.0, bg);
                         }
                         if is_spacer(c) {
@@ -631,11 +716,24 @@ impl Session {
                             strikethrough: line(c.flags.contains(Flags::STRIKEOUT)),
                             ..Default::default()
                         };
-                        push_char(&mut text, c.c, format);
+                        let glyph = push_cell(ui.ctx(), &mut text, c.c, format, width, cell.x);
+                        loose.extend(glyph.map(|glyph| (col, glyph)));
                     }
 
                     let text_pos = origin + egui::vec2(0.0, text_dy);
                     painter.galley(text_pos, painter.layout_job(text), theme().fg);
+                    for (col, glyph) in loose {
+                        let galley =
+                            painter.layout_no_wrap(glyph.c.into(), glyph.font, glyph.color);
+                        // El achicado se centra en la fila; el resto va a la altura del texto.
+                        let dy = if glyph.scaled {
+                            ((cell.y - galley.size().y) / 2.0).round()
+                        } else {
+                            text_dy
+                        };
+                        let pos = origin + egui::vec2(col as f32 * cell.x + glyph.dx, dy);
+                        painter.galley(pos, galley, glyph.color);
+                    }
                 }
                 if let Some((row, cols)) = underline {
                     let x = |c: usize| rect.min.x + c as f32 * cell.x;
@@ -821,27 +919,63 @@ mod tests {
     fn rows_leave_room_before_blocks() {
         // 4 filas de 10 px; un bloque empieza en la fila 2: ahí se suman 5 px de aire.
         let all = [false; 4];
-        let tops = row_tops(10.0, 5.0, &[0, 2], &all, None, (0.0, 100.0));
+        let tops = row_tops(10.0, 5.0, &[0, 2], &all, 0.0);
         assert_eq!(tops, [0.0, 10.0, 25.0, 35.0]); // sin aire en la fila 0
         // El aire entre la fila 1 y la 2 cuenta como fila 1; arriba de todo, fila 0.
         assert_eq!(row_at(&tops, 21.0), 1);
         assert_eq!(row_at(&tops, 25.0), 2);
         assert_eq!(row_at(&tops, 9.9), 0);
         assert_eq!(row_at(&tops, -3.0), 0);
-        // Si el cursor (fila 3) no cabe en 40 px, todo sube 5 px.
-        let tops = row_tops(10.0, 5.0, &[2], &all, Some(3), (0.0, 40.0));
-        assert_eq!(tops, [-5.0, 5.0, 20.0, 30.0]);
         // Filas 1 y 2 ocultas (bloque colapsado): no ocupan lugar, y el mouse cae en la fila de abajo.
-        let tops = row_tops(
-            10.0,
-            0.0,
-            &[],
-            &[false, true, true, false],
-            None,
-            (0.0, 100.0),
-        );
+        let tops = row_tops(10.0, 0.0, &[], &[false, true, true, false], 0.0);
         assert_eq!(tops, [0.0, 10.0, 10.0, 10.0]);
         assert_eq!(row_at(&tops, 12.0), 3);
+    }
+
+    #[test]
+    fn block_air_never_pushes_rows_out_of_the_pane() {
+        let all = [false; 4];
+        let gap = |last_used, height| fit_gap(10.0, 5.0, &[1, 2], &all, last_used, height);
+        // Pantalla llena y sin espacio libre: no hay aire, la última fila entra entera.
+        assert_eq!(gap(3, 40.0), 0.0);
+        // Sobran 7 px (menos que una fila): se reparten, redondeando hacia abajo.
+        assert_eq!(gap(3, 47.0), 3.0);
+        let tops = row_tops(10.0, gap(3, 47.0), &[1, 2], &all, 0.0);
+        assert!(tops[3] + 10.0 <= 47.0);
+        // Las filas vacías de abajo sí pueden ceder su lugar al aire.
+        assert_eq!(gap(2, 40.0), 5.0);
+        // Un bloque colapsado libera sus filas.
+        let hidden = [false, false, true, false];
+        assert_eq!(fit_gap(10.0, 5.0, &[1], &hidden, 3, 40.0), 5.0);
+        // Un panel más bajo que una fila no da aire negativo.
+        assert_eq!(gap(3, 5.0), 0.0);
+    }
+
+    #[test]
+    fn fallback_glyphs_do_not_push_the_row_sideways() {
+        assert_eq!(glyph_fit(13.0, 13.0), None);
+        assert_eq!(glyph_fit(19.5, 13.0), Some((13.0 / 19.5, 0.0)));
+        assert_eq!(glyph_fit(20.0, 26.0), Some((1.0, 3.0))); // angosto: centrado
+
+        // Con las fuentes de egui: cada carácter queda en su columna, mida lo que mida.
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            let font = egui::FontId::monospace(14.0);
+            let cell_w = ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'M'));
+            let mut job = LayoutJob::default();
+            let format = TextFormat::simple(font.clone(), egui::Color32::WHITE);
+            let mut loose = 0;
+            for (c, cells) in [('⏵', 1), ('漢', 2), ('😀', 2), ('a', 1)] {
+                let glyph = push_cell(ui.ctx(), &mut job, c, format.clone(), cells, cell_w);
+                loose += usize::from(glyph.is_some());
+            }
+            assert!(loose > 0); // alguno no mide lo que su hueco
+            let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+            let last = galley.rows[0].glyphs.last().unwrap();
+            assert_eq!(last.chr, 'a');
+            assert!((last.pos.x - 5.0 * cell_w).abs() <= 1.0, "{}", last.pos.x);
+        });
+        output.textures_delta.clear(); // sin ventana no hay dónde subir las letras
     }
 
     #[test]
