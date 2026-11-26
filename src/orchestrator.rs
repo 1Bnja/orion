@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use crate::config::Executor;
+use crate::agents::{PROVIDERS, slug};
+use crate::config::{Executor, Settings};
 
 /// Quién planifica: el modelo más capaz, porque dividir bien la tarea es lo difícil.
 const PLANNER: &str = "claude-opus-5-5";
@@ -32,22 +33,73 @@ const CLAUDE: [(&str, &str); 3] = [
     ),
 ];
 
-/// Los ejecutores que puede elegir el plan: los de Claude y los `[[executor]]` del config
-/// (uno con el mismo `id` que uno de Claude lo reemplaza).
-pub(crate) fn catalog(extra: &[Executor]) -> Vec<Executor> {
-    let mut all: Vec<Executor> = CLAUDE
+/// Procedencia de la definición ganadora de un ejecutor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExecutorSource {
+    Claude,
+    Detected,
+    Profile,
+    Executor,
+}
+
+/// Catálogo sin ids repetidos. `installed` filtra luego los programas disponibles.
+pub(crate) fn catalog(settings: &Settings) -> Vec<Executor> {
+    catalog_with_sources(settings)
+        .into_iter()
+        .map(|(executor, _)| executor)
+        .collect()
+}
+
+/// El mismo catálogo con su procedencia, para que la UI pueda mostrarla.
+/// Precedencia: Claude < providers < perfiles < executors; dentro de cada capa gana el último.
+/// `Detected` identifica los providers conocidos, aunque su binario todavía no esté instalado.
+pub(crate) fn catalog_with_sources(settings: &Settings) -> Vec<(Executor, ExecutorSource)> {
+    let mut all: Vec<_> = CLAUDE
         .iter()
-        .map(|(id, use_for)| Executor {
-            id: id.to_string(),
-            use_for: use_for.to_string(),
-            command: format!("claude --model {id} {{prompt}}"),
+        .map(|(id, use_for)| {
+            (
+                Executor {
+                    id: id.to_string(),
+                    use_for: use_for.to_string(),
+                    command: format!("claude --model {id} {{prompt}}"),
+                },
+                ExecutorSource::Claude,
+            )
         })
         .collect();
-    for e in extra {
-        match all.iter_mut().find(|a| a.id == e.id) {
-            Some(old) => *old = e.clone(),
-            None => all.push(e.clone()),
+    let mut insert =
+        |executor: Executor, source| match all.iter_mut().find(|(old, _)| old.id == executor.id) {
+            Some(old) => *old = (executor, source),
+            None => all.push((executor, source)),
+        };
+    if settings.auto_executors {
+        for provider in PROVIDERS {
+            if let Some(command) = provider.executor {
+                insert(
+                    Executor {
+                        id: slug(provider.name),
+                        use_for: provider.use_for.into(),
+                        command: command.into(),
+                    },
+                    ExecutorSource::Detected,
+                );
+            }
         }
+    }
+    for agent in &settings.agents {
+        if let (Some(use_for), Some(command)) = (&agent.use_for, &agent.executor) {
+            insert(
+                Executor {
+                    id: agent.id.clone().unwrap_or_else(|| slug(&agent.name)),
+                    use_for: use_for.clone(),
+                    command: command.clone(),
+                },
+                ExecutorSource::Profile,
+            );
+        }
+    }
+    for executor in &settings.executors {
+        insert(executor.clone(), ExecutorSource::Executor);
     }
     all
 }
@@ -377,7 +429,170 @@ pub(crate) fn agent_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Agent;
     use crate::pty::SHELLS;
+
+    /// Las pruebas del planificador también cubren el catálogo anterior, sin autodetección.
+    fn legacy_catalog(extra: &[Executor]) -> Vec<Executor> {
+        catalog(&Settings {
+            auto_executors: false,
+            executors: extra.to_vec(),
+            ..Settings::default()
+        })
+    }
+
+    fn profile(name: &str, id: Option<&str>) -> Agent {
+        Agent {
+            name: name.into(),
+            id: id.map(String::from),
+            command: "mi-agente".into(),
+            use_for: Some("perfil personalizado".into()),
+            executor: Some("mi-agente {prompt}".into()),
+            worktree: false,
+        }
+    }
+
+    #[test]
+    fn providers_with_interactive_templates_are_automatic_executors() {
+        let settings = Settings::default();
+        let all = catalog_with_sources(&settings);
+        assert_eq!(
+            all.len(),
+            CLAUDE.len() + PROVIDERS.iter().filter(|p| p.executor.is_some()).count()
+        );
+        for provider in PROVIDERS {
+            let entry = all.iter().find(|(e, _)| e.id == slug(provider.name));
+            match provider.executor {
+                Some(command) => {
+                    let (executor, source) = entry.unwrap();
+                    assert_eq!(executor.command, command);
+                    assert_eq!(executor.use_for, provider.use_for);
+                    assert_eq!(*source, ExecutorSource::Detected);
+                }
+                None => assert!(entry.is_none(), "{}", provider.name),
+            }
+        }
+        assert!(
+            all[..CLAUDE.len()]
+                .iter()
+                .all(|(_, source)| *source == ExecutorSource::Claude)
+        );
+    }
+
+    #[test]
+    fn disabling_auto_executors_keeps_claude_profiles_and_explicit_executors() {
+        let settings = Settings {
+            auto_executors: false,
+            agents: vec![profile("Mi agente", None)],
+            executors: vec![executor("manual", "tests", "manual {prompt}")],
+            ..Settings::default()
+        };
+        let all = catalog(&settings);
+        assert_eq!(all.len(), CLAUDE.len() + 2);
+        assert!(all.iter().any(|e| e.id == "mi-agente"));
+        assert!(all.iter().any(|e| e.id == "manual"));
+        assert!(!all.iter().any(|e| e.id == "codex"));
+    }
+
+    #[test]
+    fn unified_profiles_require_both_fields_and_can_override_the_id() {
+        let mut incomplete = profile("Solo paleta", None);
+        incomplete.use_for = None;
+        let mut no_template = profile("Sin plantilla", None);
+        no_template.executor = None;
+        let settings = Settings {
+            agents: vec![
+                profile("Mi agente", None),
+                profile("Otro nombre", Some("otro-id")),
+                incomplete,
+                no_template,
+            ],
+            ..Settings::default()
+        };
+        let all = catalog_with_sources(&settings);
+        for id in ["mi-agente", "otro-id"] {
+            let (entry, source) = all.iter().find(|(e, _)| e.id == id).unwrap();
+            assert_eq!(*source, ExecutorSource::Profile);
+            assert_eq!(entry.command, "mi-agente {prompt}");
+            assert_eq!(entry.use_for, "perfil personalizado");
+        }
+        assert!(!all.iter().any(|(e, _)| {
+            ["solo-paleta", "sin-plantilla", "otro-nombre"].contains(&e.id.as_str())
+        }));
+    }
+
+    #[test]
+    fn a_toml_agent_is_available_to_the_planner_and_gets_the_initial_prompt() {
+        let settings: Settings = toml::from_str(
+            r#"
+auto_executors = false
+[[agent]]
+name = "Mi agente"
+command = "mi-agente"
+use_for = "programar y revisar"
+executor = "mi-agente --interactive {prompt}"
+"#,
+        )
+        .unwrap();
+        let all = catalog(&settings);
+        let out = format!(
+            r#"{{"structured_output":{{"subtasks":[{}]}}}}"#,
+            subtask("mi-agente")
+        );
+        let plan = parse_plan(&out, &all).unwrap();
+        assert_eq!(all.last().unwrap().use_for, "programar y revisar");
+        assert_eq!(
+            agent_command(&SHELLS[0], &plan[0], &all),
+            "mi-agente --interactive 'Escribe tests'"
+        );
+    }
+
+    #[test]
+    fn catalog_precedence_replaces_definitions_and_sources_without_duplicate_ids() {
+        let mut settings = Settings {
+            agents: vec![
+                profile("Codex", None),
+                profile("Haiku propio", Some(CLAUDE[2].0)),
+                profile("Primer perfil", Some("repetido")),
+                profile("Último perfil", Some("repetido")),
+            ],
+            ..Settings::default()
+        };
+        settings.agents[3].executor = Some("ultimo-perfil {prompt}".into());
+        let all = catalog_with_sources(&settings);
+        for id in ["codex", CLAUDE[2].0] {
+            let (entry, source) = all.iter().find(|(e, _)| e.id == id).unwrap();
+            assert_eq!(*source, ExecutorSource::Profile);
+            assert_eq!(entry.command, "mi-agente {prompt}");
+        }
+        assert_eq!(
+            all.iter()
+                .find(|(e, _)| e.id == "repetido")
+                .unwrap()
+                .0
+                .command,
+            "ultimo-perfil {prompt}"
+        );
+        settings.executors = vec![
+            executor("codex", "primero", "primero {prompt}"),
+            executor("codex", "último", "ultimo {prompt}"),
+            executor(CLAUDE[2].0, "manual", "manual {prompt}"),
+            executor("opencode", "manual", "otro-opencode {prompt}"),
+        ];
+        let all = catalog_with_sources(&settings);
+        for id in ["codex", "opencode", CLAUDE[2].0] {
+            assert_eq!(
+                all.iter().find(|(e, _)| e.id == id).unwrap().1,
+                ExecutorSource::Executor
+            );
+        }
+        let (codex, _) = all.iter().find(|(e, _)| e.id == "codex").unwrap();
+        assert_eq!(codex.command, "ultimo {prompt}");
+        assert_eq!(codex.use_for, "último");
+        let ids: std::collections::HashSet<_> = all.iter().map(|(e, _)| &e.id).collect();
+        assert_eq!(ids.len(), all.len());
+        assert_eq!(all[2].0.id, CLAUDE[2].0); // reemplaza sin mover la entrada
+    }
 
     fn subtask(model: &str) -> String {
         format!(r#"{{"title":"Tests","prompt":"Escribe tests","executor":"{model}"}}"#)
@@ -399,7 +614,7 @@ mod tests {
 
     #[test]
     fn after_only_points_back() {
-        let plan = parse_plan(&with_after(&["[]", "[0]", "[0,1]"]), &catalog(&[])).unwrap();
+        let plan = parse_plan(&with_after(&["[]", "[0]", "[0,1]"]), &legacy_catalog(&[])).unwrap();
         assert!(plan[0].after.is_empty());
         assert_eq!(plan[2].after, vec![0, 1]);
         // Sin `after`, independiente.
@@ -407,11 +622,15 @@ mod tests {
             r#"{{"structured_output":{{"subtasks":[{}]}}}}"#,
             subtask("claude-haiku-5-5")
         );
-        assert!(parse_plan(&out, &catalog(&[])).unwrap()[0].after.is_empty());
+        assert!(
+            parse_plan(&out, &legacy_catalog(&[])).unwrap()[0]
+                .after
+                .is_empty()
+        );
         // A sí misma o hacia adelante: error claro.
-        let own = parse_plan(&with_after(&["[]", "[1]"]), &catalog(&[])).unwrap_err();
+        let own = parse_plan(&with_after(&["[]", "[1]"]), &legacy_catalog(&[])).unwrap_err();
         assert!(own.contains("anteriores"), "{own}");
-        assert!(parse_plan(&with_after(&["[1]", "[]"]), &catalog(&[])).is_err());
+        assert!(parse_plan(&with_after(&["[1]", "[]"]), &legacy_catalog(&[])).is_err());
     }
 
     #[test]
@@ -421,7 +640,7 @@ mod tests {
             use_for: "nada".into(),
             command: "orion-no-existe-xyz --prompt {prompt}".into(),
         }];
-        let missing = unavailable(&catalog(&extra));
+        let missing = unavailable(&legacy_catalog(&extra));
         assert!(
             missing.contains(&"fantasma: no encuentro `orion-no-existe-xyz`".to_string()),
             "{missing:?}"
@@ -497,7 +716,7 @@ mod tests {
             r#"{{"type":"result","is_error":false,"result":"…","structured_output":{{"subtasks":[{}]}}}}"#,
             subtask("claude-haiku-5-5")
         );
-        let plan = parse_plan(&out, &catalog(&[])).unwrap();
+        let plan = parse_plan(&out, &legacy_catalog(&[])).unwrap();
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].title, "Tests");
         assert_eq!(short_name(&plan[0].executor), "haiku");
@@ -510,23 +729,29 @@ mod tests {
             subtask("gpt-9")
         );
         assert!(
-            parse_plan(&unknown, &catalog(&[]))
+            parse_plan(&unknown, &legacy_catalog(&[]))
                 .unwrap_err()
                 .contains("gpt-9")
         );
-        assert!(parse_plan(r#"{"structured_output":{"subtasks":[]}}"#, &catalog(&[])).is_err());
+        assert!(
+            parse_plan(
+                r#"{"structured_output":{"subtasks":[]}}"#,
+                &legacy_catalog(&[])
+            )
+            .is_err()
+        );
         let failed = r#"{"is_error":true,"result":"Not logged in"}"#;
         assert!(
-            parse_plan(failed, &catalog(&[]))
+            parse_plan(failed, &legacy_catalog(&[]))
                 .unwrap_err()
                 .contains("Not logged in")
         );
-        assert!(parse_plan("no es json", &catalog(&[])).is_err());
+        assert!(parse_plan("no es json", &legacy_catalog(&[])).is_err());
     }
 
     #[test]
     fn the_schema_is_valid_json_and_lists_every_executor() {
-        let all = catalog(&[executor("junie", "mix", "junie --prompt={prompt}")]);
+        let all = legacy_catalog(&[executor("junie", "mix", "junie --prompt={prompt}")]);
         let schema: serde_json::Value = serde_json::from_str(&schema(&all)).unwrap();
         let ids = &schema["properties"]["subtasks"]["items"]["properties"]["executor"]["enum"];
         assert_eq!(ids.as_array().unwrap().len(), 4);
@@ -544,7 +769,7 @@ mod tests {
     #[test]
     fn the_catalog_has_claude_and_the_configured_ones() {
         let ids = |c: &[Executor]| c.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
-        let base = catalog(&[]);
+        let base = legacy_catalog(&[]);
         assert_eq!(
             ids(&base),
             ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
@@ -552,7 +777,7 @@ mod tests {
         assert_eq!(base[1].command, "claude --model claude-sonnet-5-5 {prompt}");
         // Uno nuevo se agrega; uno con el id de uno de Claude lo reemplaza.
         let own = executor("claude-haiku-5-5", "otro", "mi-haiku {prompt}");
-        let plus = catalog(&[executor("opencode", "barato", "opencode"), own.clone()]);
+        let plus = legacy_catalog(&[executor("opencode", "barato", "opencode"), own.clone()]);
         assert_eq!(plus.len(), 4);
         assert_eq!(plus[2], own);
         assert_eq!(plus[3].id, "opencode");
@@ -565,11 +790,11 @@ mod tests {
             subtask("junie")
         );
         assert!(
-            parse_plan(&out, &catalog(&[]))
+            parse_plan(&out, &legacy_catalog(&[]))
                 .unwrap_err()
                 .contains("junie")
         );
-        let with = catalog(&[executor("junie", "x", "junie")]);
+        let with = legacy_catalog(&[executor("junie", "x", "junie")]);
         assert!(parse_plan(&out, &with).is_ok());
     }
 
@@ -581,7 +806,7 @@ mod tests {
             executor: executor.into(),
             after: Vec::new(),
         };
-        let all = catalog(&[
+        let all = legacy_catalog(&[
             executor("junie", "", "junie --model=mix.normal --prompt={prompt}"),
             executor("opencode", "", "opencode -m deepseek/x --prompt {prompt}"),
             executor("plano", "", "plano --rapido"),
@@ -639,7 +864,7 @@ mod tests {
             executor: "claude-sonnet-5-5".into(),
             after: Vec::new(),
         };
-        let command = agent_command(&SHELLS[0], &s, &catalog(&[]));
+        let command = agent_command(&SHELLS[0], &s, &legacy_catalog(&[]));
         // PowerShell (Windows) y zsh (Mac) usan comillas simples, cada una con su escape.
         let expected = if cfg!(windows) {
             "claude --model claude-sonnet-5-5 'Arregla ''el'' test de l''app'"
@@ -660,7 +885,7 @@ fn real_plan() {
         "Agrega un comentario de una línea arriba de fn main en src/main.rs",
         &dir,
         &Planner::default(),
-        &catalog(&[]),
+        &catalog(&Settings::default()),
     )
     .unwrap();
     assert!(!plan.is_empty());

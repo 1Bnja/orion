@@ -394,7 +394,8 @@ mod tests {
         };
         // Esperar el primer prompt (hay un bloque abierto).
         wait(&mut session, &|s| !s.blocks.list.is_empty());
-        session.write(b"[Console]::Write(\"`e]52;c;aG9sYQ==`a\")\r");
+        // [char]27 también funciona en Windows PowerShell 5.1, que no reconoce `e.
+        session.write(b"[Console]::Write([char]27 + \"]52;c;aG9sYQ==`a\")\r");
         let mut copied = None;
         let start = Instant::now();
         while copied.is_none() {
