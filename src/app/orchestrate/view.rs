@@ -862,14 +862,14 @@ fn active_round(rounds: &[usize], runs: &[&Run]) -> Option<usize> {
         .min()
 }
 
-/// Cuánto lleva trabajando un agente: "12 s", "hace 3 min", "hace 1 h 5 min".
+/// Cuánto lleva trabajando un agente: "12 s", "3 min", "1 h 5 min".
 fn elapsed(d: Duration) -> String {
     let secs = d.as_secs();
     match (secs / 3600, secs / 60 % 60) {
         (0, 0) => format!("{secs} s"),
-        (0, m) => format!("hace {m} min"),
-        (h, 0) => format!("hace {h} h"),
-        (h, m) => format!("hace {h} h {m} min"),
+        (0, m) => format!("{m} min"),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
     }
 }
 
@@ -1210,10 +1210,10 @@ mod tests {
         let at = |secs| elapsed(Duration::from_secs(secs));
         assert_eq!(at(0), "0 s");
         assert_eq!(at(59), "59 s");
-        assert_eq!(at(60), "hace 1 min");
-        assert_eq!(at(200), "hace 3 min");
-        assert_eq!(at(3600), "hace 1 h");
-        assert_eq!(at(3900), "hace 1 h 5 min");
+        assert_eq!(at(60), "1 min");
+        assert_eq!(at(200), "3 min");
+        assert_eq!(at(3600), "1 h");
+        assert_eq!(at(3900), "1 h 5 min");
     }
 
     #[test]
