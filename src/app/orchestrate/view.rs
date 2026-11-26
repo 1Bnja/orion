@@ -851,6 +851,14 @@ fn status(run: &Run, title: &str) -> (&'static str, Color32, Option<String>) {
     }
 }
 
+/// La primera ronda con alguna subtarea que no terminó bien; `None` si todas lo hicieron.
+fn active_round(rounds: &[usize], runs: &[&Run]) -> Option<usize> {
+    (rounds.iter().zip(runs))
+        .filter(|(_, run)| !run.succeeded())
+        .map(|(&round, _)| round)
+        .min()
+}
+
 fn running(ui: &mut Ui, o: &Orchestrate, out: &mut Vec<Intent>) {
     if o.paused {
         note(
@@ -879,6 +887,9 @@ fn running(ui: &mut Ui, o: &Orchestrate, out: &mut Vec<Intent>) {
         let filled = Rect::from_min_size(bar.min, vec2(bar.width() * part, bar.height()));
         ui.painter().rect_filled(filled, 3.0, tint(0.75));
     }
+    if let Some((s, _)) = o.plan.iter().find(|(_, run)| matches!(run, Run::Waiting)) {
+        note(ui, &format!("Siguiente: {}", s.title));
+    }
     note(
         ui,
         "Cuando un agente acabe, revisa su trabajo, confirma que hizo commit y escribe /exit. \
@@ -890,106 +901,122 @@ fn running(ui: &mut Ui, o: &Orchestrate, out: &mut Vec<Intent>) {
     );
     ui.add_space(4.0);
 
+    let refs: Vec<&Subtask> = o.plan.iter().map(|(s, _)| s).collect();
+    let runs: Vec<&Run> = o.plan.iter().map(|(_, run)| run).collect();
+    let rounds = rounds(&refs);
+    let active = active_round(&rounds, &runs);
+
     let mut working = false;
-    for (i, (s, run)) in o.plan.iter().enumerate() {
-        let (label, color, why) = status(run, &s.title);
-        let accent = why.is_some().then_some(color);
-        card(ui, accent, |ui| {
-            ui.horizontal(|ui| {
-                ui.set_height(28.0);
-                if matches!(run, Run::Working { .. }) {
-                    working = true;
-                    let (rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
-                    spinner(ui, rect.center(), 8.0, color, time);
-                } else {
-                    number(ui, i + 1);
-                }
-                ui.add_space(2.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    overlay::badge(ui, label, color);
-                    if let Run::Working { branch, .. } = run
-                        && o.committed.contains(branch)
-                    {
-                        overlay::badge(ui, "Ya hizo commit", theme().ansi[3]);
-                    }
-                    // «Reintentar» solo vuelve a lanzar una bloqueada. A una que ya terminó o se
-                    // cerró no la ejecuta de nuevo: mira otra vez sus commits, y así se llama.
-                    let (text, tip) = if matches!(run, Run::Blocked(_)) {
-                        (
-                            "Reintentar",
-                            "Intenta arrancarla de nuevo cuando estén listas las que necesita",
-                        )
+    for round in 1..=rounds.iter().copied().max().unwrap_or(0) {
+        let hint = match active {
+            Some(active) if round == active => "en curso",
+            Some(active) if round > active => "a continuación",
+            _ => "terminada",
+        };
+        section(ui, &format!("Ronda {round}"), hint);
+        for (i, (s, run)) in o.plan.iter().enumerate() {
+            if rounds[i] != round {
+                continue;
+            }
+            let (label, color, why) = status(run, &s.title);
+            let accent = why.is_some().then_some(color);
+            card(ui, accent, |ui| {
+                ui.horizontal(|ui| {
+                    ui.set_height(28.0);
+                    if matches!(run, Run::Working { .. }) {
+                        working = true;
+                        let (rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+                        spinner(ui, rect.center(), 8.0, color, time);
                     } else {
-                        (
-                            "Revisar commits",
-                            "No vuelve a ejecutar el agente: da por bueno su cierre y comprueba si \
-                             su rama tiene commits",
-                        )
-                    };
-                    if run.can_retry()
-                        && Button::new(text, Kind::Secondary)
-                            .icon(Icon::Refresh)
-                            .small()
-                            .show(ui)
-                            .on_hover_text(tip)
-                            .clicked()
-                    {
-                        out.push(Intent::Retry(i));
+                        number(ui, i + 1);
                     }
-                    if let Run::Working { pane, .. } = run {
-                        // Plan B si la shell no avisa cuándo termina el agente (cmd, WSL).
-                        if Button::new("Marcar terminada", Kind::Ghost)
-                            .small()
-                            .show(ui)
-                            .on_hover_text(
-                                "Úsalo si Orion no detectó que el agente cerró (cmd, WSL). Se \
-                                 comprueban sus commits.",
+                    ui.add_space(2.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        overlay::badge(ui, label, color);
+                        if let Run::Working { branch, .. } = run
+                            && o.committed.contains(branch)
+                        {
+                            overlay::badge(ui, "Ya hizo commit", theme().ansi[3]);
+                        }
+                        // «Reintentar» solo vuelve a lanzar una bloqueada. A una que ya terminó o se
+                        // cerró no la ejecuta de nuevo: mira otra vez sus commits, y así se llama.
+                        let (text, tip) = if matches!(run, Run::Blocked(_)) {
+                            (
+                                "Reintentar",
+                                "Intenta arrancarla de nuevo cuando estén listas las que necesita",
                             )
-                            .clicked()
+                        } else {
+                            (
+                                "Revisar commits",
+                                "No vuelve a ejecutar el agente: da por bueno su cierre y comprueba si \
+                                 su rama tiene commits",
+                            )
+                        };
+                        if run.can_retry()
+                            && Button::new(text, Kind::Secondary)
+                                .icon(Icon::Refresh)
+                                .small()
+                                .show(ui)
+                                .on_hover_text(tip)
+                                .clicked()
                         {
-                            out.push(Intent::Finish(i));
+                            out.push(Intent::Retry(i));
                         }
-                        if Button::new("Ver pestaña", Kind::Secondary)
-                            .icon(Icon::ExternalLink)
-                            .small()
-                            .show(ui)
-                            .clicked()
-                        {
-                            out.push(Intent::Reveal(*pane));
+                        if let Run::Working { pane, .. } = run {
+                            // Plan B si la shell no avisa cuándo termina el agente (cmd, WSL).
+                            if Button::new("Marcar terminada", Kind::Ghost)
+                                .small()
+                                .show(ui)
+                                .on_hover_text(
+                                    "Úsalo si Orion no detectó que el agente cerró (cmd, WSL). Se \
+                                     comprueban sus commits.",
+                                )
+                                .clicked()
+                            {
+                                out.push(Intent::Finish(i));
+                            }
+                            if Button::new("Ver pestaña", Kind::Secondary)
+                                .icon(Icon::ExternalLink)
+                                .small()
+                                .show(ui)
+                                .clicked()
+                            {
+                                out.push(Intent::Reveal(*pane));
+                            }
                         }
-                    }
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        let title = RichText::new(&s.title).font(medium(13.5)).color(theme().fg);
-                        ui.add(egui::Label::new(title).truncate())
-                            .on_hover_text(&s.prompt);
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            let title = RichText::new(&s.title).font(medium(13.5)).color(theme().fg);
+                            ui.add(egui::Label::new(title).truncate())
+                                .on_hover_text(&s.prompt);
+                        });
                     });
                 });
-            });
-            ui.horizontal(|ui| {
-                ui.add_space(32.0);
-                ui.label(
-                    RichText::new(display_name(&s.executor))
-                        .size(11.5)
-                        .color(dim_text()),
-                );
-                let detail = match run {
-                    Run::Working { branch, .. }
-                    | Run::Done { branch, .. }
-                    | Run::Closed { branch, .. } => Some(branch.clone()),
-                    Run::Waiting if !s.after.is_empty() => Some(super::after_text(&s.after)),
-                    _ => None,
-                };
-                if let Some(detail) = detail {
-                    note(ui, &format!("·  {detail}"));
-                }
-            });
-            if let Some(why) = why {
                 ui.horizontal(|ui| {
                     ui.add_space(32.0);
-                    ui.add(egui::Label::new(RichText::new(why).size(12.0).color(color)).wrap());
+                    ui.label(
+                        RichText::new(display_name(&s.executor))
+                            .size(11.5)
+                            .color(dim_text()),
+                    );
+                    let detail = match run {
+                        Run::Working { branch, .. }
+                        | Run::Done { branch, .. }
+                        | Run::Closed { branch, .. } => Some(branch.clone()),
+                        Run::Waiting if !s.after.is_empty() => Some(super::after_text(&s.after)),
+                        _ => None,
+                    };
+                    if let Some(detail) = detail {
+                        note(ui, &format!("·  {detail}"));
+                    }
                 });
-            }
-        });
+                if let Some(why) = why {
+                    ui.horizontal(|ui| {
+                        ui.add_space(32.0);
+                        ui.add(egui::Label::new(RichText::new(why).size(12.0).color(color)).wrap());
+                    });
+                }
+            });
+        }
     }
     if working {
         ui.ctx().request_repaint_after(SPINNER_FRAME);
@@ -1133,5 +1160,34 @@ mod tests {
         let plan = [task(&[]), task(&[]), task(&[0]), task(&[1, 2])];
         let refs: Vec<&Subtask> = plan.iter().collect();
         assert_eq!(rounds(&refs), [1, 1, 2, 3]);
+    }
+
+    #[test]
+    fn the_active_round_is_the_first_one_that_did_not_succeed() {
+        let done = Run::Done {
+            branch: "b".into(),
+            base: "0".into(),
+            code: Some(0),
+            commits: true,
+        };
+        let no_commits = Run::Done {
+            branch: "b".into(),
+            base: "0".into(),
+            code: Some(0),
+            commits: false,
+        };
+        let working = Run::Working {
+            pane: 1,
+            branch: "b".into(),
+            base: "0".into(),
+        };
+        let blocked = Run::Blocked("x".into());
+        let rounds = [1, 1, 2];
+        let active = |runs: [&Run; 3]| active_round(&rounds, &runs);
+        assert_eq!(active([&done, &done, &done]), None);
+        assert_eq!(active([&done, &working, &Run::Waiting]), Some(1));
+        assert_eq!(active([&done, &done, &working]), Some(2));
+        assert_eq!(active([&done, &blocked, &Run::Waiting]), Some(1));
+        assert_eq!(active([&no_commits, &done, &Run::Waiting]), Some(1));
     }
 }
