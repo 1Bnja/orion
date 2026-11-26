@@ -31,7 +31,6 @@ pub struct Graph {
 }
 
 /// Una referencia del repo (rama, tag, stash o worktree) y el commit al que apunta.
-#[allow(dead_code)] // La UI la usa en otra rama.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RefItem {
     pub name: String,
@@ -41,7 +40,6 @@ pub struct RefItem {
 }
 
 /// Todas las referencias del repo, agrupadas por tipo.
-#[allow(dead_code)] // La UI la usa en otra rama.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Refs {
     pub local: Vec<RefItem>,
@@ -52,7 +50,6 @@ pub struct Refs {
 }
 
 /// Un archivo cambiado y sus líneas; `None` en binarios y en archivos no rastreados.
-#[allow(dead_code)] // La UI lo usa en otra rama.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FileChange {
     pub path: String,
@@ -61,7 +58,6 @@ pub struct FileChange {
 }
 
 /// El detalle de un commit.
-#[allow(dead_code)] // La UI lo usa en otra rama.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Details {
     /// Mensaje completo.
@@ -69,12 +65,8 @@ pub struct Details {
     pub files: Vec<FileChange>,
 }
 
-/// Lee hasta `limit` commits de todas las ramas y arma el grafo.
-pub fn load(repo: &Path, limit: usize) -> Result<Graph, String> {
-    load_rev(repo, None, limit)
-}
-
-/// Como `load`, pero con `rev` solo entran los commits alcanzables desde ahí.
+/// Lee hasta `limit` commits y arma el grafo: de todas las ramas, o con `rev` solo los
+/// alcanzables desde ahí.
 pub fn load_rev(repo: &Path, rev: Option<&str>, limit: usize) -> Result<Graph, String> {
     let n = limit.to_string();
     // Un solo comando: cada commit en una línea, con campos separados por 0x1f.
@@ -112,7 +104,6 @@ pub fn load_rev(repo: &Path, rev: Option<&str>, limit: usize) -> Result<Graph, S
 }
 
 /// Ramas locales y remotas, tags, stashes y worktrees del repo.
-#[allow(dead_code)] // La UI la usa en otra rama.
 pub fn refs(repo: &Path) -> Result<Refs, String> {
     let mut refs = Refs::default();
 
@@ -188,7 +179,6 @@ pub fn refs(repo: &Path) -> Result<Refs, String> {
 }
 
 /// Mensaje completo y archivos cambiados de un commit. Un merge puede venir sin archivos.
-#[allow(dead_code)] // La UI la usa en otra rama.
 pub fn details(repo: &Path, id: &str) -> Result<Details, String> {
     // El NUL tras `%B` separa el mensaje del numstat.
     let text = crate::agents::git(
@@ -214,7 +204,6 @@ pub fn details(repo: &Path, id: &str) -> Result<Details, String> {
 /// El diff de un archivo en un commit. `path` es relativo a la raíz del repo.
 /// ponytail: `agents::git` recorta la salida, así que se pierden las líneas en blanco finales;
 /// si la UI las necesita, habrá que leer la salida cruda.
-#[allow(dead_code)] // La UI la usa en otra rama.
 pub fn diff(repo: &Path, id: &str, path: &str) -> Result<String, String> {
     let path = format!(":(top,literal){path}");
     crate::agents::git(
@@ -234,7 +223,6 @@ pub fn diff(repo: &Path, id: &str, path: &str) -> Result<String, String> {
 }
 
 /// Cambios sin commitear (staged, unstaged y no rastreados). Vacío = limpio.
-#[allow(dead_code)] // La UI la usa en otra rama.
 pub fn wip(repo: &Path) -> Result<Vec<FileChange>, String> {
     // Sin commits todavía no hay HEAD: se compara contra el árbol vacío.
     // ponytail: es el hash SHA-1; un repo SHA-256 sin commits daría error.
@@ -273,7 +261,6 @@ pub fn wip(repo: &Path) -> Result<Vec<FileChange>, String> {
 }
 
 /// Un texto que cambia si cambian HEAD, alguna ref o el WIP; sirve para saber cuándo recargar.
-#[allow(dead_code)] // La UI la usa en otra rama.
 pub fn fingerprint(repo: &Path) -> Result<String, String> {
     // Falla en un repo sin commits, y ahí vacío es una respuesta válida.
     let head =
@@ -549,7 +536,7 @@ mod tests {
         run(&repo, &["checkout", "-q", "main"]);
         run(&repo, &["merge", "--no-ff", "-q", "-m", "merge", "lateral"]);
 
-        let graph = load(&repo, 100).unwrap();
+        let graph = load_rev(&repo, None, 100).unwrap();
         assert_eq!(graph.commits.len(), 4);
         assert_eq!(graph.lanes, 2);
 

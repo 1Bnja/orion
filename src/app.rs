@@ -25,6 +25,7 @@ macro_rules! keys {
 
 mod chrome;
 mod graph;
+mod graph_panels;
 mod home;
 #[cfg(target_os = "macos")]
 mod macmenu;
@@ -1307,15 +1308,10 @@ impl eframe::App for Orion {
                 tab.repo_cwd = Some(cwd);
             }
         }
-        // Pestañas Grafo: recoger la carga que terminó y recargar la que vuelve a estar activa.
+        // Pestañas Grafo: recoger lo que terminó, recargar la que vuelve a estar activa y vigilar el repo.
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             if let Content::Graph(graph) = &mut tab.content {
-                graph.poll();
-                let shown = i == self.active;
-                if shown && !graph.shown {
-                    graph.reload(ctx);
-                }
-                graph.shown = shown;
+                graph.poll(ctx, i == self.active);
             }
         }
         self.watch_config(ctx);

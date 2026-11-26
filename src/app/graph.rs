@@ -2,16 +2,17 @@
 //! refs a la izquierda y, junto a ellas, las líneas del grafo.
 
 use super::chrome::{RADIUS, label, medium};
+use super::graph_panels::Panels;
 use crate::colors::theme;
-use crate::git_graph::{self, Commit, Graph, Row};
+use crate::git_graph::{self, Commit, FileChange, Graph, Refs, Row};
 use eframe::egui::epaint::{CubicBezierShape, RectShape};
 use eframe::egui::{self, Color32, FontId, Rect, Sense, Shape, Stroke, StrokeKind, pos2, vec2};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Alto fijo de cada fila (lo necesita `show_rows`).
-const ROW: f32 = 28.0;
+pub(super) const ROW: f32 = 28.0;
 /// Distancia entre carriles.
 const LANE: f32 = 24.0;
 /// Radio del nodo con las iniciales y del punto de un merge.
@@ -46,6 +47,8 @@ pub(super) struct GraphView {
     pub(super) filter: String,
     pub(super) show_remotes: bool,
     pub(super) show_tags: bool,
+    /// Fila a la que la lista se desplaza en el próximo frame.
+    pub(super) scroll_to: Option<usize>,
     /// Carril del commit bajo el puntero en el frame anterior: se resalta en todas las filas.
     hovered_lane: Option<usize>,
 }
@@ -103,7 +106,7 @@ fn ago(now: i64, time: i64) -> String {
 }
 
 /// Fecha absoluta en UTC (la biblioteca estándar no sabe la zona horaria).
-fn date_utc(time: i64) -> String {
+pub(super) fn date_utc(time: i64) -> String {
     let (days, secs) = (time.div_euclid(86_400), time.rem_euclid(86_400));
     // Días → año, mes y día ("civil_from_days", de Howard Hinnant).
     let z = days + 719_468;
@@ -253,6 +256,7 @@ impl GraphView {
             filter: String::new(),
             show_remotes: true,
             show_tags: true,
+            scroll_to: None,
             hovered_lane: None,
         }
     }
@@ -265,16 +269,7 @@ impl GraphView {
         self.graph = graph;
     }
 
-    /// Dibuja la vista; `busy` = se está recargando. Devuelve true si se pidió refrescar.
-    pub fn ui(&mut self, ui: &mut egui::Ui, busy: bool) -> bool {
-        let refresh = self.toolbar(ui, busy);
-        ui.separator();
-        // El panel de abajo va antes que la lista: así la lista ocupa lo que sobra.
-        self.details(ui);
-        self.list(ui);
-        refresh
-    }
-
+    /// La barra de arriba; `busy` = se está recargando. Devuelve true si se pidió refrescar.
     fn toolbar(&mut self, ui: &mut egui::Ui, busy: bool) -> bool {
         ui.horizontal(|ui| {
             ui.add(
@@ -299,10 +294,11 @@ impl GraphView {
         .inner
     }
 
-    fn list(&mut self, ui: &mut egui::Ui) {
+    /// La lista de commits. Con `more`, al final va «Cargar más»; devuelve true si se pulsó.
+    fn list(&mut self, ui: &mut egui::Ui, more: bool) -> bool {
         if self.graph.commits.is_empty() {
             ui.weak("No hay commits que mostrar.");
-            return;
+            return false;
         }
         // Filtrar atenúa las filas que no coinciden en vez de ocultarlas: el grafo sigue
         // entero y no hay que recalcular carriles.
@@ -316,19 +312,31 @@ impl GraphView {
         ui.spacing_mut().item_spacing.y = 0.0;
         // Las filas se pintan con el carril del frame anterior y anotan el de este.
         let hovered = self.hovered_lane.take();
-        egui::ScrollArea::vertical().auto_shrink(false).show_rows(
-            ui,
-            ROW,
-            self.graph.commits.len(),
-            |ui, visible| {
-                for i in visible {
+        let mut area = egui::ScrollArea::vertical().auto_shrink(false);
+        if let Some(i) = self.scroll_to.take() {
+            // La fila queda a media altura (o arriba del todo, si es de las primeras).
+            let offset = i as f32 * ROW - (ui.available_height() - ROW) / 2.0;
+            area = area.vertical_scroll_offset(offset.max(0.0));
+        }
+        let count = self.graph.commits.len();
+        let mut load_more = false;
+        area.show_rows(ui, ROW, count + usize::from(more), |ui, visible| {
+            for i in visible {
+                if i == count {
+                    let size = vec2(ui.available_width(), ROW);
+                    let layout = egui::Layout::top_down(egui::Align::Center);
+                    ui.allocate_ui_with_layout(size, layout, |ui| {
+                        load_more = ui.button("Cargar más").clicked();
+                    });
+                } else {
                     self.row(ui, i, &needle, now, hovered);
                 }
-            },
-        );
+            }
+        });
         if self.hovered_lane != hovered {
             ui.ctx().request_repaint();
         }
+        load_more
     }
 
     fn row(&mut self, ui: &mut egui::Ui, i: usize, needle: &str, now: i64, hovered: Option<usize>) {
@@ -428,33 +436,20 @@ impl GraphView {
             theme().muted(),
         );
     }
-
-    /// El panel de abajo con los datos del commit elegido.
-    fn details(&self, ui: &mut egui::Ui) {
-        let Some(commit) = self.selected.and_then(|i| self.graph.commits.get(i)) else {
-            return;
-        };
-        egui::Panel::bottom("grafo-detalle")
-            .resizable(false)
-            .show(ui, |ui| {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.monospace(&commit.id);
-                    if ui.button("Copiar hash").clicked() {
-                        ui.ctx().copy_text(commit.id.clone());
-                    }
-                });
-                ui.weak(format!("{}  ·  {}", commit.author, date_utc(commit.time)));
-                ui.add_space(4.0);
-                ui.label(&commit.subject);
-                ui.add_space(6.0);
-            });
-    }
 }
 
-/// Cuántos commits se leen: alcanza para la historia reciente y carga rápido.
-/// ponytail: tope fijo; si hace falta más historia, cargar más al llegar al final de la lista.
+/// Cuántos commits se leen de entrada, y cuántos más con «Cargar más».
 const LIMIT: usize = 2000;
+/// Cada cuánto se mira si el repo cambió, mientras la pestaña está a la vista.
+const FINGERPRINT_EVERY: Duration = Duration::from_secs(3);
+
+/// Lo que trae una carga: el grafo, las refs y el WIP, más la huella del repo al empezar.
+struct Loaded {
+    print: String,
+    graph: Graph,
+    refs: Refs,
+    wip: Vec<FileChange>,
+}
 
 /// Una pestaña "Grafo": el grafo de un repo, leído con git en un hilo aparte.
 pub(super) struct GraphTab {
@@ -462,57 +457,130 @@ pub(super) struct GraphTab {
     /// None hasta que termina la primera carga.
     view: Option<GraphView>,
     /// Una carga en camino.
-    loading: Option<Receiver<Result<Graph, String>>>,
+    loading: Option<Receiver<Result<Loaded, String>>>,
     /// La última carga falló (se sigue mostrando el grafo anterior, si había).
     error: Option<String>,
     /// Era la pestaña activa en el frame anterior (para recargar cuando vuelve a serlo).
-    pub(super) shown: bool,
+    shown: bool,
+    /// Los paneles de refs (izquierda) y detalle (derecha).
+    panels: Panels,
+    /// Cuántos commits se leen (crece con «Cargar más»).
+    limit: usize,
+    /// Solo los commits de esta rama; `None` = todas.
+    branch: Option<String>,
+    /// Huella del repo en la última carga, y una huella nueva en camino.
+    print: Option<String>,
+    printing: Option<Receiver<Result<String, String>>>,
+    /// Cuándo se pidió la última huella.
+    printed: Instant,
 }
 
 impl GraphTab {
     /// Una pestaña vacía: carga el grafo la primera vez que queda activa.
     pub(super) fn new(repo: PathBuf) -> Self {
         Self {
+            panels: Panels::new(repo.clone()),
             repo,
             view: None,
             loading: None,
             error: None,
             shown: false,
+            limit: LIMIT,
+            branch: None,
+            print: None,
+            printing: None,
+            printed: Instant::now(),
         }
     }
 
-    /// Vuelve a leer el grafo en un hilo (si ya hay una carga en camino, no hace nada).
-    pub(super) fn reload(&mut self, ctx: &egui::Context) {
+    /// Vuelve a leer grafo, refs y WIP en un hilo (si ya hay una carga en camino, no hace nada).
+    fn reload(&mut self, ctx: &egui::Context) {
         if self.loading.is_some() {
             return;
         }
         let (tx, rx) = mpsc::channel();
         let (repo, ctx) = (self.repo.clone(), ctx.clone());
+        let (branch, limit) = (self.branch.clone(), self.limit);
         std::thread::spawn(move || {
-            let _ = tx.send(git_graph::load(&repo, LIMIT));
+            // La huella va primero: si el repo cambia durante la carga, la próxima lo nota.
+            let print = git_graph::fingerprint(&repo).unwrap_or_default();
+            let loaded = git_graph::load_rev(&repo, branch.as_deref(), limit).map(|graph| Loaded {
+                print,
+                graph,
+                // Sin refs o sin WIP el grafo igual sirve.
+                refs: git_graph::refs(&repo).unwrap_or_default(),
+                wip: git_graph::wip(&repo).unwrap_or_default(),
+            });
+            let _ = tx.send(loaded);
             ctx.request_repaint(); // para que `poll` lo vea aunque nada más pase
         });
         self.loading = Some(rx);
     }
 
-    /// Recoge la carga si terminó.
-    pub(super) fn poll(&mut self) {
-        let Some(rx) = &self.loading else { return };
-        let result = match rx.try_recv() {
-            Ok(result) => result,
-            Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => Err("la carga se interrumpió".into()),
-        };
+    /// Como `reload`, pero descarta la carga en camino (leía otra rama u otro límite).
+    fn restart(&mut self, ctx: &egui::Context) {
         self.loading = None;
-        match result {
-            Ok(graph) => {
-                self.error = None;
-                match &mut self.view {
-                    Some(view) => view.replace(graph),
-                    None => self.view = Some(GraphView::new(graph)),
+        self.reload(ctx);
+    }
+
+    /// Cada frame: recarga si la pestaña vuelve a estar a la vista, recoge lo que terminó y,
+    /// mientras se ve, cada `FINGERPRINT_EVERY` mira si el repo cambió.
+    pub(super) fn poll(&mut self, ctx: &egui::Context, shown: bool) {
+        if shown && !self.shown {
+            self.reload(ctx);
+        }
+        self.shown = shown;
+        self.panels.poll();
+
+        let result = self.loading.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err("la carga se interrumpió".into())),
+        });
+        if let Some(result) = result {
+            self.loading = None;
+            match result {
+                Ok(loaded) => {
+                    self.error = None;
+                    self.print = Some(loaded.print);
+                    self.panels.refs = loaded.refs;
+                    self.panels.set_wip(loaded.wip);
+                    match &mut self.view {
+                        Some(view) => view.replace(loaded.graph),
+                        None => self.view = Some(GraphView::new(loaded.graph)),
+                    }
+                }
+                Err(e) => self.error = Some(e),
+            }
+        }
+
+        let print = self.printing.as_ref().map(|rx| rx.try_recv());
+        match print {
+            None | Some(Err(TryRecvError::Empty)) => {}
+            Some(Err(TryRecvError::Disconnected)) => self.printing = None,
+            Some(Ok(print)) => {
+                self.printing = None;
+                // Si falló, se reintenta en la próxima vuelta.
+                if let Ok(print) = print
+                    && self.print.as_ref() != Some(&print)
+                {
+                    self.reload(ctx);
                 }
             }
-            Err(e) => self.error = Some(e),
+        }
+        // Con una huella o una carga en camino no se pide otra: su hilo despierta la ventana.
+        if shown && self.printing.is_none() && self.loading.is_none() {
+            if self.printed.elapsed() >= FINGERPRINT_EVERY {
+                let (tx, rx) = mpsc::channel();
+                let (repo, ctx) = (self.repo.clone(), ctx.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(git_graph::fingerprint(&repo));
+                    ctx.request_repaint();
+                });
+                self.printing = Some(rx);
+                self.printed = Instant::now();
+            }
+            ctx.request_repaint_after(FINGERPRINT_EVERY.saturating_sub(self.printed.elapsed()));
         }
     }
 
@@ -540,18 +608,33 @@ impl GraphTab {
             }
             return;
         };
-        if view.ui(ui, busy) {
-            self.reload(ui.ctx());
+        let refresh = view.toolbar(ui, busy);
+        ui.separator();
+        // Los paneles van antes que la lista: así la lista ocupa lo que sobra.
+        let branch = self.panels.left(ui, view, self.branch.as_deref());
+        self.panels.right(ui, view);
+        self.panels.header(ui, view);
+        let more = view.list(ui, view.graph.commits.len() >= self.limit);
+
+        let ctx = ui.ctx().clone();
+        if let Some(branch) = branch {
+            self.branch = branch;
+            self.restart(&ctx);
+        } else if more {
+            self.limit += LIMIT;
+            self.restart(&ctx);
+        } else if refresh {
+            self.reload(&ctx);
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     /// Datos de ejemplo: `main` con una rama lateral que se fusiona.
-    fn sample() -> Graph {
+    pub(in crate::app) fn sample() -> Graph {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
@@ -690,11 +773,12 @@ mod tests {
         view.selected = Some(1);
         view.filter = "merge".into();
         view.hovered_lane = Some(1);
-        let mut refresh = true;
+        let (mut refresh, mut more) = (true, true);
         let mut output = egui::Context::default().run_ui(Default::default(), |ui| {
-            refresh = view.ui(ui, false);
+            refresh = view.toolbar(ui, false);
+            more = view.list(ui, true);
         });
-        assert!(!refresh);
+        assert!(!refresh && !more);
         // Los cambios de carril salen como curvas.
         assert!(
             output
