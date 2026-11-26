@@ -3,6 +3,7 @@
 
 use crate::colors::theme;
 use crate::fonts::medium_family;
+use crate::logo::Logo;
 use eframe::egui::text::{LayoutJob, TextWrapping};
 use eframe::egui::{self, Color32, FontId, Painter, Pos2, Rect, Sense, TextureHandle, pos2, vec2};
 
@@ -140,6 +141,52 @@ pub(super) fn draw_icon_size(ui: &egui::Ui, icon: Icon, c: Pos2, color: Color32,
     let rect = Rect::from_center_size(c, vec2(size, size));
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     ui.painter().image(tex.id(), rect, uv, color);
+}
+
+/// Side of an agent logo, in points.
+pub(super) const LOGO: f32 = 14.0;
+/// What a logo takes in a line of text: itself and the gap after it.
+pub(super) const LOGO_SPACE: f32 = LOGO + 5.0;
+
+/// An agent logo rasterized at `side` physical pixels: white, so it is tinted when drawn and a
+/// new theme needs no new texture. Made once per logo and pixel size.
+fn logo_texture(ctx: &egui::Context, logo: Logo, side: usize) -> TextureHandle {
+    let id = egui::Id::unique(("agent-logo", logo, side));
+    if let Some(handle) = ctx.data(|d| d.get_temp::<TextureHandle>(id)) {
+        return handle;
+    }
+    let white = |a| Color32::from_white_alpha(a);
+    let pixels = logo.coverage(side).into_iter().map(white).collect();
+    let color = egui::ColorImage::new([side, side], pixels);
+    let name = format!("logo-{logo:?}-{side}");
+    let handle = ctx.load_texture(name, color, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, handle.clone()));
+    handle
+}
+
+/// The physical pixels of a logo on this screen (HiDPI).
+fn logo_pixels(ctx: &egui::Context) -> usize {
+    (LOGO * ctx.pixels_per_point()).round().max(1.0) as usize
+}
+
+/// Draws an agent logo with its left edge at `left` (centered vertically on it), tinted.
+pub(super) fn draw_logo(ui: &egui::Ui, logo: Logo, left: Pos2, color: Color32) {
+    let ppp = ui.ctx().pixels_per_point();
+    let side = logo_pixels(ui.ctx());
+    let tex = logo_texture(ui.ctx(), logo, side);
+    // On whole pixels, one texel per pixel: that keeps it sharp.
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let min = pos2(snap(left.x), snap(left.y - LOGO / 2.0));
+    let rect = Rect::from_min_size(min, egui::Vec2::splat(side as f32 / ppp));
+    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    ui.painter().image(tex.id(), rect, uv, color);
+}
+
+/// An agent logo as a widget, for buttons and menus, in the text color.
+pub(super) fn logo_image(ctx: &egui::Context, logo: Logo) -> egui::Image<'static> {
+    let tex = logo_texture(ctx, logo, logo_pixels(ctx));
+    let size = egui::Vec2::splat(LOGO);
+    egui::Image::new(egui::load::SizedTexture::new(tex.id(), size)).tint(theme().fg)
 }
 
 /// A button that is only an icon. It lights up under the mouse.

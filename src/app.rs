@@ -42,9 +42,11 @@ mod settings;
 mod sidebar;
 mod titlebar;
 
+use crate::blocks::Status;
 use crate::colors::{surface, theme};
 use crate::config::{Settings, config_modified, reload_settings};
 use crate::fonts::{apply_font, is_font_file};
+use crate::logo::Logo;
 use crate::pty::{Error, find_shell, usable_shell};
 use crate::update::{self, State as UpdateState, Updater};
 use alacritty_terminal::term::TermMode;
@@ -76,6 +78,8 @@ struct Tab {
     repo: Option<PathBuf>,
     /// El agente con que se abrió, para distinguir varias pestañas de un mismo proyecto.
     agent: Option<String>,
+    /// Original launch command, retained for the tab logo after command blocks are cleared.
+    agent_command: Option<String>,
     /// La carpeta del worktree si la pestaña nació en uno (para no limpiarlo mientras se usa).
     worktree: Option<PathBuf>,
     /// El `id` del panel donde Orion escribió el agente (con splits el foco cambia); su
@@ -107,6 +111,7 @@ impl Tab {
         Self {
             repo: None,
             agent: None,
+            agent_command: None,
             worktree: None,
             agent_run: None,
             agent_notified: false,
@@ -147,6 +152,16 @@ impl Tab {
     fn title(&self) -> String {
         self.focused()
             .map_or_else(|| "Grafo".into(), Session::title)
+    }
+
+    /// El logo del agente de esta pestaña (ver `agent_logo`).
+    fn logo(&self) -> Option<Logo> {
+        let session = self.focused()?;
+        let running = matches!(session.activity(), Some(Status::Running(_)))
+            .then(|| session.last_command())
+            .flatten();
+        let launched = self.agent_command.as_deref();
+        agent_logo(running, launched, &session.title())
     }
 
     /// Cómo va el agente de esta pestaña; None si no es de agente (o su panel ya se cerró).
@@ -308,6 +323,13 @@ impl AgentChoice {
         }
     }
 
+    fn logo(self, settings: &Settings) -> Logo {
+        match self {
+            Self::Provider(i) => crate::agents::PROVIDERS[i].logo,
+            Self::Profile(i) => crate::agents::logo_for(&settings.agents[i].command),
+        }
+    }
+
     fn command(self, settings: &Settings) -> String {
         match self {
             Self::Provider(i) => crate::agents::PROVIDERS[i].command.into(),
@@ -341,6 +363,31 @@ fn grouped_order(repos: &[Option<&PathBuf>]) -> Vec<usize> {
             .unwrap_or(usize::MAX)
     });
     order
+}
+
+/// El logo de una pestaña; None si es una terminal sin agente. Manda lo que está corriendo en
+/// el panel con foco (`running`, por si abriste el agente a mano); si no es un agente conocido,
+/// el comando con que Orion abrió la pestaña (`launched`; genérico si no lo reconoce). Lo último,
+/// que el título sea el nombre de un agente: al limpiar la pantalla se pierden los bloques.
+fn agent_logo(running: Option<&str>, launched: Option<&str>, title: &str) -> Option<Logo> {
+    let known = |command| crate::agents::provider_for(command).map(|p| p.logo);
+    let titled = || {
+        let name = plain_title(title);
+        let mut providers = crate::agents::PROVIDERS.iter();
+        providers.find(|p| p.name == name).map(|p| p.logo)
+    };
+    running
+        .and_then(known)
+        .or_else(|| launched.map(crate::agents::logo_for))
+        .or_else(titled)
+}
+
+/// El título sin el símbolo de estado que algunos agentes ponen delante (el "✳" de Claude Code
+/// o un indicador giratorio): junto al logo sería un segundo ícono.
+fn plain_title(title: &str) -> &str {
+    let glyph = |c: char| "✳✢✶✻✽∗·✦◇\u{fe0f}".contains(c) || ('\u{2800}'..='\u{28ff}').contains(&c);
+    let rest = title.trim_start_matches(glyph).trim_start();
+    if rest.is_empty() { title } else { rest }
 }
 
 /// Lo que dice la fila de una pestaña: el agente y la carpeta, salvo que el título ya nombre al agente
@@ -592,6 +639,7 @@ impl Orion {
             session.agent = Some(AgentWatch::new(usize::from(dir.is_some())));
         }
         tab.agent = agent.then(|| name.to_string());
+        tab.agent_command = agent.then_some(command);
         tab.worktree = if worktree { dir.clone() } else { None };
         tab.agent_run = agent.then_some(tab.focus);
         true
@@ -629,6 +677,18 @@ impl Orion {
             .collect();
         choices.extend((0..self.settings.agents.len()).map(AgentChoice::Profile));
         choices
+    }
+
+    /// El logo del agente de un proyecto guardado, que solo recuerda su nombre. None si ese
+    /// agente ya no está ni en `PROVIDERS` ni en config.toml.
+    fn saved_logo(&self, agent: &str) -> Option<Logo> {
+        let profile = self.settings.agents.iter().find(|a| a.name == agent);
+        profile
+            .map(|a| crate::agents::logo_for(&a.command))
+            .or_else(|| {
+                let mut providers = crate::agents::PROVIDERS.iter();
+                providers.find(|p| p.name == agent).map(|p| p.logo)
+            })
     }
 
     /// Abre la ventana de "Nuevo proyecto", empezando en el repo de la pestaña actual si lo hay.
@@ -1546,6 +1606,27 @@ mod tests {
         assert_eq!(tab_label(None, "benja"), "benja");
         assert_eq!(tab_label(Some("Codex"), "orion-1"), "Codex · orion-1");
         assert_eq!(tab_label(Some("OpenCode"), "OpenCode"), "OpenCode");
+    }
+
+    #[test]
+    fn a_tab_gets_the_logo_of_its_agent() {
+        let logo = agent_logo;
+        // Pestaña que abrió Orion: por el comando, aunque corra con argumentos.
+        let launched = Some("codex 'arregla el test'");
+        assert_eq!(logo(None, launched, "orion"), Some(Logo::Codex));
+        assert_eq!(logo(None, Some("mi-agente"), "orion"), Some(Logo::Generic));
+        // Abierto a mano; y lo que corre ahora manda sobre lo que se lanzó.
+        assert_eq!(logo(Some("aider"), None, "orion"), Some(Logo::Aider));
+        assert_eq!(logo(Some("gemini"), launched, "x"), Some(Logo::Gemini));
+        assert_eq!(logo(Some("git log"), launched, "x"), Some(Logo::Codex));
+        // Sin bloques, queda el título.
+        assert_eq!(logo(None, None, "✳ Claude Code"), Some(Logo::Claude));
+        // Una terminal cualquiera no lleva logo, ni una carpeta que se llame parecido.
+        assert_eq!(logo(Some("cargo build"), None, "orion"), None);
+        assert_eq!(logo(None, None, "codex"), None);
+        assert_eq!(plain_title("⠋ OpenCode"), "OpenCode");
+        assert_eq!(plain_title("~/code"), "~/code");
+        assert_eq!(plain_title("✳"), "✳");
     }
 
     #[test]

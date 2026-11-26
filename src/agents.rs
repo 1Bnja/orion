@@ -1,6 +1,7 @@
 //! Perfiles de agente: una pestaña que lanza un comando (el agente), opcionalmente en un
 //! git worktree propio para que varios agentes trabajen en paralelo sin pisarse.
 
+use crate::logo::Logo;
 use crate::pty::ShellKind;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -17,6 +18,8 @@ pub(crate) struct Provider {
     pub(crate) command: &'static str,
     /// Una línea para el tooltip: quién lo hace y cómo instalarlo.
     pub(crate) about: &'static str,
+    /// Su dibujo en la barra lateral, los menús y la paleta.
+    pub(crate) logo: Logo,
 }
 
 /// Los agentes que Orion reconoce sin configurar nada. Para cualquier otro, un `[[agent]]`.
@@ -26,32 +29,78 @@ pub(crate) static PROVIDERS: [Provider; 5] = [
         binary: "claude",
         command: "claude",
         about: "Anthropic · code.claude.com",
+        logo: Logo::Claude,
     },
     Provider {
         name: "Gemini CLI",
         binary: "gemini",
         command: "gemini",
         about: "Google · npm i -g @google/gemini-cli",
+        logo: Logo::Gemini,
     },
     Provider {
         name: "Codex",
         binary: "codex",
         command: "codex",
         about: "OpenAI · npm i -g @openai/codex",
+        logo: Logo::Codex,
     },
     Provider {
         name: "OpenCode",
         binary: "opencode",
         command: "opencode",
         about: "open source · opencode.ai",
+        logo: Logo::OpenCode,
     },
     Provider {
         name: "Aider",
         binary: "aider",
         command: "aider",
         about: "cualquier modelo, incluido DeepSeek · aider.chat",
+        logo: Logo::Aider,
     },
 ];
+
+/// El nombre del programa que abre `command`, sin carpeta, versión ni extensión:
+/// `& "C:\Mis apps\claude.exe" -p` es "claude".
+fn program_name(command: &str) -> String {
+    let mut rest = command.trim();
+    rest = rest.strip_prefix('&').unwrap_or(rest).trim_start();
+    // Con `npx paquete` y parecidos, el agente es el paquete.
+    for runner in ["npx ", "bunx ", "uvx "] {
+        rest = rest.strip_prefix(runner).unwrap_or(rest).trim_start();
+    }
+    let program = match rest.chars().next() {
+        Some(quote @ ('"' | '\'')) => rest[1..].split(quote).next(),
+        _ => rest.split_whitespace().next(),
+    };
+    let file = program.unwrap_or_default().rsplit(['/', '\\']).next();
+    let name = file.unwrap_or_default().to_ascii_lowercase();
+    let name = name.split('@').next().unwrap_or_default();
+    let extensions = [".exe", ".cmd", ".bat", ".ps1"];
+    let bare = extensions.iter().find_map(|e| name.strip_suffix(e));
+    bare.unwrap_or(name).to_string()
+}
+
+/// El agente de `PROVIDERS` que abre `command` (venga de un `[[agent]]`, de un ejecutor o de lo
+/// que escribiste en la terminal); None si es otro programa.
+pub(crate) fn provider_for(command: &str) -> Option<&'static Provider> {
+    let name = program_name(command);
+    // Los paquetes de npm y pip no siempre se llaman como el programa que instalan.
+    let name = match name.as_str() {
+        "claude-code" => "claude",
+        "gemini-cli" => "gemini",
+        "opencode-ai" => "opencode",
+        "aider-chat" => "aider",
+        other => other,
+    };
+    PROVIDERS.iter().find(|p| p.binary == name)
+}
+
+/// El logo del agente que abre `command`; el genérico si no se reconoce.
+pub(crate) fn logo_for(command: &str) -> Logo {
+    provider_for(command).map_or(Logo::Generic, |p| p.logo)
+}
 
 /// Carpetas donde buscar los CLIs: el PATH y donde los dejan los instaladores.
 fn search_dirs() -> Vec<PathBuf> {
@@ -479,6 +528,37 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), PROVIDERS.len());
+    }
+
+    #[test]
+    fn every_provider_has_its_own_logo() {
+        let mut seen = Vec::new();
+        for p in &PROVIDERS {
+            assert_ne!(p.logo, Logo::Generic, "{}", p.name);
+            assert!(!seen.contains(&p.logo), "{}", p.name);
+            seen.push(p.logo);
+            assert!(p.logo.coverage(16).iter().any(|&a| a > 0), "{}", p.name);
+            assert_eq!(logo_for(p.command), p.logo, "{}", p.name);
+        }
+    }
+
+    #[test]
+    fn the_logo_comes_from_the_program_of_the_command() {
+        for (command, logo) in [
+            ("claude --model claude-sonnet-5-5 'usa codex'", Logo::Claude),
+            ("  codex  ", Logo::Codex),
+            (r#"& "C:\Mis apps\Claude.EXE" -p"#, Logo::Claude),
+            ("/opt/homebrew/bin/aider --model x", Logo::Aider),
+            (r".\gemini.cmd", Logo::Gemini),
+            ("npx @google/gemini-cli@latest", Logo::Gemini),
+            ("opencode -m deepseek/deepseek-v4-pro", Logo::OpenCode),
+            ("mi-agente --usa claude", Logo::Generic),
+            ("claudex", Logo::Generic),
+            ("", Logo::Generic),
+            ("\"", Logo::Generic),
+        ] {
+            assert_eq!(logo_for(command), logo, "{command}");
+        }
     }
 
     #[test]
