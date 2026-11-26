@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="18 16 84 84">
+  <!-- El gato de Orion (la misma geometría que src/icon.rs). Con evenodd, los ojos son recortes. -->
+  <path fill="#fff" fill-rule="evenodd" d="
+    M24 50 L26 16 L48 34 H72 L94 16 L96 50 L88 80 L60 100 L32 80 Z
+    M64 64 L74 54 L84 64 H80 L74 58 L68 64 Z
+    M41 49 L51 59 L41 69 V65 L47 59 L41 53 Z"/>
+</svg>
