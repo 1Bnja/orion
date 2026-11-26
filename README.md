@@ -41,6 +41,9 @@ its own branch, and Orion tells you when one of them needs you.
   and commit details. Fetch, pull, push, branches, stashes, merges and pull requests are there too,
   and the changes panel stages by file or by hunk before committing.
 - A command palette (`Ctrl+Shift+P`) finds any action by name and shows its shortcut.
+- Agent tabs show a small logo of their agent (a generic terminal for other commands), also in the
+  agent menus and the palette. It takes the colors of your theme. The logos are simple shapes drawn
+  for Orion, not official artwork ([`assets/agents`](assets/agents/README.md)).
 
 ### Built for coding agents
 

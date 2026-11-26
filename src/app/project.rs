@@ -1,6 +1,7 @@
 //! La ventana de "Nuevo proyecto": un repo y uno o varios agentes, cada uno en su pestaña.
 //! Con worktree, el agente trabaja en un git worktree y una rama nueva, como los harness de agentes.
 
+use super::chrome::logo_image;
 use super::{AgentChoice, Orion, folder_name};
 use crate::colors::theme;
 use eframe::egui;
@@ -206,9 +207,11 @@ impl Orion {
                 ui.label("Agentes (marca uno o varios)");
                 let mut toggled = false;
                 ui.horizontal_wrapped(|ui| {
-                    for (_, name) in &choices {
+                    for (choice, name) in &choices {
                         let on = self.project.picked.contains(name);
-                        if ui.selectable_label(on, name.as_str()).clicked() {
+                        let logo = logo_image(ui.ctx(), choice.logo(&self.settings));
+                        let chip = egui::Button::selectable(on, (logo, name.as_str()));
+                        if ui.add(chip).clicked() {
                             if on {
                                 self.project.picked.retain(|n| n != name);
                             } else {

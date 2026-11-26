@@ -24,6 +24,7 @@ mod icon;
 mod input;
 mod links;
 mod local_models;
+mod logo;
 mod orchestrator;
 mod pty;
 mod update;

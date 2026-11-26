@@ -1,9 +1,14 @@
 //! Paleta de comandos (Ctrl+Shift+P; Cmd+Shift+P en Mac): buscar cualquier acción de Orion por su nombre,
 //! Cada entrada muestra su atajo: así se aprenden sin memorizarlos.
 
+use super::chrome::{LOGO_SPACE, draw_logo};
 use super::{Action, Orion};
 use crate::colors::theme;
+use crate::logo::Logo;
 use eframe::egui;
+
+/// Cómo empiezan las filas que van a una pestaña.
+const GO_TO_TAB: &str = "Ir a pestaña: ";
 
 #[derive(Default)]
 pub(super) struct Palette {
@@ -177,11 +182,30 @@ impl Orion {
             list.push((format!("Tema: {}", t.name), "", Action::Theme(i)));
         }
         for (pos, i) in self.tab_order().into_iter().enumerate() {
-            let name = format!("Ir a pestaña: {}", self.tabs[i].title());
+            let tab = &self.tabs[i];
+            let title = tab.title();
+            let title = match tab.logo() {
+                Some(_) => super::plain_title(&title),
+                None => &title,
+            };
+            let name = format!("{GO_TO_TAB}{title}");
             let key = numbers.get(pos).copied().unwrap_or("");
             list.push((name, key, Action::SelectTab(i)));
         }
         list
+    }
+
+    /// El logo de una fila de la paleta, si es de un agente.
+    fn command_logo(&self, name: &str, action: &Action) -> Option<Logo> {
+        match *action {
+            Action::Provider(i) => Some(crate::agents::PROVIDERS[i].logo),
+            Action::Agent(i) => Some(crate::agents::logo_for(&self.settings.agents[i].command)),
+            Action::InProject(_, choice, _) => Some(choice.logo(&self.settings)),
+            Action::OpenSaved(i) => self.saved_logo(&self.saved[i].agent),
+            // "Siguiente pestaña" también la elige, pero no habla de un agente.
+            Action::SelectTab(i) if name.starts_with(GO_TO_TAB) => self.tabs.get(i)?.logo(),
+            _ => None,
+        }
     }
 
     /// Dibuja la paleta si está abierta. Devuelve la acción elegida (Enter o clic).
@@ -192,6 +216,10 @@ impl Orion {
         let commands = self.commands();
         let names: Vec<&str> = commands.iter().map(|c| c.0.as_str()).collect();
         let shown = ranked(&names, &self.palette.query);
+        let logos: Vec<Option<Logo>> = commands
+            .iter()
+            .map(|(name, _, action)| self.command_logo(name, action))
+            .collect();
         let p = &mut self.palette;
 
         // Flechas, Enter y Escape son de la lista: se consumen antes de que el cuadro de texto las vea.
@@ -253,7 +281,13 @@ impl Orion {
                             } else if response.hovered() {
                                 painter.rect_filled(rect, 4.0, theme().hover());
                             }
-                            let left = rect.left_center() + egui::vec2(8.0, 0.0);
+                            let mut left = rect.left_center() + egui::vec2(8.0, 0.0);
+                            if let Some(logo) = logos[i] {
+                                draw_logo(ui, logo, left, theme().fg);
+                            }
+                            // Todas dejan el lugar del logo: los nombres quedan en columna.
+                            left.x += LOGO_SPACE;
+                            let painter = ui.painter();
                             let font = egui::FontId::proportional(14.0);
                             painter.text(left, egui::Align2::LEFT_CENTER, name, font, theme().fg);
                             let right = rect.right_center() - egui::vec2(8.0, 0.0);

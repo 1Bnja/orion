@@ -2,6 +2,7 @@
 //! git worktree propio para que varios agentes trabajen en paralelo sin pisarse.
 
 use crate::pty::ShellKind;
+use crate::logo::Logo;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -9,6 +10,8 @@ use std::time::{Duration, Instant};
 /// Un CLI de agente que Orion sabe abrir. El perfil `[[agent]]` sigue siendo la vía libre para
 /// cualquier otro comando; estos son los que ya vienen listos y se detectan solos.
 pub(crate) struct Provider {
+    /// Theme-aware icon; unsupported brand artwork uses the generic terminal mark.
+    pub(crate) logo: Logo,
     /// Nombre para el menú y la paleta.
     pub(crate) name: &'static str,
     /// Programa base; en Windows se prueban `.exe`, `.cmd` y `.bat`.
@@ -30,6 +33,7 @@ pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "Claude Code",
         binary: "claude",
+        logo: Logo::Claude,
         command: "claude",
         about: "Anthropic · code.claude.com",
         executor: Some("claude {prompt}"),
@@ -39,6 +43,7 @@ pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "Gemini CLI",
         binary: "gemini",
+        logo: Logo::Gemini,
         command: "gemini",
         about: "Google · npm i -g @google/gemini-cli",
         executor: Some("gemini --prompt-interactive {prompt}"),
@@ -48,6 +53,7 @@ pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "Codex",
         binary: "codex",
+        logo: Logo::Codex,
         command: "codex",
         about: "OpenAI · npm i -g @openai/codex",
         executor: Some("codex {prompt}"),
@@ -57,6 +63,7 @@ pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "OpenCode",
         binary: "opencode",
+        logo: Logo::OpenCode,
         command: "opencode",
         about: "open source · opencode.ai",
         executor: Some("opencode --prompt {prompt}"),
@@ -66,6 +73,7 @@ pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "Aider",
         binary: "aider",
+        logo: Logo::Aider,
         command: "aider",
         about: "cualquier modelo, incluido DeepSeek · aider.chat",
         // --message procesa la respuesta y termina; no abre un chat interactivo.
@@ -76,6 +84,7 @@ pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "Qwen Code",
         binary: "qwen",
+        logo: Logo::Generic,
         command: "qwen",
         about: "Qwen · github.com/QwenLM/qwen-code",
         executor: Some("qwen --prompt-interactive {prompt}"),
@@ -85,6 +94,7 @@ pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "Copilot",
         binary: "copilot",
+        logo: Logo::Generic,
         command: "copilot",
         about: "GitHub · github.com/github/copilot-cli",
         executor: Some("copilot -i {prompt}"),
@@ -94,6 +104,7 @@ pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "Cursor Agent",
         binary: "cursor-agent",
+        logo: Logo::Generic,
         command: "cursor-agent",
         about: "Cursor · cursor.com/docs/cli",
         executor: Some("cursor-agent {prompt}"),
@@ -103,6 +114,7 @@ pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "Goose",
         binary: "goose",
+        logo: Logo::Generic,
         command: "goose session",
         about: "open source · github.com/aaif-goose/goose",
         executor: Some("goose run --interactive --text {prompt}"),
@@ -112,6 +124,7 @@ pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "Crush",
         binary: "crush",
+        logo: Logo::Generic,
         command: "crush",
         about: "Charm · github.com/charmbracelet/crush",
         // crush run es no interactivo; --prompt cambia el prompt de sistema.
@@ -122,6 +135,7 @@ pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "Amp",
         binary: "amp",
+        logo: Logo::Generic,
         command: "amp",
         about: "Amp · ampcode.com",
         // El prompt inicial documentado usa stdin; no hay un argumento verificado.
@@ -132,6 +146,7 @@ pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "Kimi CLI",
         binary: "kimi",
+        logo: Logo::Generic,
         command: "kimi",
         about: "Moonshot AI · moonshotai.github.io/kimi-cli",
         // --prompt sale después de procesar la consulta.
@@ -142,6 +157,7 @@ pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "Ollama",
         binary: "ollama",
+        logo: Logo::Generic,
         // Selector interactivo de integraciones; no fija ni descarga un modelo.
         command: "ollama launch",
         about: "modelos locales e integraciones · ollama.com",
@@ -150,6 +166,47 @@ pub(crate) static PROVIDERS: &[Provider] = &[
         install: "https://ollama.com/download",
     },
 ];
+
+/// El nombre del programa que abre `command`, sin carpeta, versión ni extensión:
+/// `& "C:\Mis apps\claude.exe" -p` es "claude".
+fn program_name(command: &str) -> String {
+    let mut rest = command.trim();
+    rest = rest.strip_prefix('&').unwrap_or(rest).trim_start();
+    // Con `npx paquete` y parecidos, el agente es el paquete.
+    for runner in ["npx ", "bunx ", "uvx "] {
+        rest = rest.strip_prefix(runner).unwrap_or(rest).trim_start();
+    }
+    let program = match rest.chars().next() {
+        Some(quote @ ('"' | '\'')) => rest[1..].split(quote).next(),
+        _ => rest.split_whitespace().next(),
+    };
+    let file = program.unwrap_or_default().rsplit(['/', '\\']).next();
+    let name = file.unwrap_or_default().to_ascii_lowercase();
+    let name = name.split('@').next().unwrap_or_default();
+    let extensions = [".exe", ".cmd", ".bat", ".ps1"];
+    let bare = extensions.iter().find_map(|e| name.strip_suffix(e));
+    bare.unwrap_or(name).to_string()
+}
+
+/// El agente de `PROVIDERS` que abre `command` (venga de un `[[agent]]`, de un ejecutor o de lo
+/// que escribiste en la terminal); None si es otro programa.
+pub(crate) fn provider_for(command: &str) -> Option<&'static Provider> {
+    let name = program_name(command);
+    // Los paquetes de npm y pip no siempre se llaman como el programa que instalan.
+    let name = match name.as_str() {
+        "claude-code" => "claude",
+        "gemini-cli" => "gemini",
+        "opencode-ai" => "opencode",
+        "aider-chat" => "aider",
+        other => other,
+    };
+    PROVIDERS.iter().find(|p| p.binary == name)
+}
+
+/// El logo del agente que abre `command`; el genérico si no se reconoce.
+pub(crate) fn logo_for(command: &str) -> Logo {
+    provider_for(command).map_or(Logo::Generic, |p| p.logo)
+}
 
 /// Identificador estable para perfiles y ramas: minúsculas y separadores simples.
 pub(crate) fn slug(name: &str) -> String {
@@ -588,6 +645,38 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), PROVIDERS.len());
+    }
+
+    #[test]
+    fn providers_draw_their_logo_or_the_generic_fallback() {
+        let mut seen = Vec::new();
+        for p in &PROVIDERS {
+            if p.logo != Logo::Generic {
+                assert!(!seen.contains(&p.logo), "{}", p.name);
+                seen.push(p.logo);
+            }
+            assert!(p.logo.coverage(16).iter().any(|&a| a > 0), "{}", p.name);
+            assert_eq!(logo_for(p.command), p.logo, "{}", p.name);
+        }
+    }
+
+    #[test]
+    fn the_logo_comes_from_the_program_of_the_command() {
+        for (command, logo) in [
+            ("claude --model claude-sonnet-5-5 'usa codex'", Logo::Claude),
+            ("  codex  ", Logo::Codex),
+            (r#"& "C:\Mis apps\Claude.EXE" -p"#, Logo::Claude),
+            ("/opt/homebrew/bin/aider --model x", Logo::Aider),
+            (r".\gemini.cmd", Logo::Gemini),
+            ("npx @google/gemini-cli@latest", Logo::Gemini),
+            ("opencode -m deepseek/deepseek-v4-pro", Logo::OpenCode),
+            ("mi-agente --usa claude", Logo::Generic),
+            ("claudex", Logo::Generic),
+            ("", Logo::Generic),
+            ("\"", Logo::Generic),
+        ] {
+            assert_eq!(logo_for(command), logo, "{command}");
+        }
     }
 
     #[test]

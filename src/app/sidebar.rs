@@ -1,9 +1,13 @@
 //! The tab sidebar: the "new tab" button, one row per tab (grouped by repo), the saved projects
 //! and the version at the bottom. Its right edge can be dragged to make it wider or narrower.
 
-use super::chrome::{Icon, RADIUS, draw_icon, icon_button, label, medium};
+use super::chrome::{
+    Icon, LOGO_SPACE, RADIUS, draw_icon, draw_logo, icon_button, label, logo_image, medium,
+};
 use super::session::AgentStatus;
-use super::{Action, Content, MAC, Orion, Tab, default_shell, folder_name, render, tab_label};
+use super::{
+    Action, Content, MAC, Orion, Tab, default_shell, folder_name, plain_title, render, tab_label,
+};
 use crate::blocks::Status;
 use crate::colors::{surface, theme};
 use crate::pty::{SHELLS, installed_shells};
@@ -250,7 +254,9 @@ impl Orion {
             }
             for &i in &providers {
                 let provider = &crate::agents::PROVIDERS[i];
-                let button = ui.button(format!("Agente: {}", provider.name));
+                let logo = logo_image(ui.ctx(), provider.logo);
+                let text = format!("Agente: {}", provider.name);
+                let button = ui.add(egui::Button::image_and_text(logo, text));
                 if button.on_hover_text(provider.about).clicked() {
                     *action = Some(Action::Provider(i));
                     ui.close();
@@ -258,18 +264,19 @@ impl Orion {
             }
             for (i, missing) in &broken {
                 let provider = &crate::agents::PROVIDERS[*i];
-                ui.add_enabled(
-                    false,
-                    egui::Button::new(format!("Agente: {} (roto)", provider.name)),
-                )
-                .on_disabled_hover_text(format!(
-                    "Instalación rota: falta {}. Reinstálalo ({})",
-                    missing.display(),
-                    provider.about
-                ));
+                let logo = logo_image(ui.ctx(), provider.logo);
+                let text = format!("Agente: {} (roto)", provider.name);
+                ui.add_enabled(false, egui::Button::image_and_text(logo, text))
+                    .on_disabled_hover_text(format!(
+                        "Instalación rota: falta {}. Reinstálalo ({})",
+                        missing.display(),
+                        provider.about
+                    ));
             }
             for (i, agent) in self.settings.agents.iter().enumerate() {
-                if ui.button(format!("Agente: {}", agent.name)).clicked() {
+                let logo = logo_image(ui.ctx(), crate::agents::logo_for(&agent.command));
+                let text = format!("Agente: {}", agent.name);
+                if ui.add(egui::Button::image_and_text(logo, text)).clicked() {
                     *action = Some(Action::Agent(i));
                     ui.close();
                 }
@@ -321,7 +328,9 @@ impl Orion {
             ] {
                 ui.weak(title);
                 for &choice in &choices {
-                    if ui.button(choice.name(&self.settings)).clicked() {
+                    let logo = logo_image(ui.ctx(), choice.logo(&self.settings));
+                    let name = choice.name(&self.settings);
+                    if ui.add(egui::Button::image_and_text(logo, name)).clicked() {
                         *action = Some(Action::InProject(tab, choice, worktree));
                         ui.close();
                     }
@@ -399,13 +408,22 @@ impl Orion {
                 rect.min.y + y - 9.0..=rect.min.y + y + 9.0,
             )
         };
-        let title = tab_label(tab.agent.as_deref(), &tab.title());
         let (font, color) = if active {
             (medium(13.0), theme().fg)
         } else {
             (FontId::proportional(13.0), theme().secondary())
         };
-        label(painter, line(TITLE_Y, title_end), title, font, color);
+        // An agent tab starts with its logo: the accent on the active one.
+        let mut title_line = line(TITLE_Y, title_end);
+        let mut title = tab.title();
+        if let Some(logo) = tab.logo() {
+            let tint = if active { theme().accent() } else { color };
+            draw_logo(ui, logo, title_line.left_center(), tint);
+            title_line.min.x += LOGO_SPACE;
+            title = plain_title(&title).to_string();
+        }
+        let title = tab_label(tab.agent.as_deref(), &title);
+        label(painter, title_line, title, font, color);
         let detail = line(DETAIL_Y, rect.max.x - 10.0);
         let font = FontId::proportional(11.5);
         label(painter, detail, tab_detail(tab), font, theme().muted());
@@ -476,6 +494,12 @@ impl Orion {
             let font = FontId::proportional(13.0);
             let name = folder_name(&saved.dir);
             text.min.x += label(ui.painter(), text, name, font, theme().secondary()) + 8.0;
+            if let Some(logo) = self.saved_logo(&saved.agent)
+                && text.width() > LOGO_SPACE
+            {
+                draw_logo(ui, logo, text.left_center(), theme().muted());
+                text.min.x += LOGO_SPACE;
+            }
             let font = FontId::proportional(11.5);
             label(ui.painter(), text, &saved.agent, font, theme().muted());
 
