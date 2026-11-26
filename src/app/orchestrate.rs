@@ -32,14 +32,16 @@ enum Run {
         branch: String,
         base: String,
     },
-    /// Su agente terminó: con qué código y si dejó commits propios.
+    /// Su agente terminó: con qué código y si dejó commits propios (mirado al terminar; con
+    /// «Reintentar» se vuelve a mirar).
     Done {
         branch: String,
+        base: String,
         code: Option<i32>,
         commits: bool,
     },
     /// Se cerró su pestaña antes de que el agente terminara.
-    Closed,
+    Closed { branch: String, base: String },
     /// No arrancó, y por qué.
     Blocked(String),
 }
@@ -49,8 +51,39 @@ impl Run {
         match self {
             Run::Waiting | Run::Working { .. } => Dep::Pending,
             &Run::Done { code, commits, .. } => Dep::Done { code, commits },
-            Run::Closed => Dep::Closed,
+            Run::Closed { .. } => Dep::Closed,
             Run::Blocked(_) => Dep::Blocked,
+        }
+    }
+
+    /// Si se puede reintentar: quedó bloqueada, o terminó (o se cerró) de una forma que bloquea
+    /// a las que dependen de ella.
+    fn can_retry(&self) -> bool {
+        match self {
+            Run::Blocked(_) | Run::Closed { .. } => true,
+            Run::Done { .. } => matches!(gate(&[("", self.dep())]), Gate::Blocked(_)),
+            Run::Waiting | Run::Working { .. } => false,
+        }
+    }
+
+    /// «Reintentar». Una bloqueada vuelve a esperar a sus dependencias. Una que terminó o se
+    /// cerró se da por buena (su código ya no cuenta) y se vuelve a mirar si su rama tiene
+    /// commits: pueden haber llegado después, por ejemplo si el agente se cortó y el commit
+    /// se hizo a mano. `commits(base, rama)` es `has_commits`.
+    fn retry(&mut self, commits: impl FnOnce(&str, &str) -> bool) {
+        match self {
+            Run::Blocked(_) => *self = Run::Waiting,
+            Run::Done { branch, base, .. } | Run::Closed { branch, base } => {
+                let commits = commits(base, branch);
+                let (branch, base) = (std::mem::take(branch), std::mem::take(base));
+                *self = Run::Done {
+                    branch,
+                    base,
+                    code: None,
+                    commits,
+                };
+            }
+            Run::Waiting | Run::Working { .. } => {}
         }
     }
 
@@ -149,6 +182,8 @@ impl Orion {
         let mut pick: Option<(usize, String)> = None;
         // Diste por terminada a mano la subtarea con ese índice.
         let mut finish: Option<usize> = None;
+        // Pediste reintentar la subtarea con ese índice.
+        let mut retry: Option<usize> = None;
         let mut open = !escape;
         let model = |s: &Subtask| {
             egui::RichText::new(short_name(&s.executor))
@@ -189,6 +224,18 @@ impl Orion {
                                     .clicked()
                             {
                                 finish = Some(i);
+                            }
+                            if run.can_retry()
+                                && ui
+                                    .small_button("Reintentar")
+                                    .on_hover_text(
+                                        "Una bloqueada vuelve a esperar a sus dependencias; una \
+                                         que terminó mal se da por buena y se vuelve a mirar si \
+                                         su rama tiene commits",
+                                    )
+                                    .clicked()
+                            {
+                                retry = Some(i);
                             }
                         });
                     }
@@ -289,12 +336,27 @@ impl Orion {
             && let Run::Working { branch, base, .. } = run
         {
             let commits = has_commits(&o.dir, base, branch);
-            let branch = std::mem::take(branch);
+            let (branch, base) = (std::mem::take(branch), std::mem::take(base));
             *run = Run::Done {
                 branch,
+                base,
                 code: None,
                 commits,
             };
+        }
+        if let Some(i) = retry {
+            // Reintentar una bloqueada también vuelve a mirar las que terminaron y la bloquearon:
+            // si no, volvería a bloquearse en el próximo frame. Primero ellas, después la pedida.
+            let after = o.plan.get(i).map(|(s, _)| s.after.clone());
+            for j in after.unwrap_or_default().into_iter().chain([i]) {
+                let dir = &o.dir;
+                if let Some((_, run)) = o.plan.get_mut(j)
+                    && (j == i || matches!(run, Run::Done { .. } | Run::Closed { .. }))
+                    && run.can_retry()
+                {
+                    run.retry(|base, branch| has_commits(dir, base, branch));
+                }
+            }
         }
         if forget {
             (o.plan, o.open) = (Vec::new(), false);
@@ -420,9 +482,13 @@ impl Orion {
     fn check_agent(&self, pane: u64, branch: &str, base: &str) -> Option<Run> {
         let mine = |t: &&Tab| t.agent_run == Some(pane);
         match self.tabs.iter().find(mine).and_then(Tab::agent_status) {
-            None => Some(Run::Closed),
+            None => Some(Run::Closed {
+                branch: branch.to_string(),
+                base: base.to_string(),
+            }),
             Some(AgentStatus::Done(code)) => Some(Run::Done {
                 branch: branch.to_string(),
+                base: base.to_string(),
                 code,
                 commits: has_commits(&self.orchestrate.dir, base, branch),
             }),
@@ -448,5 +514,75 @@ impl Orion {
         (tab.repo, tab.worktree) = (Some(repo), Some(path));
         let pane = tab.agent_run.unwrap_or(tab.focus);
         Run::Working { pane, branch, base }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn done(code: Option<i32>, commits: bool) -> Run {
+        Run::Done {
+            branch: "orion/a-1".into(),
+            base: "abc".into(),
+            code,
+            commits,
+        }
+    }
+
+    #[test]
+    fn retry_rechecks_commits_that_arrived_late() {
+        // El agente se cortó antes del commit; el commit se hizo después, a mano.
+        let mut run = done(Some(1), false);
+        assert!(run.can_retry());
+        let mut asked = None;
+        run.retry(|base, branch| {
+            asked = Some((base.to_string(), branch.to_string()));
+            true
+        });
+        assert_eq!(asked, Some(("abc".into(), "orion/a-1".into())));
+        // Se da por buena: ya no bloquea a las que dependen de ella.
+        assert_eq!(
+            run.dep(),
+            Dep::Done {
+                code: None,
+                commits: true
+            }
+        );
+        assert!(!run.can_retry());
+    }
+
+    #[test]
+    fn retry_without_commits_still_blocks() {
+        let mut run = done(None, false);
+        run.retry(|_, _| false);
+        assert!(run.can_retry());
+        assert!(matches!(gate(&[("a", run.dep())]), Gate::Blocked(_)));
+    }
+
+    #[test]
+    fn retry_a_closed_tab_or_a_blocked_subtask() {
+        let mut closed = Run::Closed {
+            branch: "orion/a-1".into(),
+            base: "abc".into(),
+        };
+        assert!(closed.can_retry());
+        closed.retry(|_, _| true);
+        assert_eq!(
+            closed.dep(),
+            Dep::Done {
+                code: None,
+                commits: true
+            }
+        );
+
+        let mut blocked = Run::Blocked("«a» terminó sin hacer commit en su rama".into());
+        assert!(blocked.can_retry());
+        blocked.retry(|_, _| unreachable!("una bloqueada no mira commits"));
+        assert!(matches!(blocked, Run::Waiting));
+
+        // Lo que está en curso o salió bien no se reintenta.
+        assert!(!Run::Waiting.can_retry());
+        assert!(!done(Some(0), true).can_retry());
     }
 }
