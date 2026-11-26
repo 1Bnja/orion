@@ -1,11 +1,14 @@
 //! Los paneles de la pestaña Grafo: a la izquierda las refs del repo (ramas, tags, stashes y
 //! worktrees) y a la derecha el detalle del commit elegido, o del WIP, con el diff de un archivo.
 
-use super::chrome::RADIUS;
+use super::chrome::{
+    Icon, draw_icon, icon_button, icon_text_button, label, medium, section_header, selectable_row,
+};
 use super::graph::{GraphView, ROW, date_utc};
-use crate::colors::theme;
+use super::graph_actions::{Actions, Target};
+use crate::colors::{surface, theme};
 use crate::git_graph::{self, Commit, Details, FileChange, RefItem, Refs};
-use eframe::egui::{self, RichText, Sense, pos2, vec2};
+use eframe::egui::{self, FontId, RichText, Sense, pos2, vec2};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -43,6 +46,29 @@ fn short(hash: &str) -> &str {
     &hash[..hash.len().min(8)]
 }
 
+/// El marco de los paneles laterales: el mismo gris de la barra lateral, con aire adentro.
+fn panel_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(surface(theme().sidebar()))
+        .inner_margin(egui::Margin {
+            left: 8,
+            right: 8,
+            top: 6,
+            bottom: 6,
+        })
+}
+
+/// El ícono de un archivo según cómo cambió.
+pub(super) fn change_icon(file: &FileChange, wip: bool) -> Icon {
+    match (file.added, file.removed) {
+        (Some(0), Some(removed)) if removed > 0 => Icon::FileMinus,
+        (Some(added), Some(0)) if added > 0 => Icon::FilePlus,
+        // En el WIP, sin líneas es un archivo nuevo; en un commit, un binario.
+        (None, None) if wip => Icon::FilePlus,
+        _ => Icon::FileDiff,
+    }
+}
+
 /// Lo que devuelve un hilo de git.
 enum Reply {
     Details(String, Result<Details, String>),
@@ -57,6 +83,9 @@ pub(super) struct Panels {
     wip: Vec<FileChange>,
     /// El panel derecho muestra el WIP (mientras no haya un commit elegido).
     wip_open: bool,
+    /// Qué secciones del panel izquierdo están abiertas (ramas, remotas, tags, stashes,
+    /// worktrees).
+    sections: [bool; 5],
     /// Aviso del último clic (ej. el commit no está cargado).
     notice: Option<String>,
     /// El archivo cuyo diff se ve: (commit o `WIP`, ruta).
@@ -76,6 +105,7 @@ impl Panels {
             refs: Refs::default(),
             wip: Vec::new(),
             wip_open: false,
+            sections: [true, true, false, false, false],
             notice: None,
             file: None,
             details: HashMap::new(),
@@ -171,74 +201,156 @@ impl Panels {
         ui: &mut egui::Ui,
         view: &mut GraphView,
         branch: Option<&str>,
+        actions: &mut Actions,
     ) -> Option<Option<String>> {
         let (mut change, mut clicked) = (None, None);
         egui::Panel::left("grafo-refs")
             .resizable(true)
             .default_size(210.0)
             .size_range(120.0..=420.0)
+            .frame(panel_frame())
+            .show_separator_line(false)
             .show(ui, |ui| {
                 // Un nombre largo se corta con "…" (el completo va en el tooltip).
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                ui.spacing_mut().item_spacing.y = 1.0;
                 if let Some(branch) = branch {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(format!("Solo {branch}")).strong());
-                    if ui.button("Todas las ramas").clicked() {
+                    ui.add_space(2.0);
+                    let (rect, _) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
+                    label(
+                        ui.painter(),
+                        rect,
+                        format!("Solo {branch}"),
+                        medium(12.5),
+                        theme().fg,
+                    );
+                    if icon_text_button(ui, Icon::GitBranch, "Todas las ramas", true).clicked() {
                         change = Some(None);
                     }
                     ui.separator();
                 }
-                let refs = &self.refs;
-                let sections: [(&str, &[RefItem], bool); 5] = [
-                    ("Locales", &refs.local, true),
-                    ("Remotas", &refs.remote, true),
-                    ("Tags", &refs.tags, false),
-                    ("Stashes", &refs.stashes, false),
-                    ("Worktrees", &refs.worktrees, false),
+                let sections: [(&str, &[RefItem], Icon); 5] = [
+                    ("Ramas", &self.refs.local, Icon::GitBranch),
+                    ("Remotas", &self.refs.remote, Icon::Cloud),
+                    ("Tags", &self.refs.tags, Icon::Tag),
+                    ("Stashes", &self.refs.stashes, Icon::Archive),
+                    ("Worktrees", &self.refs.worktrees, Icon::Folder),
                 ];
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .show(ui, |ui| {
-                        for (title, items, branches) in sections {
-                            egui::CollapsingHeader::new(format!("{title} ({})", items.len()))
-                                .id_salt(title)
-                                .default_open(branches)
-                                .show(ui, |ui| {
-                                    for item in items {
-                                        // De un worktree basta la carpeta; la ruta va en el tooltip.
-                                        let name = match title {
-                                            "Worktrees" => Path::new(&item.name)
-                                                .file_name()
-                                                .map_or(item.name.clone(), |n| {
-                                                    n.to_string_lossy().into_owned()
-                                                }),
-                                            _ => item.name.clone(),
-                                        };
-                                        let mut text = RichText::new(name);
-                                        if item.current {
-                                            text = text.strong();
-                                        }
-                                        let hover =
-                                            format!("{}\n{}", item.name, short(&item.target));
-                                        let response = ui
-                                            .selectable_label(item.current, text)
-                                            .on_hover_text(hover);
-                                        if response.clicked() {
-                                            clicked = Some(item.target.clone());
-                                        }
-                                        if branches {
-                                            response.context_menu(|ui| {
-                                                if ui.button("Solo esta rama").clicked() {
-                                                    change = Some(Some(item.name.clone()));
-                                                    ui.close();
-                                                }
-                                            });
-                                        }
+                        for (i, (title, items, icon)) in sections.into_iter().enumerate() {
+                            let open = self.sections[i];
+                            if section_header(ui, icon, title, items.len(), open) {
+                                self.sections[i] = !open;
+                            }
+                            if !self.sections[i] {
+                                continue;
+                            }
+                            let branches = matches!(title, "Ramas" | "Remotas");
+                            for item in items {
+                                // De un worktree basta la carpeta; la ruta va en el tooltip.
+                                let name = match title {
+                                    "Worktrees" => Path::new(&item.name)
+                                        .file_name()
+                                        .map_or(item.name.clone(), |n| {
+                                            n.to_string_lossy().into_owned()
+                                        }),
+                                    _ => item.name.clone(),
+                                };
+                                let (rect, response) = selectable_row(ui, 24.0, false);
+                                let mut x = rect.min.x + 6.0;
+                                if item.current {
+                                    draw_icon(
+                                        ui,
+                                        Icon::Check,
+                                        pos2(x + 7.0, rect.center().y),
+                                        theme().accent(),
+                                    );
+                                }
+                                x += 18.0;
+                                // Junto a una rama local, cuánto va adelante y atrás de su upstream.
+                                let mut end = rect.max.x - 6.0;
+                                let track = (title == "Ramas")
+                                    .then(|| actions.tracking(&item.name))
+                                    .flatten()
+                                    .filter(|&(ahead, behind)| ahead + behind > 0);
+                                if let Some((ahead, behind)) = track {
+                                    let text = [(ahead, '↑'), (behind, '↓')]
+                                        .iter()
+                                        .filter(|(n, _)| *n > 0)
+                                        .map(|(n, arrow)| format!("{arrow}{n}"))
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
+                                    let drawn = ui.painter().text(
+                                        pos2(end, rect.center().y),
+                                        egui::Align2::RIGHT_CENTER,
+                                        text,
+                                        FontId::proportional(11.5),
+                                        theme().muted(),
+                                    );
+                                    end = drawn.min.x - 6.0;
+                                }
+                                let text_rect = egui::Rect::from_min_max(
+                                    pos2(x, rect.min.y),
+                                    pos2(end, rect.max.y),
+                                );
+                                let (font, color) = if item.current {
+                                    (medium(13.0), theme().fg)
+                                } else {
+                                    (FontId::proportional(13.0), theme().secondary())
+                                };
+                                label(ui.painter(), text_rect, name, font, color);
+                                let hover = format!("{}\n{}", item.name, short(&item.target));
+                                let response = response.on_hover_text(hover);
+                                if response.clicked() {
+                                    clicked = Some(item.target.clone());
+                                }
+                                let target = match title {
+                                    "Ramas" => Some(Target::Local(item.name.clone())),
+                                    "Remotas" => Some(Target::Remote(item.name.clone())),
+                                    "Tags" => Some(Target::Tag(item.name.clone())),
+                                    "Stashes" => {
+                                        Some(Target::Stash(item.name.clone(), item.target.clone()))
                                     }
-                                    if items.is_empty() {
-                                        ui.weak("Vacío");
+                                    _ => Some(Target::Worktree(PathBuf::from(&item.name))),
+                                };
+                                if title == "Ramas" && response.double_clicked() {
+                                    actions.checkout(ui.ctx(), &item.name);
+                                }
+                                response.context_menu(|ui| {
+                                    if branches {
+                                        let only = icon_text_button(
+                                            ui,
+                                            Icon::GitBranch,
+                                            "Solo esta rama",
+                                            true,
+                                        );
+                                        if only.clicked() {
+                                            change = Some(Some(item.name.clone()));
+                                            ui.close();
+                                        }
+                                        ui.separator();
+                                    }
+                                    if let Some(target) = &target {
+                                        actions.ref_menu(ui, target);
                                     }
                                 });
+                            }
+                            if items.is_empty() {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    vec2(ui.available_width(), 22.0),
+                                    Sense::hover(),
+                                );
+                                label(
+                                    ui.painter(),
+                                    rect.shrink2(vec2(24.0, 0.0)),
+                                    "Vacío",
+                                    FontId::proportional(12.0),
+                                    theme().muted(),
+                                );
+                            }
                         }
                     });
             });
@@ -249,7 +361,7 @@ impl Panels {
     }
 
     /// El panel del commit elegido o del WIP; si no hay ninguno, no se dibuja.
-    pub(super) fn right(&mut self, ui: &mut egui::Ui, view: &mut GraphView) {
+    pub(super) fn right(&mut self, ui: &mut egui::Ui, view: &mut GraphView, actions: &mut Actions) {
         if view.selected.is_some() {
             self.wip_open = false;
         }
@@ -279,6 +391,8 @@ impl Panels {
             .resizable(true)
             .default_size(380.0)
             .size_range(240.0..=900.0)
+            .frame(panel_frame())
+            .show_separator_line(false)
             .show(ui, |ui| {
                 let height = ui.available_height() * if self.file.is_some() { 0.45 } else { 1.0 };
                 egui::ScrollArea::vertical()
@@ -288,14 +402,21 @@ impl Panels {
                     .show(ui, |ui| {
                         ui.add_space(6.0);
                         match &commit {
-                            Some(commit) => select = self.commit_info(ui, commit),
-                            None => {
-                                ui.strong("Cambios sin commitear");
+                            Some(commit) => {
+                                select = self.commit_info(ui, commit);
+                                ui.add_space(8.0);
+                                if let Some(files) = &files {
+                                    self.file_list(ui, &id, files);
+                                }
                             }
-                        }
-                        ui.add_space(8.0);
-                        if let Some(files) = &files {
-                            self.file_list(ui, &id, files);
+                            // El WIP: preparar, quitar, resolver conflictos y commitear.
+                            None => {
+                                let open = self.file.as_ref().map(|(_, path)| path.as_str());
+                                if let Some(path) = actions.commit_panel(ui, open) {
+                                    let same = open == Some(path.as_str());
+                                    self.file = (!same).then(|| (WIP.to_string(), path));
+                                }
+                            }
                         }
                     });
                 if let Some((_, path)) = self.file.clone() {
@@ -310,9 +431,13 @@ impl Panels {
     /// Hash, autor, fecha, mensaje y padres. Devuelve el padre pulsado, si alguno.
     fn commit_info(&self, ui: &mut egui::Ui, commit: &Commit) -> Option<String> {
         let mut select = None;
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(&commit.id).monospace());
-            if ui.button("Copiar hash").clicked() {
+        ui.horizontal(|ui| {
+            ui.add(egui::Label::new(
+                RichText::new(&commit.id).monospace().color(theme().fg),
+            ));
+            let (rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+            let copy = icon_button(ui, rect, ui.make_persistent_id("copiar-hash"), Icon::Copy);
+            if copy.on_hover_text("Copiar hash").clicked() {
                 ui.ctx().copy_text(commit.id.clone());
             }
         });
@@ -353,43 +478,106 @@ impl Panels {
     /// Los archivos con sus líneas; clic abre (o cierra) su diff.
     fn file_list(&mut self, ui: &mut egui::Ui, id: &str, files: &[FileChange]) {
         if files.is_empty() {
-            ui.weak("Sin cambios de archivos.");
+            let (rect, _) =
+                ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
+            label(
+                ui.painter(),
+                rect,
+                "Sin cambios de archivos.",
+                FontId::proportional(12.0),
+                theme().muted(),
+            );
             return;
         }
-        let (green, red) = (theme().ansi[2], theme().ansi[1]);
+        let wip = id == WIP;
+        let small = FontId::proportional(11.5);
         for file in files {
-            ui.horizontal(|ui| {
-                match (file.added, file.removed) {
-                    (Some(added), Some(removed)) => {
-                        ui.colored_label(green, format!("+{added}"));
-                        ui.colored_label(red, format!("-{removed}"));
-                    }
-                    // ponytail: en el WIP `None` es casi siempre un archivo sin rastrear; un
-                    // binario ya rastreado y editado también sale como "nuevo".
-                    _ => {
-                        ui.weak(if id == WIP { "nuevo" } else { "bin" });
-                    }
+            let open = self
+                .file
+                .as_ref()
+                .is_some_and(|(of, path)| of == id && *path == file.path);
+            let (rect, response) = selectable_row(ui, 24.0, open);
+            draw_icon(
+                ui,
+                change_icon(file, wip),
+                pos2(rect.min.x + 12.0, rect.center().y),
+                theme().secondary(),
+            );
+            let mut x = rect.min.x + 26.0;
+            match (file.added, file.removed) {
+                (Some(added), Some(removed)) => {
+                    let added_rect =
+                        egui::Rect::from_min_max(pos2(x, rect.min.y), pos2(x + 46.0, rect.max.y));
+                    x += label(
+                        ui.painter(),
+                        added_rect,
+                        format!("+{added}"),
+                        small.clone(),
+                        theme().ansi[2],
+                    ) + 4.0;
+                    let removed_rect =
+                        egui::Rect::from_min_max(pos2(x, rect.min.y), pos2(x + 42.0, rect.max.y));
+                    x += label(
+                        ui.painter(),
+                        removed_rect,
+                        format!("-{removed}"),
+                        small.clone(),
+                        theme().ansi[1],
+                    ) + 8.0;
                 }
-                let open = self
-                    .file
-                    .as_ref()
-                    .is_some_and(|(of, path)| of == id && *path == file.path);
-                if ui.selectable_label(open, &file.path).clicked() {
-                    self.file = (!open).then(|| (id.to_string(), file.path.clone()));
+                // ponytail: en el WIP `None` es casi siempre un archivo sin rastrear; un
+                // binario ya rastreado y editado también sale como "nuevo".
+                _ => {
+                    let tag_rect =
+                        egui::Rect::from_min_max(pos2(x, rect.min.y), pos2(x + 42.0, rect.max.y));
+                    x += label(
+                        ui.painter(),
+                        tag_rect,
+                        if wip { "nuevo" } else { "bin" },
+                        small.clone(),
+                        theme().muted(),
+                    ) + 8.0;
                 }
-            });
+            }
+            let path_rect =
+                egui::Rect::from_min_max(pos2(x, rect.min.y), pos2(rect.max.x - 6.0, rect.max.y));
+            label(
+                ui.painter(),
+                path_rect,
+                &file.path,
+                FontId::proportional(12.5),
+                theme().fg,
+            );
+            if response.on_hover_text(&file.path).clicked() {
+                self.file = (!open).then(|| (id.to_string(), file.path.clone()));
+            }
         }
     }
 
     /// El diff de un archivo, coloreado, en su propia área con scroll.
     fn diff_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, key: (String, String)) {
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.strong(&key.1);
-            if ui.small_button("Cerrar").clicked() {
-                self.file = None;
-            }
-        });
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+        let close_rect = egui::Rect::from_center_size(
+            pos2(rect.max.x - 12.0, rect.center().y),
+            vec2(22.0, 22.0),
+        );
+        label(
+            ui.painter(),
+            egui::Rect::from_min_max(rect.min, pos2(close_rect.min.x - 6.0, rect.max.y)),
+            &key.1,
+            medium(12.5),
+            theme().fg,
+        );
+        let close = icon_button(
+            ui,
+            close_rect,
+            ui.make_persistent_id("cerrar-diff"),
+            Icon::Close,
+        );
+        if close.on_hover_text("Cerrar diff").clicked() {
+            self.file = None;
+        }
         self.fetch_diff(ctx, &key);
         match &self.diffs[&key] {
             None => {
@@ -429,42 +617,52 @@ impl Panels {
 
     /// Encima de la lista: el aviso del último clic y, si hay cambios sin commitear, la fila WIP.
     pub(super) fn header(&mut self, ui: &mut egui::Ui, view: &mut GraphView) {
+        let mut hide = false;
         if let Some(notice) = &self.notice {
-            let mut hide = false;
-            ui.horizontal(|ui| {
-                ui.colored_label(ui.visuals().warn_fg_color, notice);
-                hide = ui.small_button("Ocultar").clicked();
-            });
-            if hide {
-                self.notice = None;
-            }
+            let (rect, _) =
+                ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+            let close_rect = egui::Rect::from_center_size(
+                pos2(rect.max.x - 12.0, rect.center().y),
+                vec2(22.0, 22.0),
+            );
+            label(
+                ui.painter(),
+                egui::Rect::from_min_max(rect.min, pos2(close_rect.min.x - 6.0, rect.max.y)),
+                notice,
+                FontId::proportional(12.0),
+                theme().ansi[3],
+            );
+            let close = icon_button(
+                ui,
+                close_rect,
+                ui.make_persistent_id("ocultar-aviso"),
+                Icon::Close,
+            );
+            hide = close.on_hover_text("Ocultar aviso").clicked();
+        }
+        if hide {
+            self.notice = None;
         }
         if self.wip.is_empty() {
             return;
         }
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+        let open = self.wip_open && view.selected.is_none();
+        let (rect, response) = selectable_row(ui, ROW, open);
         if response.clicked() {
             self.wip_open = true;
             view.selected = None;
             self.notice = None;
-        }
-        let open = self.wip_open && view.selected.is_none();
-        if open {
-            ui.painter().rect_filled(rect, RADIUS, theme().selection);
-        } else if response.hovered() {
-            ui.painter().rect_filled(rect, RADIUS, theme().hover());
         }
         let n = self.wip.len();
         let text = format!(
             "// WIP · {n} {}",
             if n == 1 { "archivo" } else { "archivos" }
         );
-        ui.painter().text(
-            pos2(rect.min.x + 8.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
+        label(
+            ui.painter(),
+            rect.shrink2(vec2(8.0, 0.0)),
             text,
-            egui::FontId::monospace(13.0),
+            FontId::monospace(13.0),
             theme().secondary(),
         );
     }
@@ -531,8 +729,9 @@ mod tests {
         panels.file = Some(key);
 
         let mut output = egui::Context::default().run_ui(Default::default(), |ui| {
-            assert_eq!(panels.left(ui, &mut view, Some("main")), None);
-            panels.right(ui, &mut view);
+            let mut actions = Actions::new(PathBuf::from("."));
+            assert_eq!(panels.left(ui, &mut view, Some("main"), &mut actions), None);
+            panels.right(ui, &mut view, &mut actions);
             panels.header(ui, &mut view);
         });
         let texts: Vec<String> = output
@@ -545,8 +744,8 @@ mod tests {
             .collect();
         for expected in [
             "Todas las ramas",
-            "Locales (2)",
-            "Copiar hash",
+            "Ramas",
+            "(2)",
             "+2",
             "bin",
             "-viejo",
@@ -555,6 +754,7 @@ mod tests {
         ] {
             assert!(texts.iter().any(|t| t == expected), "{expected}: {texts:?}");
         }
+        assert!(texts.iter().any(|t| t == &id), "hash: {texts:?}");
         // Sin clics, nada cambió.
         assert_eq!(view.selected, Some(1));
         assert!(panels.notice.is_none());
