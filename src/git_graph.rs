@@ -106,18 +106,23 @@ pub fn load_rev(repo: &Path, rev: Option<&str>, limit: usize) -> Result<Graph, S
 /// Ramas locales y remotas, tags, stashes y worktrees del repo.
 pub fn refs(repo: &Path) -> Result<Refs, String> {
     let mut refs = Refs::default();
-
-    let text = crate::agents::git(
-        repo,
-        &[
+    let git = |args: &'static [&'static str]| move || crate::agents::git(repo, args);
+    // Las cuatro consultas a la vez: cada `git` cuesta mucho más en arrancar que en responder.
+    let (text, stashes, root, worktrees) = std::thread::scope(|s| {
+        let text = s.spawn(git(&[
             "for-each-ref",
             // `*objectname` solo existe en tags anotados: es el commit al que apuntan.
             "--format=%(HEAD)%1f%(objectname)%1f%(*objectname)%1f%(refname)",
             "refs/heads",
             "refs/remotes",
             "refs/tags",
-        ],
-    )?;
+        ]));
+        let stashes = s.spawn(git(&["stash", "list", "--format=%H%x1f%gd: %gs"]));
+        let root = s.spawn(move || crate::agents::repo_root(repo));
+        let worktrees = git(&["worktree", "list", "--porcelain"])();
+        (joined(text), joined(stashes), joined(root), worktrees)
+    });
+    let text = text?;
     for line in text.lines() {
         // El primer campo es `*` o un espacio (que `git` puede haber recortado).
         let mut fields = line.split('\x1f');
@@ -145,8 +150,7 @@ pub fn refs(repo: &Path) -> Result<Refs, String> {
         });
     }
 
-    let text = crate::agents::git(repo, &["stash", "list", "--format=%H%x1f%gd: %gs"])?;
-    refs.stashes = text
+    refs.stashes = stashes?
         .lines()
         .filter_map(|line| line.split_once('\x1f'))
         .map(|(target, name)| RefItem {
@@ -157,10 +161,8 @@ pub fn refs(repo: &Path) -> Result<Refs, String> {
         .collect();
 
     // Se comparan rutas canónicas: git y Windows no siempre las escriben igual.
-    let here = crate::agents::repo_root(repo)
-        .ok()
-        .and_then(|root| root.canonicalize().ok());
-    let text = crate::agents::git(repo, &["worktree", "list", "--porcelain"])?;
+    let here = root.ok().and_then(|root| root.canonicalize().ok());
+    let text = worktrees?;
     let mut path = "";
     for line in text.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
@@ -222,79 +224,57 @@ pub fn diff(repo: &Path, id: &str, path: &str) -> Result<String, String> {
     )
 }
 
-/// Cambios sin commitear (staged, unstaged y no rastreados). Vacío = limpio.
-pub fn wip(repo: &Path) -> Result<Vec<FileChange>, String> {
-    // Sin commits todavía no hay HEAD: se compara contra el árbol vacío.
-    // ponytail: es el hash SHA-1; un repo SHA-256 sin commits daría error.
-    let base = match crate::agents::git(repo, &["rev-parse", "--verify", "-q", "HEAD"]) {
-        Ok(_) => "HEAD",
-        Err(_) => "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
-    };
-    let tracked = crate::agents::git(
-        repo,
-        &["diff", base, "--numstat", "--no-renames", "-z", "--"],
-    )?;
-    let untracked = crate::agents::git(
-        repo,
-        &[
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "--full-name",
-            "-z",
-            "--",
-            ":/",
-        ],
-    )?;
-    let mut files = parse_numstat(&tracked);
-    files.extend(
-        untracked
-            .split('\0')
-            .filter(|path| !path.is_empty())
-            .map(|path| FileChange {
-                path: path.to_string(),
-                added: None,
-                removed: None,
-            }),
-    );
-    Ok(files)
-}
-
 /// Un texto que cambia si cambian HEAD, alguna ref o el WIP; sirve para saber cuándo recargar.
+/// Se pide cada pocos segundos, así que son solo dos `git`, a la vez. `repo` es la raíz del repo.
 pub fn fingerprint(repo: &Path) -> Result<String, String> {
-    // Falla en un repo sin commits, y ahí vacío es una respuesta válida.
-    let head =
-        crate::agents::git(repo, &["rev-parse", "--verify", "-q", "HEAD"]).unwrap_or_default();
-    // `%(HEAD)` delata un cambio de rama aunque ambas apunten al mismo commit.
-    let refs = crate::agents::git(
-        repo,
-        &["for-each-ref", "--format=%(HEAD)%(objectname)%(refname)"],
-    )?;
-    // Sin locks opcionales, para no chocar con los git de los agentes al consultar seguido.
-    let status = crate::agents::git(repo, &["--no-optional-locks", "status", "--porcelain"])?;
-    let mut print = format!("{head}\n{refs}\n{status}");
-
+    let (refs, status) = std::thread::scope(|s| {
+        // `%(HEAD)` delata un cambio de rama aunque ambas apunten al mismo commit.
+        let refs = s.spawn(|| {
+            let format = "--format=%(HEAD)%(objectname)%(refname)";
+            crate::agents::git(repo, &["for-each-ref", format])
+        });
+        // `--branch` trae HEAD (también suelto). Sin locks opcionales, para no chocar con los
+        // git de los agentes al consultar seguido.
+        let status = crate::agents::git(
+            repo,
+            &[
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "--no-renames",
+                "--untracked-files=all",
+                "-z",
+            ],
+        );
+        (joined(refs), status)
+    });
+    let status = status?;
+    let mut print = format!("{}\n{status}", refs?);
     // `status` no cambia al volver a editar un archivo ya modificado: se suman tamaño y fecha.
-    let root = crate::agents::repo_root(repo)?;
-    let dirty = crate::agents::git(
-        repo,
-        &[
-            "ls-files",
-            "--modified",
-            "--others",
-            "--exclude-standard",
-            "--full-name",
-            "-z",
-            "--",
-            ":/",
-        ],
-    )?;
-    for path in dirty.split('\0').filter(|path| !path.is_empty()) {
-        if let Ok(meta) = std::fs::metadata(root.join(path)) {
+    for path in status.split('\0').filter_map(status_path) {
+        if let Ok(meta) = std::fs::metadata(repo.join(path)) {
             print += &format!("\n{path} {} {:?}", meta.len(), meta.modified().ok());
         }
     }
     Ok(print)
+}
+
+/// La ruta de una entrada de `status --porcelain=v2 -z` (cambiada, en conflicto o sin rastrear).
+fn status_path(entry: &str) -> Option<&str> {
+    match entry.split_once(' ')? {
+        ("1", rest) => rest.splitn(8, ' ').nth(7),
+        ("u", rest) => rest.splitn(10, ' ').nth(9),
+        ("?", path) => Some(path),
+        _ => None,
+    }
+}
+
+/// El resultado de un hilo de `thread::scope`; si el hilo entró en pánico, sigue el pánico.
+pub(crate) fn joined<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    handle
+        .join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e))
 }
 
 /// Separa la salida de `--numstat -z --no-renames`: `agregadas\tquitadas\truta` y un NUL.
@@ -708,30 +688,14 @@ mod tests {
     }
 
     #[test]
-    fn wip_lista_staged_unstaged_y_no_rastreados() {
-        let (base, repo) = temp_repo("wip");
-        assert!(wip(&repo).unwrap().is_empty());
-
-        std::fs::write(repo.join("raiz.txt"), "raiz\nmas\n").unwrap();
-        std::fs::write(repo.join("staged.txt"), "a\n").unwrap();
-        run(&repo, &["add", "staged.txt"]);
-        std::fs::write(repo.join("suelto.txt"), "b\n").unwrap();
-
-        let change = |path: &str, added, removed| FileChange {
-            path: path.to_string(),
-            added,
-            removed,
-        };
-        assert_eq!(
-            wip(&repo).unwrap(),
-            vec![
-                change("raiz.txt", Some(1), Some(0)),
-                change("staged.txt", Some(1), Some(0)),
-                change("suelto.txt", None, None),
-            ]
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
+    fn status_path_lee_la_ruta_de_cada_tipo_de_entrada() {
+        let changed = "1 .M N... 100644 100644 100644 abc abc mi archivo.txt";
+        assert_eq!(status_path(changed), Some("mi archivo.txt"));
+        let unmerged = "u UU N... 100644 100644 100644 100644 a b c con flicto.txt";
+        assert_eq!(status_path(unmerged), Some("con flicto.txt"));
+        assert_eq!(status_path("? nuevo uno.txt"), Some("nuevo uno.txt"));
+        assert_eq!(status_path("# branch.head main"), None);
+        assert_eq!(status_path(""), None);
     }
 
     #[test]
@@ -755,6 +719,17 @@ mod tests {
         changed();
         // Otra edición del mismo archivo, que `status` por sí solo no notaría.
         std::fs::write(repo.join("raiz.txt"), "editado otra vez\n").unwrap();
+        changed();
+        run(&repo, &["add", "raiz.txt"]);
+        changed();
+        // Un archivo sin rastrear en una carpeta nueva y con espacios: la ruta se lee entera.
+        std::fs::create_dir(repo.join("mi carpeta")).unwrap();
+        std::fs::write(repo.join("mi carpeta/a b.txt"), "uno\n").unwrap();
+        changed();
+        std::fs::write(repo.join("mi carpeta/a b.txt"), "uno y dos\n").unwrap();
+        changed();
+        // HEAD suelto en el mismo commit.
+        run(&repo, &["checkout", "-q", "--detach"]);
         changed();
 
         let _ = std::fs::remove_dir_all(&base);

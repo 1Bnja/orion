@@ -9,8 +9,11 @@ use crate::orchestrator::{
     Dep, Gate, Planner, Subtask, agent_command, gate, has_commits, prepare_worktree, short_name,
 };
 use eframe::egui;
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 enum Step {
@@ -23,6 +26,7 @@ enum Step {
 }
 
 /// Cómo va una subtarea de un plan lanzado.
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 enum Run {
     /// Espera a sus dependencias.
     Waiting,
@@ -54,6 +58,11 @@ impl Run {
             Run::Closed { .. } => Dep::Closed,
             Run::Blocked(_) => Dep::Blocked,
         }
+    }
+
+    /// Terminó bien y dejó commits: no queda nada por hacer con ella.
+    fn succeeded(&self) -> bool {
+        matches!(self, Run::Done { .. }) && !self.can_retry()
     }
 
     /// Si se puede reintentar: quedó bloqueada, o terminó (o se cerró) de una forma que bloquea
@@ -113,6 +122,15 @@ pub(super) struct Orchestrate {
     planner: Planner,
     /// El plan lanzado y cómo va cada subtarea; vacío = ninguno en curso.
     plan: Vec<(Subtask, Run)>,
+    /// Un plan recuperado de la vez anterior no lanza nada hasta «Reanudar».
+    paused: bool,
+    /// Lo último guardado en orchestrate.json.
+    saved: Vec<(Subtask, Run)>,
+    /// Las ramas de agentes que siguen trabajando y ya tienen commits.
+    committed: HashSet<String>,
+    /// La búsqueda de esos commits en camino, y cuándo se pidió la última.
+    checking: Option<Receiver<Vec<String>>>,
+    checked: Instant,
 }
 
 impl Default for Orchestrate {
@@ -124,11 +142,91 @@ impl Default for Orchestrate {
             step: Arc::new(Mutex::new(Step::Writing)),
             planner: Planner::default(),
             plan: Vec::new(),
+            paused: false,
+            saved: Vec::new(),
+            committed: HashSet::new(),
+            checking: None,
+            checked: Instant::now(),
         }
     }
 }
 
+/// Cada cuánto se mira si un agente que sigue trabajando ya hizo commit.
+const CHECK_EVERY: Duration = Duration::from_secs(10);
+
+/// Lo que se guarda en orchestrate.json, al lado de config.toml.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Stored {
+    dir: PathBuf,
+    plan: Vec<(Subtask, Run)>,
+}
+
+fn stored_path() -> Option<PathBuf> {
+    // Los tests no leen ni pisan el plan del usuario.
+    if cfg!(test) {
+        return None;
+    }
+    crate::config::config_path().map(|p| p.with_file_name("orchestrate.json"))
+}
+
+/// Un plan leído del disco: los agentes que estaban trabajando ya no tienen pestaña.
+fn interrupted(mut plan: Vec<(Subtask, Run)>) -> Vec<(Subtask, Run)> {
+    for (_, run) in &mut plan {
+        if let Run::Working { branch, base, .. } = run {
+            *run = Run::Closed {
+                branch: std::mem::take(branch),
+                base: std::mem::take(base),
+            };
+        }
+    }
+    plan
+}
+
 impl Orchestrate {
+    /// El de siempre, con el plan que quedó sin terminar la última vez, en pausa.
+    pub(super) fn restore() -> Self {
+        let text = stored_path().and_then(|p| std::fs::read_to_string(p).ok());
+        let Some(stored) = text.and_then(|t| serde_json::from_str::<Stored>(&t).ok()) else {
+            return Self::default();
+        };
+        let unfinished = stored.plan.iter().any(|(_, run)| !run.succeeded());
+        if !unfinished {
+            return Self::default();
+        }
+        let plan = interrupted(stored.plan);
+        Self {
+            dir: stored.dir,
+            saved: plan.clone(),
+            plan,
+            paused: true,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Guarda el plan si cambió. Si no se puede escribir, solo se pierde al cerrar Orion.
+    fn persist(&mut self) {
+        if self.plan == self.saved {
+            return;
+        }
+        self.saved = self.plan.clone();
+        let Some(path) = stored_path() else { return };
+        if self.plan.is_empty() {
+            let _ = std::fs::remove_file(path);
+            return;
+        }
+        let stored = Stored {
+            dir: self.dir.clone(),
+            plan: self.plan.clone(),
+        };
+        if let Ok(text) = serde_json::to_string_pretty(&stored) {
+            let _ = std::fs::write(path, text);
+        }
+    }
+
     fn step(&self) -> Step {
         self.step.lock().unwrap().clone()
     }
@@ -184,6 +282,7 @@ impl Orion {
         let mut finish: Option<usize> = None;
         // Pediste reintentar la subtarea con ese índice.
         let mut retry: Option<usize> = None;
+        let (mut resume, mut clean) = (false, false);
         let mut open = !escape;
         let model = |s: &Subtask| {
             egui::RichText::new(short_name(&s.executor))
@@ -213,6 +312,14 @@ impl Orion {
                                 _ => ui.visuals().weak_text_color(),
                             };
                             ui.colored_label(color, text);
+                            if let Run::Working { branch, .. } = run
+                                && o.committed.contains(branch)
+                            {
+                                ui.colored_label(theme().ansi[3], "ya hizo commit")
+                                    .on_hover_text(
+                                        "Si ya terminó, ciérrala con /exit o con «Ya terminó»",
+                                    );
+                            }
                             // Plan B si la shell no avisa cuándo termina el agente (cmd, WSL).
                             if matches!(run, Run::Working { .. })
                                 && ui
@@ -243,6 +350,26 @@ impl Orion {
                         "Revisa lo que hizo cada agente y ciérralo con /exit: las subtareas que \
                          dependen de él arrancan desde su rama si dejó commits.",
                     );
+                    if o.paused {
+                        ui.colored_label(
+                            theme().ansi[3],
+                            "Plan recuperado de la vez anterior, en pausa. Usa «Reintentar» en \
+                             las subtareas que ya hicieron su commit y después «Reanudar».",
+                        );
+                        resume = ui
+                            .button("Reanudar")
+                            .on_hover_text("Vuelve a lanzar las que esperan, si pueden arrancar")
+                            .clicked();
+                    }
+                    if o.plan.iter().all(|(_, run)| run.succeeded()) {
+                        clean = ui
+                            .button("Limpiar worktrees")
+                            .on_hover_text(
+                                "Borra los worktrees de Orion que ninguna pestaña usa y no \
+                                 tienen cambios sin guardar; sus ramas, solo si ya se fusionaron",
+                            )
+                            .clicked();
+                    }
                     forget = ui
                         .button("Olvidar el plan")
                         .on_hover_text("Las pestañas y ramas quedan; solo deja de lanzar las que faltan")
@@ -358,8 +485,16 @@ impl Orion {
                 }
             }
         }
+        if resume {
+            o.paused = false;
+        }
         if forget {
-            (o.plan, o.open) = (Vec::new(), false);
+            (o.plan, o.open, o.paused) = (Vec::new(), false, false);
+            o.persist();
+            return None;
+        }
+        if clean {
+            self.clean_worktrees();
             return None;
         }
         if back {
@@ -412,13 +547,20 @@ impl Orion {
     /// Lanza el plan: las subtareas sin dependencias arrancan ya; las demás esperan su ronda.
     pub(super) fn launch_plan(&mut self, ctx: &egui::Context, subtasks: Vec<Subtask>) {
         self.orchestrate.plan = subtasks.into_iter().map(|s| (s, Run::Waiting)).collect();
+        self.orchestrate.paused = false;
+        self.orchestrate.committed.clear();
         self.advance_plan(ctx);
     }
 
     /// Una vez por frame: anota qué agentes terminaron y lanza las subtareas cuyas dependencias ya
     /// están listas (o las bloquea, con un aviso). Sin plan en curso no hace nada.
     pub(super) fn advance_plan(&mut self, ctx: &egui::Context) {
+        if self.orchestrate.paused {
+            self.orchestrate.persist(); // un «Reintentar» en pausa también se guarda
+            return;
+        }
         let (mut launched, mut waiting, mut news) = (Vec::new(), 0, Vec::new());
+        news.extend(self.check_commits(ctx));
         for i in 0..self.orchestrate.plan.len() {
             let next = match &self.orchestrate.plan[i].1 {
                 Run::Working { pane, branch, base } => self.check_agent(*pane, branch, base),
@@ -476,6 +618,56 @@ impl Orion {
         if !news.is_empty() {
             self.show_toast(news.join(" · "));
         }
+        self.orchestrate.persist();
+    }
+
+    /// Cada `CHECK_EVERY` mira, en un hilo, qué agentes que siguen trabajando ya hicieron
+    /// commit. Devuelve un aviso por cada uno que aparece.
+    fn check_commits(&mut self, ctx: &egui::Context) -> Vec<String> {
+        let o = &mut self.orchestrate;
+        let mut news = Vec::new();
+        if let Some(rx) = &o.checking {
+            match rx.try_recv() {
+                Ok(branches) => {
+                    for (s, run) in &o.plan {
+                        if let Run::Working { branch, .. } = run
+                            && branches.contains(branch)
+                            && o.committed.insert(branch.clone())
+                        {
+                            news.push(format!("«{}» ya hizo commit en su rama", s.title));
+                        }
+                    }
+                    o.checking = None;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => o.checking = None,
+            }
+        }
+        let pending: Vec<(String, String)> = (o.plan.iter())
+            .filter_map(|(_, run)| match run {
+                Run::Working { branch, base, .. } if !o.committed.contains(branch) => {
+                    Some((base.clone(), branch.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        if pending.is_empty() || o.checking.is_some() {
+            return news;
+        }
+        if o.checked.elapsed() >= CHECK_EVERY {
+            let (tx, rx) = mpsc::channel();
+            let (dir, ctx) = (o.dir.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                let found = pending.into_iter();
+                let found = found.filter(|(base, branch)| has_commits(&dir, base, branch));
+                let _ = tx.send(found.map(|(_, branch)| branch).collect());
+                ctx.request_repaint();
+            });
+            o.checking = Some(rx);
+            o.checked = Instant::now();
+        }
+        ctx.request_repaint_after(CHECK_EVERY);
+        news
     }
 
     /// Si el agente del panel `pane` terminó (o se cerró su pestaña), su nuevo estado.
@@ -528,6 +720,39 @@ mod tests {
             code,
             commits,
         }
+    }
+
+    #[test]
+    fn a_saved_plan_comes_back_without_its_agents() {
+        let subtask = |title: &str, after: Vec<usize>| Subtask {
+            title: title.into(),
+            prompt: "p".into(),
+            executor: "e".into(),
+            after,
+        };
+        let working = Run::Working {
+            pane: 7,
+            branch: "orion/a-1".into(),
+            base: "abc".into(),
+        };
+        let stored = Stored {
+            dir: PathBuf::from("repo"),
+            plan: vec![
+                (subtask("a", vec![]), working),
+                (subtask("b", vec![]), done(Some(0), true)),
+                (subtask("c", vec![0, 1]), Run::Waiting),
+            ],
+        };
+        let text = serde_json::to_string(&stored).unwrap();
+        let read: Stored = serde_json::from_str(&text).unwrap();
+        assert_eq!(read.plan, stored.plan);
+
+        let plan = interrupted(read.plan);
+        // La que trabajaba queda cerrada (se puede reintentar); las demás, igual.
+        assert!(matches!(&plan[0].1, Run::Closed { branch, .. } if branch == "orion/a-1"));
+        assert!(plan[0].1.can_retry() && !plan[0].1.succeeded());
+        assert!(plan[1].1.succeeded());
+        assert_eq!(plan[2].1, Run::Waiting);
     }
 
     #[test]

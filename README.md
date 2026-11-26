@@ -37,7 +37,9 @@ its own branch, and Orion tells you when one of them needs you.
   ones no tab uses, skipping any with unsaved changes; a branch is deleted only once merged.
 - Split any pane to the right or downward, each with its own shell.
 - **Grafo tab**: the branch icon on a project header (or palette → "Ver grafo de ramas") shows the
-  repo's branches and commits as a graph, with search, ref chips and commit details.
+  repo's branches and commits as a graph, with search (`Enter` jumps to the next match), ref chips
+  and commit details. Fetch, pull, push, branches, stashes, merges and pull requests are there too,
+  and the changes panel stages by file or by hunk before committing.
 - A command palette (`Ctrl+Shift+P`) finds any action by name and shows its shortcut.
 
 ### Built for coding agents

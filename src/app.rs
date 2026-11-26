@@ -55,6 +55,7 @@ use panes::Split;
 use project::Project;
 use session::{AgentStatus, AgentWatch, Session};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Lo que muestra una pestaña.
@@ -84,6 +85,8 @@ struct Tab {
     agent_notified: bool,
     /// El cwd con que se calculó `repo` por última vez (ver `repo_to_check`).
     repo_cwd: Option<PathBuf>,
+    /// El repo de ese cwd, que un hilo le está preguntando a git.
+    repo_check: Option<Receiver<Option<PathBuf>>>,
 }
 
 impl Tab {
@@ -108,6 +111,7 @@ impl Tab {
             agent_run: None,
             agent_notified: false,
             repo_cwd: None,
+            repo_check: None,
             focus,
             content,
             rects: Vec::new(),
@@ -384,14 +388,14 @@ impl Orion {
         menu::apply_theme(&cc.egui_ctx, &settings);
         // Real OS windows for child viewports (settings), not popups trapped in the terminal.
         cc.egui_ctx.set_embed_viewports(false);
-        let orion = Self {
+        let mut orion = Self {
             // Start on the empty home; the first terminal opens from a shortcut or the sidebar.
             tabs: Vec::new(),
             active: 0,
             settings,
             menu: SettingsMenu::default(),
             palette: Palette::default(),
-            orchestrate: Default::default(),
+            orchestrate: orchestrate::Orchestrate::restore(),
             project: Default::default(),
             review: None,
             saved: project::load_saved(),
@@ -415,6 +419,9 @@ impl Orion {
             mac_menu: macmenu::MacMenu::install(&cc.egui_ctx),
         };
         orion.apply_window_look();
+        if orion.orchestrate.paused() {
+            orion.show_toast("Quedó un plan sin terminar: ábrelo en Orquestar tarea con agentes");
+        }
         // Al abrir, revisar si hay una versión nueva. En debug (`cargo run`) no: sería la del .exe de desarrollo.
         if orion.settings.check_updates && !cfg!(debug_assertions) {
             orion.updater.check(&cc.egui_ctx);
@@ -1144,6 +1151,12 @@ impl Orion {
             area.min + egui::vec2(left, 0.0),
             area.max - egui::Vec2::splat(PANE_GAP),
         );
+        // Con una ventana de Orion encima, el teclado no es del Grafo.
+        let keys = !(self.menu.open
+            || self.palette.open
+            || self.orchestrate.open
+            || self.project.open
+            || self.review.is_some());
         let tab = &mut self.tabs[self.active];
         tab.rects.clear();
         let panes = match &mut tab.content {
@@ -1158,7 +1171,10 @@ impl Orion {
                 egui::Frame::central_panel(pane_ui.style())
                     .fill(surface(theme().bg))
                     .corner_radius(PANE_RADIUS)
-                    .show(&mut pane_ui, |ui| graph.ui(ui));
+                    .show(&mut pane_ui, |ui| {
+                        graph.keys = keys;
+                        graph.ui(ui);
+                    });
                 let stroke = egui::Stroke::new(1.0, theme().line());
                 ui.painter()
                     .rect_stroke(inner, PANE_RADIUS, stroke, egui::StrokeKind::Inside);
@@ -1298,15 +1314,34 @@ impl eframe::App for Orion {
             }
         }
         // Una terminal suelta que hizo cd a un repo pasa a agruparse bajo él (y al revés).
-        // ponytail: git en el hilo de la ventana, solo cuando cambia el cwd (tarda poco).
+        // git responde desde un hilo: arrancarlo en el de la ventana se nota en cada `cd`.
         for tab in &mut self.tabs {
+            if let Some(rx) = &tab.repo_check {
+                match rx.try_recv() {
+                    Ok(repo) => {
+                        // Entretanto la pestaña pudo pasar a ser de un agente: su repo es fijo.
+                        if tab.worktree.is_none() && tab.agent.is_none() {
+                            tab.repo = repo;
+                        }
+                        tab.repo_check = None;
+                    }
+                    Err(TryRecvError::Empty) => continue,
+                    Err(TryRecvError::Disconnected) => tab.repo_check = None,
+                }
+            }
             let cwd = tab.focused().and_then(|s| s.cwd.as_deref());
             let worktree = tab.worktree.is_some();
             let agent = tab.agent.is_some();
             if let Some(cwd) = repo_to_check(worktree, agent, cwd, tab.repo_cwd.as_deref()) {
                 let cwd = cwd.to_path_buf();
-                tab.repo = crate::agents::repo_root(&cwd).ok();
-                tab.repo_cwd = Some(cwd);
+                tab.repo_cwd = Some(cwd.clone());
+                let (tx, rx) = mpsc::channel();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::agents::repo_root(&cwd).ok());
+                    ctx.request_repaint();
+                });
+                tab.repo_check = Some(rx);
             }
         }
         // Pestañas Grafo: recoger lo que terminó, recargar la que vuelve a estar activa y vigilar el repo.

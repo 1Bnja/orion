@@ -4,17 +4,43 @@
 use super::chrome::{
     Icon, draw_icon, icon_button, icon_text_button, label, medium, section_header, selectable_row,
 };
-use super::graph::{GraphView, ROW, date_utc};
-use super::graph_actions::{Actions, Target};
+use super::graph::{GraphView, Prefs, ROW, date_utc};
+use super::graph_actions::{Actions, Target, open_file};
 use crate::colors::{surface, theme};
 use crate::git_graph::{self, Commit, Details, FileChange, RefItem, Refs};
+use crate::git_ops;
 use eframe::egui::{self, FontId, RichText, Sense, pos2, vec2};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-/// En el caché de diffs, el "commit" de los cambios sin commitear (ningún hash es vacío).
+/// En el caché de diffs, el "commit" de lo que falta preparar (ningún hash es vacío)...
 const WIP: &str = "";
+/// ...y el de lo ya preparado.
+const STAGED: &str = "+";
+
+fn is_wip(id: &str) -> bool {
+    id == WIP || id == STAGED
+}
+
+/// Un diff partido en líneas, y si se recortó por largo.
+#[derive(Default)]
+struct Diff {
+    lines: Vec<String>,
+    cut: bool,
+}
+
+impl Diff {
+    fn new(text: &str) -> Self {
+        let mut all = text.split_terminator('\n');
+        let lines = all.by_ref().take(git_ops::MAX_DIFF_LINES);
+        let lines = lines.map(String::from).collect();
+        Self {
+            lines,
+            cut: all.next().is_some(),
+        }
+    }
+}
 
 /// Cómo se pinta una línea de un diff.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -72,7 +98,7 @@ pub(super) fn change_icon(file: &FileChange, wip: bool) -> Icon {
 /// Lo que devuelve un hilo de git.
 enum Reply {
     Details(String, Result<Details, String>),
-    Diff((String, String), Result<String, String>),
+    Diff((String, String), Result<Diff, String>),
 }
 
 /// El estado de los dos paneles. Detalles y diffs se piden a git en hilos y se guardan:
@@ -85,27 +111,32 @@ pub(super) struct Panels {
     wip_open: bool,
     /// Qué secciones del panel izquierdo están abiertas (ramas, remotas, tags, stashes,
     /// worktrees).
-    sections: [bool; 5],
+    pub(super) sections: [bool; 5],
+    /// Anchos actuales de los dos paneles.
+    pub(super) left_w: f32,
+    pub(super) right_w: f32,
     /// Aviso del último clic (ej. el commit no está cargado).
     notice: Option<String>,
     /// El archivo cuyo diff se ve: (commit o `WIP`, ruta).
     file: Option<(String, String)>,
     /// `None` = pedido y en camino.
     details: HashMap<String, Option<Result<Details, String>>>,
-    diffs: HashMap<(String, String), Option<Result<String, String>>>,
+    diffs: HashMap<(String, String), Option<Result<Diff, String>>>,
     tx: Sender<Reply>,
     rx: Receiver<Reply>,
 }
 
 impl Panels {
-    pub(super) fn new(repo: PathBuf) -> Self {
+    pub(super) fn new(repo: PathBuf, prefs: &Prefs) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
             repo,
             refs: Refs::default(),
             wip: Vec::new(),
             wip_open: false,
-            sections: [true, true, false, false, false],
+            sections: prefs.sections,
+            left_w: prefs.left_w,
+            right_w: prefs.right_w,
             notice: None,
             file: None,
             details: HashMap::new(),
@@ -117,7 +148,7 @@ impl Panels {
 
     /// Cambia el WIP por uno recién leído: sus diffs guardados ya no valen.
     pub(super) fn set_wip(&mut self, wip: Vec<FileChange>) {
-        self.diffs.retain(|(id, _), _| id != WIP);
+        self.diffs.retain(|(id, _), _| !is_wip(id));
         self.wip_open &= !wip.is_empty();
         self.wip = wip;
     }
@@ -165,13 +196,13 @@ impl Panels {
         let (tx, ctx, repo, key) = (self.tx.clone(), ctx.clone(), self.repo.clone(), key.clone());
         std::thread::spawn(move || {
             let (id, path) = &key;
-            let diff = if id == WIP {
-                let path = format!(":(top,literal){path}");
-                let args = ["diff", "HEAD", "--no-color", "--no-ext-diff", "--", &path];
-                crate::agents::git(&repo, &args)
+            let diff = if is_wip(id) {
+                git_ops::wip_diff(&repo, path, id == STAGED)
             } else {
                 git_graph::diff(&repo, id, path)
             };
+            // Se parte en líneas aquí, en el hilo, y una sola vez.
+            let diff = diff.map(|text| Diff::new(&text));
             let _ = tx.send(Reply::Diff(key, diff));
             ctx.request_repaint();
         });
@@ -204,9 +235,9 @@ impl Panels {
         actions: &mut Actions,
     ) -> Option<Option<String>> {
         let (mut change, mut clicked) = (None, None);
-        egui::Panel::left("grafo-refs")
+        let panel = egui::Panel::left("grafo-refs")
             .resizable(true)
-            .default_size(210.0)
+            .default_size(self.left_w)
             .size_range(120.0..=420.0)
             .frame(panel_frame())
             .show_separator_line(false)
@@ -354,6 +385,7 @@ impl Panels {
                         }
                     });
             });
+        self.left_w = panel.response.rect.width();
         if let Some(hash) = clicked {
             self.select(view, &hash);
         }
@@ -375,7 +407,8 @@ impl Panels {
         let ctx = ui.ctx().clone();
         let id = commit.as_ref().map_or(WIP, |c| c.id.as_str()).to_string();
         // Cambió el commit: el diff abierto era de otro.
-        if self.file.as_ref().is_some_and(|(of, _)| *of != id) {
+        let same = |of: &str| of == id || (commit.is_none() && is_wip(of));
+        if self.file.as_ref().is_some_and(|(of, _)| !same(of)) {
             self.file = None;
         }
         let files = match &commit {
@@ -387,9 +420,9 @@ impl Panels {
             None => Some(self.wip.clone()),
         };
         let mut select = None;
-        egui::Panel::right("grafo-detalle")
+        let panel = egui::Panel::right("grafo-detalle")
             .resizable(true)
-            .default_size(380.0)
+            .default_size(self.right_w)
             .size_range(240.0..=900.0)
             .frame(panel_frame())
             .show_separator_line(false)
@@ -411,18 +444,23 @@ impl Panels {
                             }
                             // El WIP: preparar, quitar, resolver conflictos y commitear.
                             None => {
-                                let open = self.file.as_ref().map(|(_, path)| path.as_str());
-                                if let Some(path) = actions.commit_panel(ui, open) {
-                                    let same = open == Some(path.as_str());
-                                    self.file = (!same).then(|| (WIP.to_string(), path));
+                                let open = self
+                                    .file
+                                    .as_ref()
+                                    .map(|(of, path)| (of == STAGED, path.as_str()));
+                                if let Some((staged, path)) = actions.commit_panel(ui, open) {
+                                    let same = open == Some((staged, path.as_str()));
+                                    let of = if staged { STAGED } else { WIP };
+                                    self.file = (!same).then(|| (of.to_string(), path));
                                 }
                             }
                         }
                     });
-                if let Some((_, path)) = self.file.clone() {
-                    self.diff_view(ui, &ctx, (id.clone(), path));
+                if let Some(key) = self.file.clone() {
+                    self.diff_view(ui, &ctx, key, actions);
                 }
             });
+        self.right_w = panel.response.rect.width();
         if let Some(hash) = select {
             self.select(view, &hash);
         }
@@ -489,7 +527,7 @@ impl Panels {
             );
             return;
         }
-        let wip = id == WIP;
+        let wip = is_wip(id);
         let small = FontId::proportional(11.5);
         for file in files {
             let open = self
@@ -548,14 +586,23 @@ impl Panels {
                 FontId::proportional(12.5),
                 theme().fg,
             );
-            if response.on_hover_text(&file.path).clicked() {
+            let response = response.on_hover_text(&file.path);
+            if response.double_clicked() {
+                open_file(&self.repo, &file.path);
+            } else if response.clicked() {
                 self.file = (!open).then(|| (id.to_string(), file.path.clone()));
             }
         }
     }
 
     /// El diff de un archivo, coloreado, en su propia área con scroll.
-    fn diff_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, key: (String, String)) {
+    fn diff_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        key: (String, String),
+        actions: &mut Actions,
+    ) {
         ui.separator();
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
         let close_rect = egui::Rect::from_center_size(
@@ -565,7 +612,11 @@ impl Panels {
         label(
             ui.painter(),
             egui::Rect::from_min_max(rect.min, pos2(close_rect.min.x - 6.0, rect.max.y)),
-            &key.1,
+            match key.0.as_str() {
+                STAGED => format!("{} · preparado", key.1),
+                WIP => format!("{} · sin preparar", key.1),
+                _ => key.1.clone(),
+            },
             medium(12.5),
             theme().fg,
         );
@@ -587,30 +638,59 @@ impl Panels {
                 let error = ui.visuals().error_fg_color;
                 ui.colored_label(error, format!("No pude leer el diff: {e}"));
             }
-            Some(Ok(text)) if text.is_empty() => {
-                ui.weak("Sin diff de texto (binario o sin rastrear).");
+            Some(Ok(diff)) if diff.lines.is_empty() => {
+                ui.weak("Sin diff de texto (binario o sin cambios).");
             }
-            Some(Ok(text)) => {
+            Some(Ok(diff)) => {
                 let t = theme();
-                let height = ui.text_style_height(&egui::TextStyle::Monospace);
-                // ponytail: cuenta y salta líneas en cada frame (O(n)); con diffs enormes,
-                // guardar los cortes de línea junto al texto.
+                let height = ui.spacing().interact_size.y;
+                // Los bloques se pueden preparar o quitar solo en el WIP, con el diff entero.
+                let staged = key.0 == STAGED;
+                let hunks = is_wip(&key.0) && !diff.cut;
+                let busy = actions.busy();
+                let mut apply = None;
+                let count = diff.lines.len() + usize::from(diff.cut);
                 egui::ScrollArea::both()
                     .id_salt("grafo-diff")
                     .auto_shrink(false)
-                    .show_rows(ui, height, text.lines().count(), |ui, rows| {
-                        for line in text.lines().skip(rows.start).take(rows.len()) {
-                            let color = match line_kind(line) {
+                    .show_rows(ui, height, count, |ui, rows| {
+                        for i in rows {
+                            let Some(line) = diff.lines.get(i) else {
+                                ui.weak("… diff recortado: es demasiado largo.");
+                                continue;
+                            };
+                            let kind = line_kind(line);
+                            let color = match kind {
                                 LineKind::Added => t.ansi[2],
                                 LineKind::Removed => t.ansi[1],
                                 LineKind::Hunk => t.muted(),
                                 LineKind::Plain => t.fg,
                             };
                             // La fuente monoespaciada no tiene glifo para el tabulador.
-                            let line = RichText::new(line.replace('\t', "    "));
-                            ui.add(egui::Label::new(line.monospace().color(color)).extend());
+                            let shown = line.trim_end_matches('\r').replace('\t', "    ");
+                            let shown = RichText::new(shown).monospace().color(color);
+                            ui.horizontal(|ui| {
+                                ui.set_height(height);
+                                if hunks
+                                    && kind == LineKind::Hunk
+                                    && let Some(patch) = git_ops::hunk_patch(&diff.lines, i)
+                                {
+                                    let (icon, text) = if staged {
+                                        (Icon::Close, "Quitar bloque")
+                                    } else {
+                                        (Icon::Plus, "Preparar bloque")
+                                    };
+                                    if icon_text_button(ui, icon, text, !busy).clicked() && !busy {
+                                        apply = Some(patch);
+                                    }
+                                }
+                                ui.add(egui::Label::new(shown).extend());
+                            });
                         }
                     });
+                if let Some(patch) = apply {
+                    actions.apply_hunk(ctx, patch, staged);
+                }
             }
         }
     }
@@ -692,7 +772,7 @@ mod tests {
         let mut view = GraphView::new(sample());
         view.selected = Some(1);
         let id = view.graph.commits[1].id.clone();
-        let mut panels = Panels::new(PathBuf::from("."));
+        let mut panels = Panels::new(PathBuf::from("."), &Prefs::default());
         let item = |name: &str, current| RefItem {
             name: name.into(),
             target: id.clone(),
@@ -725,7 +805,7 @@ mod tests {
         panels.details.insert(id.clone(), Some(Ok(details)));
         let key = (id.clone(), "src/a.rs".to_string());
         let diff = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-viejo\n+nuevo";
-        panels.diffs.insert(key.clone(), Some(Ok(diff.into())));
+        panels.diffs.insert(key.clone(), Some(Ok(Diff::new(diff))));
         panels.file = Some(key);
 
         let mut output = egui::Context::default().run_ui(Default::default(), |ui| {
