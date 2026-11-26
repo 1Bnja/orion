@@ -14,6 +14,8 @@ pub(super) fn medium(size: f32) -> FontId {
     FontId::new(size, medium_family())
 }
 
+// Algunos íconos todavía no se usan: son para las acciones de git de la tarea siguiente.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 pub(super) enum Icon {
@@ -34,6 +36,36 @@ pub(super) enum Icon {
     Advanced = 13,
     Save = 14,
     ChevronRight = 15,
+    GitBranch = 16,
+    GitCommit = 17,
+    GitMerge = 18,
+    GitPullRequest = 19,
+    GitCherryPick = 20,
+    /// Traer commits (pull).
+    ArrowBarToDown = 21,
+    /// Subir commits (push).
+    ArrowBarUp = 22,
+    /// Volver a leer el repo (fetch).
+    Refresh = 23,
+    /// Guardar cambios aparte (stash).
+    Archive = 24,
+    /// Recuperar un stash (pop).
+    PackageExport = 25,
+    Tag = 26,
+    Folder = 27,
+    Cloud = 28,
+    Check = 29,
+    Copy = 30,
+    Trash = 31,
+    AlertTriangle = 32,
+    /// Deshacer un commit (revert).
+    ArrowBackUp = 33,
+    FilePlus = 34,
+    FileMinus = 35,
+    FileDiff = 36,
+    ExternalLink = 37,
+    /// Menú de más acciones.
+    Dots = 38,
 }
 
 impl Icon {
@@ -55,6 +87,29 @@ impl Icon {
             Icon::Advanced => include_bytes!("../../assets/icons/adjustments.png"),
             Icon::Save => include_bytes!("../../assets/icons/brush.png"),
             Icon::ChevronRight => include_bytes!("../../assets/icons/chevron-right.png"),
+            Icon::GitBranch => include_bytes!("../../assets/icons/git-branch.png"),
+            Icon::GitCommit => include_bytes!("../../assets/icons/git-commit.png"),
+            Icon::GitMerge => include_bytes!("../../assets/icons/git-merge.png"),
+            Icon::GitPullRequest => include_bytes!("../../assets/icons/git-pull-request.png"),
+            Icon::GitCherryPick => include_bytes!("../../assets/icons/git-cherry-pick.png"),
+            Icon::ArrowBarToDown => include_bytes!("../../assets/icons/arrow-bar-to-down.png"),
+            Icon::ArrowBarUp => include_bytes!("../../assets/icons/arrow-bar-up.png"),
+            Icon::Refresh => include_bytes!("../../assets/icons/refresh.png"),
+            Icon::Archive => include_bytes!("../../assets/icons/archive.png"),
+            Icon::PackageExport => include_bytes!("../../assets/icons/package-export.png"),
+            Icon::Tag => include_bytes!("../../assets/icons/tag.png"),
+            Icon::Folder => include_bytes!("../../assets/icons/folder.png"),
+            Icon::Cloud => include_bytes!("../../assets/icons/cloud.png"),
+            Icon::Check => include_bytes!("../../assets/icons/check.png"),
+            Icon::Copy => include_bytes!("../../assets/icons/copy.png"),
+            Icon::Trash => include_bytes!("../../assets/icons/trash.png"),
+            Icon::AlertTriangle => include_bytes!("../../assets/icons/alert-triangle.png"),
+            Icon::ArrowBackUp => include_bytes!("../../assets/icons/arrow-back-up.png"),
+            Icon::FilePlus => include_bytes!("../../assets/icons/file-plus.png"),
+            Icon::FileMinus => include_bytes!("../../assets/icons/file-minus.png"),
+            Icon::FileDiff => include_bytes!("../../assets/icons/file-diff.png"),
+            Icon::ExternalLink => include_bytes!("../../assets/icons/external-link.png"),
+            Icon::Dots => include_bytes!("../../assets/icons/dots.png"),
         }
     }
 }
@@ -99,6 +154,172 @@ pub(super) fn icon_button(ui: &egui::Ui, rect: Rect, id: egui::Id, icon: Icon) -
     };
     draw_icon(ui, icon, rect.center(), color);
     response
+}
+
+/// A clickable row with the hover and selection colors of the sidebar.
+pub(super) fn selectable_row(
+    ui: &mut egui::Ui,
+    height: f32,
+    selected: bool,
+) -> (Rect, egui::Response) {
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+    if selected {
+        ui.painter().rect_filled(rect, RADIUS, theme().selection);
+    } else if response.hovered() {
+        ui.painter().rect_filled(rect, RADIUS, theme().hover());
+    }
+    (rect, response)
+}
+
+/// A button with an icon on the left and a label. It dims when disabled.
+pub(super) fn icon_text_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    text: &str,
+    enabled: bool,
+) -> egui::Response {
+    let font = medium(12.5);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font.clone(), theme().fg);
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(galley.size().x + 34.0, 24.0), Sense::click());
+    let hovered = enabled && response.hovered();
+    let color = if !enabled {
+        theme().muted()
+    } else if hovered {
+        theme().fg
+    } else {
+        theme().secondary()
+    };
+    if hovered {
+        ui.painter().rect_filled(rect, RADIUS, theme().hover());
+    }
+    draw_icon(ui, icon, pos2(rect.min.x + 12.0, rect.center().y), color);
+    let text_rect = Rect::from_min_max(
+        pos2(rect.min.x + 24.0, rect.min.y),
+        pos2(rect.max.x - 6.0, rect.max.y),
+    );
+    label(ui.painter(), text_rect, text, font, color);
+    response
+}
+
+/// A checkbox in Orion's style: a small box with a check when it is on.
+pub(super) fn toggle(ui: &mut egui::Ui, text: &str, on: &mut bool) -> egui::Response {
+    let font = medium(12.5);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font.clone(), theme().fg);
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(galley.size().x + 30.0, 22.0), Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(rect, RADIUS, theme().hover());
+    }
+    let box_rect =
+        Rect::from_center_size(pos2(rect.min.x + 10.0, rect.center().y), vec2(15.0, 15.0));
+    if *on {
+        ui.painter().rect_filled(box_rect, 4.0, theme().accent());
+        draw_icon_size(ui, Icon::Check, box_rect.center(), theme().bg, 13.0);
+    } else {
+        let stroke = egui::Stroke::new(1.0, theme().line());
+        ui.painter()
+            .rect_stroke(box_rect, 4.0, stroke, egui::StrokeKind::Inside);
+    }
+    let text_rect = Rect::from_min_max(
+        pos2(rect.min.x + 24.0, rect.min.y),
+        pos2(rect.max.x - 4.0, rect.max.y),
+    );
+    let color = if response.hovered() {
+        theme().fg
+    } else {
+        theme().secondary()
+    };
+    label(ui.painter(), text_rect, text, font, color);
+    if response.clicked() {
+        *on = !*on;
+    }
+    response
+}
+
+/// The header of a panel section: icon, title, count in gray and a chevron. Returns true if
+/// it was clicked (the caller flips its open state).
+pub(super) fn section_header(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    title: &str,
+    count: usize,
+    open: bool,
+) -> bool {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(rect, RADIUS, theme().hover());
+    }
+    let color = if response.hovered() {
+        theme().fg
+    } else {
+        theme().secondary()
+    };
+    draw_icon(ui, icon, pos2(rect.min.x + 14.0, rect.center().y), color);
+    let text_rect = Rect::from_min_max(
+        pos2(rect.min.x + 28.0, rect.min.y),
+        pos2(rect.max.x - 28.0, rect.max.y),
+    );
+    let used = label(ui.painter(), text_rect, title, medium(12.5), color);
+    let count_rect = Rect::from_min_max(
+        pos2(text_rect.min.x + used + 6.0, rect.min.y),
+        pos2(rect.max.x - 24.0, rect.max.y),
+    );
+    label(
+        ui.painter(),
+        count_rect,
+        format!("({count})"),
+        FontId::proportional(11.5),
+        theme().muted(),
+    );
+    let chevron = if open {
+        Icon::Chevron
+    } else {
+        Icon::ChevronRight
+    };
+    draw_icon(
+        ui,
+        chevron,
+        pos2(rect.max.x - 14.0, rect.center().y),
+        theme().muted(),
+    );
+    response.clicked()
+}
+
+/// Search field with the magnifier inside, like the one in Configuración.
+pub(super) fn search_field(ui: &mut egui::Ui, filter: &mut String, hint: &str, width: f32) {
+    let height = 28.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    let stroke = egui::Stroke::new(1.0, theme().line());
+    ui.painter().rect(
+        rect,
+        RADIUS,
+        theme().hover(),
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    draw_icon(
+        ui,
+        Icon::Search,
+        pos2(rect.min.x + 14.0, rect.center().y),
+        theme().muted(),
+    );
+    let edit = Rect::from_min_max(
+        pos2(rect.min.x + 28.0, rect.min.y),
+        rect.max - vec2(6.0, 0.0),
+    );
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(edit));
+    child.add(
+        egui::TextEdit::singleline(filter)
+            .hint_text(hint)
+            .frame(egui::Frame::NONE)
+            .desired_width(f32::INFINITY),
+    );
 }
 
 /// The parts of `rect` that `hole` does not cover, as up to four rectangles.
@@ -216,6 +437,29 @@ mod tests {
             Icon::Advanced,
             Icon::Save,
             Icon::ChevronRight,
+            Icon::GitBranch,
+            Icon::GitCommit,
+            Icon::GitMerge,
+            Icon::GitPullRequest,
+            Icon::GitCherryPick,
+            Icon::ArrowBarToDown,
+            Icon::ArrowBarUp,
+            Icon::Refresh,
+            Icon::Archive,
+            Icon::PackageExport,
+            Icon::Tag,
+            Icon::Folder,
+            Icon::Cloud,
+            Icon::Check,
+            Icon::Copy,
+            Icon::Trash,
+            Icon::AlertTriangle,
+            Icon::ArrowBackUp,
+            Icon::FilePlus,
+            Icon::FileMinus,
+            Icon::FileDiff,
+            Icon::ExternalLink,
+            Icon::Dots,
         ] {
             let image = image::load_from_memory(icon.png()).expect("png");
             assert_eq!(image.width(), 48);

@@ -1,7 +1,7 @@
 //! La vista "Grafo" (solo lectura): las ramas y los commits del repo, uno por fila, con las
 //! refs a la izquierda y, junto a ellas, las líneas del grafo.
 
-use super::chrome::{RADIUS, label, medium};
+use super::chrome::{Icon, icon_text_button, label, medium, search_field, selectable_row, toggle};
 use super::graph_panels::Panels;
 use crate::colors::theme;
 use crate::git_graph::{self, Commit, FileChange, Graph, Refs, Row};
@@ -20,8 +20,12 @@ const NODE: f32 = 10.0;
 const MERGE_NODE: f32 = 4.0;
 /// Ancho de la columna de refs, a la izquierda del grafo.
 const REFS_W: f32 = 160.0;
+/// Límites al arrastrar el borde de la columna de refs.
+const REFS_MIN: f32 = 80.0;
+const REFS_MAX: f32 = 360.0;
+/// Alto de la fila de encabezado de columnas.
+const HEADER: f32 = 22.0;
 /// Columnas de la derecha.
-const AUTHOR_W: f32 = 130.0;
 const DATE_W: f32 = 84.0;
 /// Colores ANSI para los carriles: sin negros, grises ni blancos (0, 7, 8 y 15).
 const LANE_COLORS: [usize; 12] = [4, 2, 5, 3, 6, 1, 12, 10, 13, 11, 14, 9];
@@ -49,6 +53,8 @@ pub(super) struct GraphView {
     pub(super) show_tags: bool,
     /// Fila a la que la lista se desplaza en el próximo frame.
     pub(super) scroll_to: Option<usize>,
+    /// Ancho de la columna de refs, que se ajusta arrastrando su borde.
+    refs_w: f32,
     /// Carril del commit bajo el puntero en el frame anterior: se resalta en todas las filas.
     hovered_lane: Option<usize>,
 }
@@ -257,6 +263,7 @@ impl GraphView {
             show_remotes: true,
             show_tags: true,
             scroll_to: None,
+            refs_w: REFS_W,
             hovered_lane: None,
         }
     }
@@ -272,18 +279,18 @@ impl GraphView {
     /// La barra de arriba; `busy` = se está recargando. Devuelve true si se pidió refrescar.
     fn toolbar(&mut self, ui: &mut egui::Ui, busy: bool) -> bool {
         ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text("Buscar por asunto, autor, hash o ref…")
-                    .desired_width(280.0),
+            search_field(
+                ui,
+                &mut self.filter,
+                "Buscar por asunto, autor, hash o ref…",
+                280.0,
             );
             ui.add_space(8.0);
-            ui.checkbox(&mut self.show_remotes, "Remotas");
-            ui.checkbox(&mut self.show_tags, "Tags");
+            toggle(ui, "Remotas", &mut self.show_remotes);
+            toggle(ui, "Tags", &mut self.show_tags);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let refresh = ui
-                    .add_enabled(!busy, egui::Button::new("Refrescar"))
-                    .clicked();
+                let refresh =
+                    icon_text_button(ui, Icon::Refresh, "Refrescar", !busy).clicked() && !busy;
                 if busy {
                     ui.spinner();
                 }
@@ -292,6 +299,71 @@ impl GraphView {
             .inner
         })
         .inner
+    }
+
+    /// La fila de encabezado de columnas y el borde arrastrable de la columna de refs.
+    fn header(&mut self, ui: &mut egui::Ui) {
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER), Sense::hover());
+        let graph_x = rect.min.x + self.refs_w;
+        let graph_w = self.graph.lanes as f32 * LANE;
+        let message_x = graph_x + graph_w + 8.0;
+        let right = rect.max.x - 8.0;
+        let font = FontId::proportional(10.5);
+        let muted = theme().muted();
+        let column = |from: f32, to: f32| {
+            Rect::from_min_max(pos2(from, rect.min.y), pos2(to.max(from), rect.max.y))
+        };
+        label(
+            ui.painter(),
+            column(rect.min.x + 8.0, graph_x - 6.0),
+            "RAMA / TAG",
+            font.clone(),
+            muted,
+        );
+        label(
+            ui.painter(),
+            column(graph_x, graph_x + graph_w),
+            "GRAFO",
+            font.clone(),
+            muted,
+        );
+        label(
+            ui.painter(),
+            column(message_x, right - DATE_W - 8.0),
+            "MENSAJE",
+            font.clone(),
+            muted,
+        );
+        label(
+            ui.painter(),
+            column(right - DATE_W, right),
+            "FECHA",
+            font,
+            muted,
+        );
+        let line = theme().line().gamma_multiply(0.6);
+        ui.painter()
+            .hline(rect.x_range(), rect.max.y, Stroke::new(1.0, line));
+
+        let handle = Rect::from_center_size(pos2(graph_x, rect.center().y), vec2(7.0, HEADER));
+        let drag = ui.interact(
+            handle,
+            ui.make_persistent_id("grafo-refs-borde"),
+            Sense::drag(),
+        );
+        if drag.hovered() || drag.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        if drag.dragged() {
+            self.refs_w = (self.refs_w + drag.drag_delta().x).clamp(REFS_MIN, REFS_MAX);
+        }
+        let color = if drag.hovered() || drag.dragged() {
+            theme().accent()
+        } else {
+            theme().line()
+        };
+        ui.painter()
+            .vline(graph_x, rect.y_range(), Stroke::new(1.0, color));
     }
 
     /// La lista de commits. Con `more`, al final va «Cargar más»; devuelve true si se pulsó.
@@ -310,6 +382,7 @@ impl GraphView {
             .map_or(0, |d| d.as_secs() as i64);
         // Sin espacio entre filas, para que las líneas no se corten.
         ui.spacing_mut().item_spacing.y = 0.0;
+        self.header(ui);
         // Las filas se pintan con el carril del frame anterior y anotan el de este.
         let hovered = self.hovered_lane.take();
         let mut area = egui::ScrollArea::vertical().auto_shrink(false);
@@ -326,7 +399,7 @@ impl GraphView {
                     let size = vec2(ui.available_width(), ROW);
                     let layout = egui::Layout::top_down(egui::Align::Center);
                     ui.allocate_ui_with_layout(size, layout, |ui| {
-                        load_more = ui.button("Cargar más").clicked();
+                        load_more = icon_text_button(ui, Icon::Plus, "Cargar más", true).clicked();
                     });
                 } else {
                     self.row(ui, i, &needle, now, hovered);
@@ -340,8 +413,8 @@ impl GraphView {
     }
 
     fn row(&mut self, ui: &mut egui::Ui, i: usize, needle: &str, now: i64, hovered: Option<usize>) {
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+        let selected = self.selected == Some(i);
+        let (rect, response) = selectable_row(ui, ROW, selected);
         if response.clicked() {
             self.selected = Some(i);
         }
@@ -350,22 +423,16 @@ impl GraphView {
             self.hovered_lane = Some(lane);
         }
         let commit = &self.graph.commits[i];
-        let selected = self.selected == Some(i);
         response.widget_info(|| {
             egui::WidgetInfo::selected(egui::Role::Button, true, selected, &commit.subject)
         });
-        if selected {
-            ui.painter().rect_filled(rect, RADIUS, theme().selection);
-        } else if response.hovered() {
-            ui.painter().rect_filled(rect, RADIUS, theme().hover());
-        }
 
         let opacity = if needle.is_empty() || matches(commit, needle) {
             1.0
         } else {
             0.3
         };
-        let graph_x = rect.min.x + REFS_W;
+        let graph_x = rect.min.x + self.refs_w;
         let graph_w = self.graph.lanes as f32 * LANE;
         let lanes = Rect::from_min_size(pos2(graph_x, rect.min.y), vec2(graph_w, ROW));
         draw_lanes(ui.painter(), lanes, &self.graph.rows, i, hovered);
@@ -407,11 +474,10 @@ impl GraphView {
         }
         node(&painter, center, commit, color);
 
-        // En una ventana angosta las columnas de la derecha se achican.
-        let author_x = right - DATE_W - AUTHOR_W.min(rect.width() * 0.2);
-        let text_end = author_x - 8.0;
+        // Sin columna de autor: el asunto tiene más espacio. El nombre completo va en el
+        // tooltip del nodo, que es donde están sus iniciales.
+        let text_end = right - DATE_W - 8.0;
         let x = lanes.max.x + 8.0;
-
         let font = FontId::proportional(13.0);
         let small = FontId::proportional(12.0);
         label(
@@ -423,18 +489,18 @@ impl GraphView {
         );
         label(
             &painter,
-            column(author_x, right - DATE_W - 8.0),
-            &commit.author,
-            small.clone(),
-            theme().secondary(),
-        );
-        label(
-            &painter,
             column(right - DATE_W, right),
             ago(now, commit.time),
             small,
             theme().muted(),
         );
+
+        let over_node = ui.input(|i| i.pointer.hover_pos()).is_some_and(|pos| {
+            Rect::from_center_size(center, vec2(NODE * 2.0, NODE * 2.0)).contains(pos)
+        });
+        if response.hovered() && over_node {
+            let _ = response.on_hover_text(&commit.author);
+        }
     }
 }
 
@@ -788,6 +854,28 @@ pub(super) mod tests {
         );
         // Sin puntero no queda ningún carril resaltado.
         assert_eq!(view.hovered_lane, None);
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn list_has_a_header_and_no_author_column() {
+        let mut view = GraphView::new(sample());
+        let mut output = egui::Context::default().run_ui(Default::default(), |ui| {
+            view.list(ui, false);
+        });
+        let texts: Vec<String> = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::Text(text) => Some(text.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for expected in ["RAMA / TAG", "GRAFO", "MENSAJE", "FECHA"] {
+            assert!(texts.iter().any(|t| t == expected), "{expected}: {texts:?}");
+        }
+        // El autor completo ya no ocupa una columna: solo quedan sus iniciales en el nodo.
+        assert!(!texts.iter().any(|t| t == "Ana Pérez" || t == "Claude"));
         output.textures_delta.clear();
     }
 
