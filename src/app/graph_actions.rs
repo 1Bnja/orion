@@ -1514,15 +1514,18 @@ mod tests {
         // La pestaña nota el cambio sola (mira el repo cada pocos segundos).
         d.wait_for("// WIP · 1 archivo");
         d.click("Stash");
-        d.wait("stash guardado", |_| {
-            git(&repo, &["stash", "list"]).lines().count() == 1
-        });
+        // Mientras la pestaña cambia la pila, `stash list` puede fallar ("bad revision
+        // 'refs/stash'"): se reintenta.
+        let stashes = || {
+            crate::agents::git(&repo, &["stash", "list"])
+                .ok()
+                .map(|list| list.lines().count())
+        };
+        d.wait("stash guardado", |_| stashes() == Some(1));
         assert!(git(&repo, &["status", "--porcelain"]).is_empty());
         d.wait_for("refs/stash");
         d.click("Pop");
-        d.wait("stash aplicado", |_| {
-            git(&repo, &["stash", "list"]).is_empty()
-        });
+        d.wait("stash aplicado", |_| stashes() == Some(0));
         let a = std::fs::read_to_string(repo.join("a.txt")).unwrap();
         assert_eq!(a, "a medias\n");
 
