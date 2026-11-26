@@ -1212,7 +1212,8 @@ impl Orion {
     fn draw_panes(&mut self, ui: &mut egui::Ui, area: egui::Rect) -> bool {
         let ctx = ui.ctx().clone();
         // Con el menú o la paleta abiertos, la rueda y el mouse son para ellos.
-        let menu_open = self.menu.open || self.palette.open || self.orchestrate.open;
+        let menu_open =
+            self.menu.open || self.palette.open || self.orchestrate.open || self.project.open;
         // The panes float inside the frame: a gap on the right, below and between them. The
         // title bar and the sidebar already frame the other two sides.
         let left = if self.sidebar_hidden { PANE_GAP } else { 0.0 };
@@ -1524,6 +1525,7 @@ impl eframe::App for Orion {
         } else if !self.menu.open
             && !self.palette.open
             && !self.orchestrate.open
+            && !self.project.open
             && !toggle
             && let Some(session) = self.session()
         {
