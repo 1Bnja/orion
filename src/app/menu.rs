@@ -172,6 +172,9 @@ impl Orion {
         if new.font.family != self.settings.font.family {
             apply_font(ctx, &new.font.family);
         }
+        if new.ui_scale != self.settings.ui_scale {
+            ctx.set_zoom_factor(new.ui_scale);
+        }
         let theme_changed = new.theme != self.settings.theme
             || new.colors != self.settings.colors
             || new.custom_themes != self.settings.custom_themes;

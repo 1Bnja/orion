@@ -59,7 +59,9 @@ impl Section {
     /// Palabras que también encuentran la sección en el buscador.
     pub(crate) fn keywords(self) -> &'static [&'static str] {
         match self {
-            Self::Apariencia => &["tema", "fondo", "mica", "acrilico", "ventana"],
+            Self::Apariencia => &[
+                "tema", "fondo", "mica", "acrilico", "ventana", "escala", "zoom", "4k", "dpi",
+            ],
             Self::Colores => &["color", "colores", "hex", "paleta", "ansi"],
             Self::Fuente => &[
                 "letra",
@@ -330,6 +332,24 @@ fn section_content(
                     let _ = response.on_hover_text(
                         "Mica: tinte suave y casi sólido. Acrílico: desenfoca lo de atrás. En Windows 11 y macOS.",
                     );
+                });
+                setting_row(ui, "Escala", "Tamaño de toda la interfaz, sobre el del sistema", |ui| {
+                    // Una lista y no un slider: al arrastrar, la ventana cambiaría de tamaño bajo el mouse.
+                    let percent = |scale: f32| format!("{:.0} %", scale * 100.0);
+                    egui::ComboBox::from_id_salt("escala")
+                        .width(160.0)
+                        .selected_text(percent(new.ui_scale))
+                        .show_ui(ui, |ui| {
+                            for scale in [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
+                                ui.selectable_value(&mut new.ui_scale, scale, percent(scale));
+                            }
+                        })
+                        .response
+                        .on_hover_text(if MAC {
+                            "También con Cmd+= y Cmd+- (Cmd+0 vuelve a 100 %)"
+                        } else {
+                            "También con Ctrl+= y Ctrl+- (Ctrl+0 vuelve a 100 %)"
+                        });
                 });
             }
             Section::Colores => {
