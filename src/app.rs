@@ -46,7 +46,9 @@ mod titlebar;
 
 use crate::blocks::Status;
 use crate::colors::{surface, theme};
-use crate::config::{Settings, UI_SCALE, config_modified, reload_settings};
+use crate::config::{
+    Settings, UI_SCALE, WindowState, config_modified, load_window, reload_settings, save_window,
+};
 use crate::fonts::{apply_font, is_font_file};
 use crate::logo::Logo;
 use crate::pty::{Error, find_shell, usable_shell};
@@ -204,6 +206,8 @@ pub(crate) struct Orion {
     window: Option<crate::backdrop::Window>,
     /// El tamaño de la ventana en el último frame, para saber cuándo cambió.
     window_size: Option<egui::Vec2>,
+    /// Lo último guardado en window.json.
+    window_state: WindowState,
     updater: Updater,
     /// Buscaste actualizaciones a mano: avisar también si está al día o si falló.
     /// (La revisión automática al abrir es silenciosa: sin internet no hay nada que molestar.)
@@ -464,6 +468,7 @@ impl Orion {
             perf: None,
             window: crate::backdrop::Window::of(cc),
             window_size: None,
+            window_state: load_window(),
             updater: Updater::new(),
             update_asked: false,
             logo: cc.egui_ctx.load_texture(
@@ -1334,13 +1339,33 @@ impl eframe::App for Orion {
     // logic corre antes de cada ui y también con la ventana oculta: así ningún canal se acumula.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Al cambiar de tamaño, Windows deja vieja la capa GDI de la ventana (ver `clear_gdi_layer`).
-        let size = ctx.input(|i| i.viewport().inner_rect).map(|r| r.size());
+        let (rect, maximized, fullscreen) = ctx.input(|i| {
+            let v = i.viewport();
+            (
+                v.inner_rect,
+                v.maximized == Some(true),
+                v.fullscreen == Some(true),
+            )
+        });
+        let size = rect.map(|r| r.size());
         if size != self.window_size {
             self.window_size = size;
             if let Some(window) = self.window
                 && crate::renderer::active() == crate::renderer::Gpu::DirectX12
             {
                 crate::backdrop::clear_gdi_layer(window);
+            }
+        }
+        // Sin medida (minimizada) o a pantalla completa no hay nada que recordar.
+        // ponytail: mientras arrastras el borde se escribe en cada cambio; si molesta, esperar a que pare.
+        if let Some(size) = size
+            && !fullscreen
+        {
+            let logical = (size * ctx.zoom_factor()).round();
+            let new = self.window_state.resized(logical.into(), maximized);
+            if new != self.window_state {
+                self.window_state = new;
+                save_window(new);
             }
         }
         // Ctrl+= / Ctrl+- / Ctrl+0 son el zoom de egui: lo guardamos como ui_scale.

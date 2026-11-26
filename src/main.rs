@@ -51,10 +51,12 @@ fn main() -> Result<(), pty::Error> {
         eprintln!("orion: config {}", path.display());
     }
 
+    let window = config::load_window();
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Orion")
-        .with_inner_size([1280.0, 800.0])
-        .with_min_inner_size([720.0, 480.0])
+        .with_inner_size(window.size)
+        .with_maximized(window.maximized)
+        .with_min_inner_size(config::MIN_WINDOW)
         // El de la barra de tareas y la esquina de la ventana (el del .exe lo pone build.rs).
         .with_icon(eframe::egui::IconData {
             rgba: icon::render(64),

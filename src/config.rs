@@ -589,6 +589,67 @@ pub(crate) fn config_path() -> Option<PathBuf> {
     Some(appdata.join("orion").join("config.toml"))
 }
 
+/// Tamaño mínimo de la ventana.
+pub(crate) const MIN_WINDOW: [f32; 2] = [720.0, 480.0];
+
+/// Lo que se guarda en window.json, al lado de config.toml.
+// ponytail: la posición no se guarda: con varios monitores la ventana puede quedar fuera de pantalla.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Debug)]
+pub(crate) struct WindowState {
+    /// Tamaño sin maximizar, en píxeles lógicos (sin el zoom de egui).
+    pub(crate) size: [f32; 2],
+    pub(crate) maximized: bool,
+}
+
+impl Default for WindowState {
+    fn default() -> Self {
+        Self {
+            size: [1280.0, 800.0],
+            maximized: false,
+        }
+    }
+}
+
+impl WindowState {
+    /// El estado según la ventana de ahora. Maximizada, se conserva el último tamaño sin maximizar.
+    pub(crate) fn resized(self, size: [f32; 2], maximized: bool) -> Self {
+        let size = if maximized { self.size } else { size };
+        Self { size, maximized }.at_least_min()
+    }
+
+    fn at_least_min(mut self) -> Self {
+        self.size = [0, 1].map(|i| self.size[i].max(MIN_WINDOW[i]));
+        self
+    }
+}
+
+fn parse_window(text: &str) -> Option<WindowState> {
+    serde_json::from_str(text)
+        .ok()
+        .map(WindowState::at_least_min)
+}
+
+fn window_path() -> Option<PathBuf> {
+    // Los tests no leen ni pisan el tamaño del usuario.
+    if cfg!(test) {
+        return None;
+    }
+    config_path().map(|p| p.with_file_name("window.json"))
+}
+
+/// El tamaño de la última vez; si no hay window.json o no se entiende, el de siempre.
+pub(crate) fn load_window() -> WindowState {
+    let text = window_path().and_then(|p| std::fs::read_to_string(p).ok());
+    text.and_then(|t| parse_window(&t)).unwrap_or_default()
+}
+
+/// Si no se puede escribir, Orion abre la próxima vez con el tamaño anterior.
+pub(crate) fn save_window(state: WindowState) {
+    if let (Some(path), Ok(text)) = (window_path(), serde_json::to_string_pretty(&state)) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
 /// Cuándo se modificó config.toml por última vez (para notar que lo guardaste).
 pub(crate) fn config_modified() -> Option<SystemTime> {
     std::fs::metadata(config_path()?).ok()?.modified().ok()
@@ -671,6 +732,23 @@ pub(crate) fn load_settings() -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_json_se_escribe_y_se_vuelve_a_leer() {
+        let state = WindowState::default().resized([1600.0, 900.0], false);
+        // Maximizada: se guarda el tamaño de antes.
+        let state = state.resized([2560.0, 1400.0], true);
+        assert_eq!((state.size, state.maximized), ([1600.0, 900.0], true));
+        let text = serde_json::to_string(&state).unwrap();
+        assert_eq!(parse_window(&text), Some(state));
+        assert_eq!(parse_window("{roto"), None);
+    }
+
+    #[test]
+    fn la_ventana_leida_respeta_el_minimo() {
+        let read = parse_window(r#"{"size":[100,-5],"maximized":false}"#).unwrap();
+        assert_eq!(read.size, MIN_WINDOW);
+    }
 
     #[test]
     fn config_parses_and_fills_defaults() {
