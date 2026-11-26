@@ -1,9 +1,14 @@
 //! La ventana de "Nuevo proyecto": un repo y uno o varios agentes, cada uno en su pestaña.
 //! Con worktree, el agente trabaja en un git worktree y una rama nueva, como los harness de agentes.
+//! Usa la misma base que la paleta y el orquestador (`overlay`).
 
+use super::chrome::{Icon, draw_icon_size, medium};
+use super::overlay::{self, Button, Kind, dim_text, faint_text, mix, panel_fill, tint};
 use super::{AgentChoice, Orion, folder_name};
 use crate::colors::theme;
-use eframe::egui;
+use eframe::egui::{
+    self, Color32, CursorIcon, FontId, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
+};
 use std::path::{Path, PathBuf};
 
 /// Un proyecto guardado: sobrevive al cierre de Orion y se reabre con un clic desde la barra lateral.
@@ -72,6 +77,8 @@ pub(super) struct Project {
     pub(super) worktree: bool,
     /// Raíz del repo de `dir`, o el error de git si no es un repo.
     repo: Option<Result<PathBuf, String>>,
+    /// La rama actual de ese repo, para mostrarla.
+    branch: Option<String>,
     /// Repos junto a `dir`.
     siblings: Vec<PathBuf>,
     pub(super) error: Option<String>,
@@ -79,7 +86,10 @@ pub(super) struct Project {
 
 impl Project {
     pub(super) fn set_dir(&mut self, dir: PathBuf) {
-        self.repo = Some(crate::agents::repo_root(&dir));
+        let repo = crate::agents::repo_root(&dir);
+        self.branch =
+            (repo.as_ref().ok()).and_then(|root| crate::agents::current_branch(root).ok());
+        self.repo = Some(repo);
         self.siblings = sibling_repos(&dir);
         self.path = dir.display().to_string();
         self.dir = Some(dir);
@@ -87,21 +97,236 @@ impl Project {
     }
 }
 
-/// Una fila de carpetas para elegir con un clic.
-fn chips(ui: &mut egui::Ui, label: &str, dirs: &[PathBuf], chosen: &mut Option<PathBuf>) {
+const WIDTH: f32 = 660.0;
+const PAD: i8 = 20;
+
+/// Lo que se pidió desde la ventana en este frame: se aplica después de dibujarla.
+#[derive(Default)]
+struct Asked {
+    close: bool,
+    launch: bool,
+    browse: bool,
+    chosen: Option<PathBuf>,
+    /// Marcar o desmarcar ese agente.
+    toggle: Option<String>,
+    worktree: Option<bool>,
+}
+
+/// El título de una sección, con una aclaración al lado.
+fn section(ui: &mut Ui, title: &str, hint: &str) {
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).font(medium(12.5)).color(theme().fg));
+        ui.label(RichText::new(hint).size(11.5).color(faint_text()));
+    });
+}
+
+fn note(ui: &mut Ui, text: &str, color: Color32) {
+    ui.add(egui::Label::new(RichText::new(text).size(11.5).color(color)).wrap());
+}
+
+/// Una fila de carpetas para elegir con un clic; la elegida queda marcada.
+fn folder_chips(
+    ui: &mut Ui,
+    label: &str,
+    dirs: &[PathBuf],
+    current: Option<&PathBuf>,
+    asked: &mut Asked,
+) {
     if dirs.is_empty() {
         return;
     }
-    ui.add_space(4.0);
-    ui.weak(label);
     ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(label).size(11.5).color(faint_text()));
         for dir in dirs {
-            let chip = ui.small_button(folder_name(dir));
+            let chip = overlay::chip(ui, &folder_name(dir), current == Some(dir), true, false);
             if chip.on_hover_text(dir.display().to_string()).clicked() {
-                *chosen = Some(dir.clone());
+                asked.chosen = Some(dir.clone());
             }
         }
     });
+}
+
+/// Una tarjeta de agente que se marca con un clic.
+fn agent_card(ui: &mut Ui, name: &str, about: &str, on: bool, width: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 54.0), Sense::click());
+    let ctx = ui.ctx().clone();
+    let hover = ctx.animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.06);
+    let sel = ctx.animate_bool_with_time(response.id.with("on"), on, 0.08);
+    let body = if response.is_pointer_button_down_on() {
+        rect.shrink(1.0)
+    } else {
+        rect
+    };
+    ui.painter().rect(
+        body,
+        10.0,
+        tint(0.018 + 0.045 * sel + 0.025 * hover),
+        Stroke::new(1.0, tint(0.10 + 0.14 * sel + 0.10 * hover)),
+        StrokeKind::Inside,
+    );
+    let check =
+        Rect::from_center_size(pos2(body.max.x - 19.0, body.min.y + 19.0), vec2(16.0, 16.0));
+    if on {
+        ui.painter().rect_filled(check, 5.0, theme().fg);
+        draw_icon_size(ui, Icon::Check, check.center(), panel_fill(), 13.0);
+    } else {
+        let stroke = Stroke::new(1.0, tint(0.28));
+        ui.painter()
+            .rect_stroke(check, 5.0, stroke, StrokeKind::Inside);
+    }
+    let line = |y: f32, right: f32| {
+        Rect::from_min_max(
+            pos2(body.min.x + 14.0, y - 9.0),
+            pos2(body.max.x - right, y + 9.0),
+        )
+    };
+    let color = if on { theme().fg } else { dim_text() };
+    let painter = ui.painter();
+    overlay::line_at(
+        painter,
+        line(body.min.y + 19.0, 34.0),
+        name,
+        medium(13.0),
+        color,
+    );
+    let small = FontId::proportional(11.5);
+    overlay::line_at(
+        painter,
+        line(body.min.y + 37.0, 10.0),
+        about,
+        small,
+        faint_text(),
+    );
+    response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(about)
+}
+
+/// Un interruptor con título y descripción, como fila completa.
+fn switch_row(ui: &mut Ui, title: &str, detail: &str, on: bool, enabled: bool) -> egui::Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), sense);
+    let ctx = ui.ctx().clone();
+    let hovered = enabled && response.hovered();
+    let hover = ctx.animate_bool_with_time(response.id.with("hover"), hovered, 0.06);
+    let t = ctx.animate_bool_with_time(response.id.with("on"), on, 0.1);
+    ui.painter().rect(
+        rect,
+        10.0,
+        tint(0.018 + 0.025 * hover),
+        Stroke::new(1.0, tint(0.10 + 0.10 * hover)),
+        StrokeKind::Inside,
+    );
+    // El interruptor: una pastilla con un círculo que se desliza.
+    let track = Rect::from_center_size(pos2(rect.max.x - 34.0, rect.center().y), vec2(36.0, 20.0));
+    let fade = if enabled { 1.0 } else { 0.5 };
+    let track_color = mix(tint(0.16), theme().fg, t).gamma_multiply(fade);
+    ui.painter().rect_filled(track, 10.0, track_color);
+    let knob = pos2(track.min.x + 10.0 + 16.0 * t, track.center().y);
+    let knob_color = mix(theme().fg, panel_fill(), t);
+    ui.painter().circle_filled(knob, 7.0, knob_color);
+    let line = |y: f32| {
+        Rect::from_min_max(
+            pos2(rect.min.x + 14.0, y - 9.0),
+            pos2(track.min.x - 12.0, y + 9.0),
+        )
+    };
+    let title_color = if enabled { theme().fg } else { dim_text() };
+    let painter = ui.painter();
+    overlay::line_at(
+        painter,
+        line(rect.min.y + 19.0),
+        title,
+        medium(13.0),
+        title_color,
+    );
+    let small = FontId::proportional(11.5);
+    overlay::line_at(
+        painter,
+        line(rect.min.y + 38.0),
+        detail,
+        small,
+        faint_text(),
+    );
+    response.on_hover_cursor(if enabled {
+        CursorIcon::PointingHand
+    } else {
+        CursorIcon::NotAllowed
+    })
+}
+
+/// El campo de la ruta, con su ícono y un borde que se aclara con el foco.
+fn path_field(ui: &mut Ui, p: &mut Project, width: f32, asked: &mut Asked) {
+    let id = egui::Id::unique("proyecto-ruta");
+    let focused = ui.memory(|m| m.has_focus(id));
+    let focus = ui
+        .ctx()
+        .animate_bool_with_time(id.with("foco"), focused, 0.08);
+    egui::Frame::new()
+        .fill(tint(0.028))
+        .stroke(Stroke::new(1.0, tint(0.14 + 0.22 * focus)))
+        .corner_radius(9.0)
+        .inner_margin(egui::Margin::symmetric(10, 7))
+        .show(ui, |ui| {
+            ui.set_width(width - 22.0);
+            // De izquierda a derecha aunque la fila venga de derecha a izquierda (ver `project_window`).
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let (icon, _) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::hover());
+                draw_icon_size(ui, Icon::Folder, icon.center(), dim_text(), 15.0);
+                let hint = RichText::new("Pega la ruta del repo o usa Examinar")
+                    .size(13.5)
+                    .color(faint_text());
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut p.path)
+                        .id(id)
+                        .hint_text(hint)
+                        .font(FontId::proportional(13.5))
+                        .frame(egui::Frame::NONE)
+                        .desired_width(f32::INFINITY),
+                );
+                if field.changed() {
+                    p.error = None;
+                }
+                // Enter o salir del campo: usar esa ruta si cambió. Vacío no es un error.
+                let typed = p.path.trim().to_string();
+                let current = p.dir.as_ref().map(|d| d.display().to_string());
+                if field.lost_focus() && !typed.is_empty() && current.as_deref() != Some(&typed) {
+                    let typed = PathBuf::from(typed);
+                    if typed.is_dir() {
+                        asked.chosen = Some(typed);
+                    } else {
+                        p.error = Some("Esa carpeta no existe.".into());
+                    }
+                }
+            });
+        });
+}
+
+/// Lo que se sabe de la carpeta elegida, debajo del campo.
+fn repo_status(ui: &mut Ui, p: &Project) {
+    match (&p.error, &p.repo) {
+        (Some(e), _) => note(ui, e, theme().ansi[1]),
+        (None, Some(Ok(root))) => {
+            let branch = (p.branch.as_deref()).map_or(String::new(), |b| format!(" · rama {b}"));
+            ui.horizontal(|ui| {
+                let (icon, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                draw_icon_size(ui, Icon::Check, icon.center(), dim_text(), 13.0);
+                let text = format!("Repo git {}{branch}", folder_name(root));
+                note(ui, &text, dim_text());
+            });
+        }
+        (None, Some(Err(_))) => note(
+            ui,
+            "No es un repo git: los agentes pueden trabajar ahí, pero sin rama nueva.",
+            theme().ansi[1],
+        ),
+        (None, None) => {}
+    }
 }
 
 impl Orion {
@@ -128,151 +353,231 @@ impl Orion {
             picked.len() > 1 || picked.first().is_some_and(|&c| self.default_worktree(c));
     }
 
-    /// Dibuja la ventana si está abierta. Devuelve lo que hay que abrir cuando aprietas "Abrir":
-    /// la carpeta, los agentes marcados y si van en worktree.
+    /// Para qué sirve un agente, en una línea (lo que sale debajo de su nombre).
+    fn about(&self, choice: AgentChoice) -> String {
+        match choice {
+            AgentChoice::Provider(i) => crate::agents::PROVIDERS[i].about.into(),
+            AgentChoice::Profile(i) => format!("Perfil · {}", self.settings.agents[i].command),
+        }
+    }
+
+    /// Por qué todavía no se puede abrir; None = se puede.
+    fn project_blocker(&self) -> Option<&'static str> {
+        let p = &self.project;
+        if p.dir.is_none() {
+            Some("Elige un repositorio")
+        } else if p.picked.is_empty() {
+            Some("Marca al menos un agente")
+        } else if p.worktree && !p.repo.as_ref().is_some_and(|r| r.is_ok()) {
+            Some("Para una rama nueva, la carpeta tiene que ser un repo git")
+        } else {
+            None
+        }
+    }
+
+    /// Dibuja la ventana (abierta, o terminando de cerrarse). Devuelve lo que hay que abrir cuando
+    /// aprietas "Abrir": la carpeta, los agentes marcados y si van en worktree.
     pub(super) fn project_window(
         &mut self,
         ctx: &egui::Context,
     ) -> Option<(PathBuf, Vec<AgentChoice>, bool)> {
-        if !self.project.open {
+        let open = self.project.open;
+        if !overlay::visible(ctx, "proyecto", open) {
             return None;
         }
-        let choices: Vec<(AgentChoice, String)> = self
+        let choices: Vec<(AgentChoice, String, String)> = self
             .agent_choices()
             .into_iter()
-            .map(|c| (c, c.name(&self.settings).to_string()))
+            .map(|c| (c, c.name(&self.settings).to_string(), self.about(c)))
             .collect();
-        let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-        let mut open = !escape;
-        let mut launch = false;
-        let mut chosen: Option<PathBuf> = None;
-        let start = self.project.dir.clone().unwrap_or_default();
-        let recents: Vec<PathBuf> = self
-            .saved
-            .iter()
-            .map(|s| s.dir.clone())
-            .filter(|d| Some(d) != self.project.dir.as_ref())
-            .take(6)
-            .collect();
-        egui::Window::new("Nuevo proyecto")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 48.0))
-            .min_width(480.0)
-            .max_width(480.0)
-            .show(ctx, |ui| {
-                ui.weak(
-                    "Un repo y uno o varios agentes, cada uno en su pestaña. \
-                     Con worktree, cada agente trabaja en su rama.",
-                );
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Elegir repo…").clicked() {
-                        let dialog = rfd::FileDialog::new();
-                        let dialog = if start.is_dir() {
-                            dialog.set_directory(&start)
-                        } else {
-                            dialog
-                        };
-                        chosen = dialog.pick_folder();
-                    }
-                    let field = egui::TextEdit::singleline(&mut self.project.path)
-                        .hint_text("o pega la ruta del repo")
-                        .desired_width(ui.available_width());
-                    let field = ui.add(field);
-                    // Enter o salir del campo: usar esa ruta si cambió.
-                    let current = self.project.dir.as_ref().map(|d| d.display().to_string());
-                    if field.lost_focus() && current.as_deref() != Some(self.project.path.trim()) {
-                        let typed = PathBuf::from(self.project.path.trim());
-                        if typed.is_dir() {
-                            chosen = Some(typed);
-                        } else {
-                            self.project.error = Some("Esa carpeta no existe.".into());
-                        }
-                    }
-                });
-                chips(ui, "Recientes", &recents, &mut chosen);
-                chips(
-                    ui,
-                    "Junto a este repo",
-                    &self.project.siblings.clone(),
-                    &mut chosen,
-                );
-                if let Some(Err(e)) = &self.project.repo {
-                    ui.colored_label(theme().ansi[1], format!("No es un repo git: {e}"));
-                }
-                ui.add_space(6.0);
-                ui.label("Agentes (marca uno o varios)");
-                let mut toggled = false;
-                ui.horizontal_wrapped(|ui| {
-                    for (_, name) in &choices {
-                        let on = self.project.picked.contains(name);
-                        if ui.selectable_label(on, name.as_str()).clicked() {
-                            if on {
-                                self.project.picked.retain(|n| n != name);
-                            } else {
-                                self.project.picked.push(name.clone());
-                            }
-                            toggled = true;
-                        }
-                    }
-                });
-                if toggled {
-                    self.refresh_worktree();
-                }
-                let several = self.project.picked.len() > 1;
-                let text = if several {
-                    "Cada agente en su propio worktree y rama nueva (orion/…)"
-                } else {
-                    "Crear un git worktree y una rama nueva (orion/…)"
-                };
-                ui.add_enabled(
-                    !several,
-                    egui::Checkbox::new(&mut self.project.worktree, text),
-                );
-                if self.project.worktree
-                    && let Some(Ok(root)) = &self.project.repo
-                {
-                    ui.weak(format!("Ramas nuevas en {}", root.display()));
-                }
-                if let Some(e) = &self.project.error {
-                    ui.colored_label(theme().ansi[1], e);
-                }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    let repo_ok = !self.project.worktree
-                        || self.project.repo.as_ref().is_some_and(|r| r.is_ok());
-                    let ready =
-                        self.project.dir.is_some() && repo_ok && !self.project.picked.is_empty();
-                    let label = match self.project.picked.len() {
-                        0 | 1 => "Abrir proyecto".to_string(),
-                        n => format!("Abrir {n} agentes"),
-                    };
-                    if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
-                        launch = true;
-                    }
-                    if choices.is_empty() {
-                        ui.weak("No hay agentes instalados ni perfiles en config.toml.");
-                    }
-                });
+        let recents: Vec<PathBuf> = self.saved.iter().map(|s| s.dir.clone()).take(6).collect();
+        let blocker = self.project_blocker();
+        let mut asked = Asked::default();
+        if open && !egui::Popup::is_any_open(ctx) {
+            ctx.input_mut(|i| {
+                asked.close = i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+                asked.launch = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter);
             });
-        self.project.open = open;
-        if let Some(dir) = chosen {
+        }
+
+        let p = &mut self.project;
+        let shown = overlay::show(ctx, "proyecto", open, WIDTH, 0.07, |ui| {
+            header(ui, &mut asked);
+            overlay::divider(ui);
+            egui::Frame::new().inner_margin(PAD).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+
+                section(ui, "Repositorio", "la carpeta donde trabajarán");
+                // El botón primero, desde la derecha: el campo ocupa justo lo que queda. La fila tiene
+                // alto fijo: sin él, centrar en vertical estira el panel hasta el fondo de la ventana.
+                let row = vec2(ui.available_width(), 36.0);
+                let layout = egui::Layout::right_to_left(egui::Align::Center);
+                ui.allocate_ui_with_layout(row, layout, |ui| {
+                    if Button::new("Examinar…", Kind::Secondary).show(ui).clicked() {
+                        asked.browse = true;
+                    }
+                    let width = ui.available_width();
+                    path_field(ui, p, width, &mut asked);
+                });
+                repo_status(ui, p);
+                folder_chips(ui, "Recientes", &recents, p.dir.as_ref(), &mut asked);
+                folder_chips(ui, "Junto a este repo", &p.siblings, p.dir.as_ref(), &mut asked);
+
+                section(ui, "Agentes", "marca uno o varios; cada uno abre su pestaña");
+                if choices.is_empty() {
+                    note(
+                        ui,
+                        "No encuentro agentes instalados (Claude Code, Codex, Gemini…) ni perfiles \
+                         [[agent]] en config.toml.",
+                        dim_text(),
+                    );
+                }
+                let gap = 8.0;
+                let width = (ui.available_width() - gap) / 2.0;
+                for pair in choices.chunks(2) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = gap;
+                        for (_, name, about) in pair {
+                            let on = p.picked.contains(name);
+                            if agent_card(ui, name, about, on, width).clicked() {
+                                asked.toggle = Some(name.clone());
+                            }
+                        }
+                    });
+                }
+
+                section(ui, "Rama", "");
+                let several = p.picked.len() > 1;
+                let detail = if several {
+                    "Con varios agentes, cada uno trabaja en su propia rama orion/… para no pisarse"
+                } else {
+                    "Crea un git worktree en .orion/worktrees y una rama orion/…; tu carpeta no se toca"
+                };
+                let title = "Trabajar en una rama nueva";
+                if switch_row(ui, title, detail, p.worktree, !several).clicked() {
+                    asked.worktree = Some(!p.worktree);
+                }
+            });
+            overlay::divider(ui);
+            footer(ui, p.picked.len(), blocker, &mut asked);
+        })?;
+
+        if !open {
+            return None;
+        }
+        if shown.clicked_outside {
+            asked.close = true;
+        }
+        self.apply_asked(asked, &choices)
+    }
+
+    /// Aplica lo pedido en la ventana. Devuelve lo que hay que abrir, si se apretó "Abrir".
+    fn apply_asked(
+        &mut self,
+        mut asked: Asked,
+        choices: &[(AgentChoice, String, String)],
+    ) -> Option<(PathBuf, Vec<AgentChoice>, bool)> {
+        if asked.close {
+            self.project.open = false;
+            return None;
+        }
+        if asked.browse {
+            let start = self.project.dir.clone().unwrap_or_default();
+            let dialog = rfd::FileDialog::new();
+            let dialog = if start.is_dir() {
+                dialog.set_directory(&start)
+            } else {
+                dialog
+            };
+            asked.chosen = dialog.pick_folder().or(asked.chosen);
+        }
+        if let Some(dir) = asked.chosen {
             self.project.set_dir(dir);
             self.refresh_worktree();
         }
-        if !launch {
+        if let Some(name) = asked.toggle {
+            let picked = &mut self.project.picked;
+            if picked.contains(&name) {
+                picked.retain(|n| n != &name);
+            } else {
+                picked.push(name);
+            }
+            self.refresh_worktree();
+        }
+        if let Some(on) = asked.worktree {
+            self.project.worktree = on;
+        }
+        if !asked.launch || self.project_blocker().is_some() {
             return None;
         }
         let dir = self.project.dir.clone()?;
-        let picks: Vec<AgentChoice> = choices
-            .iter()
-            .filter(|(_, name)| self.project.picked.contains(name))
-            .map(|(c, _)| *c)
+        let picks: Vec<AgentChoice> = (choices.iter())
+            .filter(|(_, name, _)| self.project.picked.contains(name))
+            .map(|(c, ..)| *c)
             .collect();
+        self.project.open = false;
         (!picks.is_empty()).then_some((dir, picks, self.project.worktree))
     }
+}
+
+fn header(ui: &mut Ui, asked: &mut Asked) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 62.0), Sense::hover());
+    let tile = Rect::from_center_size(pos2(rect.min.x + 36.0, rect.center().y), vec2(34.0, 34.0));
+    let stroke = Stroke::new(1.0, tint(0.16));
+    ui.painter()
+        .rect(tile, 9.0, tint(0.08), stroke, StrokeKind::Inside);
+    draw_icon_size(ui, Icon::Folder, tile.center(), theme().fg, 18.0);
+    let text = |y: f32| {
+        Rect::from_min_max(
+            pos2(tile.max.x + 12.0, y - 9.0),
+            pos2(rect.max.x - 60.0, y + 9.0),
+        )
+    };
+    let painter = ui.painter();
+    let title = text(rect.center().y - 9.0);
+    overlay::line_at(painter, title, "Nuevo proyecto", medium(15.5), theme().fg);
+    overlay::line_at(
+        painter,
+        text(rect.center().y + 10.0),
+        "Un repo y los agentes que trabajarán en él, cada uno en su pestaña",
+        FontId::proportional(12.0),
+        dim_text(),
+    );
+    let close = Rect::from_center_size(pos2(rect.max.x - 28.0, rect.center().y), vec2(28.0, 28.0));
+    let mut corner = ui.new_child(egui::UiBuilder::new().max_rect(close));
+    if overlay::icon_button(&mut corner, Icon::Close, "Cerrar (Esc)").clicked() {
+        asked.close = true;
+    }
+}
+
+fn footer(ui: &mut Ui, picked: usize, blocker: Option<&str>, asked: &mut Asked) {
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(PAD, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.set_height(34.0);
+                overlay::keys(ui, "Esc");
+                note(ui, "Cerrar", faint_text());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let text = match picked {
+                        0 | 1 => "Abrir proyecto".to_string(),
+                        n => format!("Abrir {n} agentes"),
+                    };
+                    let button = Button::new(&text, Kind::Primary)
+                        .keys(keys!("+Enter"))
+                        .enabled(blocker.is_none())
+                        .show(ui);
+                    if button.clicked() {
+                        asked.launch = true;
+                    }
+                    if let Some(why) = blocker {
+                        note(ui, why, faint_text());
+                    }
+                });
+            });
+        });
 }
 
 #[cfg(test)]
