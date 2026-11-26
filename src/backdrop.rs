@@ -235,23 +235,6 @@ impl Window {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn backdrop_names() {
-        assert_eq!(find_backdrop("mica"), Some(Backdrop::Mica));
-        assert_eq!(find_backdrop("Acrilico"), Some(Backdrop::Acrylic)); // sin tilde también
-        assert_eq!(find_backdrop("ninguno"), Some(Backdrop::None));
-        assert_eq!(find_backdrop("vidrio"), None);
-        assert_eq!(Backdrop::None.alpha(), 255); // sin material, el fondo es opaco como siempre
-        // Con material, más transparente que sin él, y el acrílico más que Mica.
-        assert!(Backdrop::Acrylic.alpha() < Backdrop::Mica.alpha());
-        assert!(Backdrop::Mica.alpha() < 255);
-    }
-}
-
 #[cfg(windows)]
 #[link(name = "gdi32")]
 unsafe extern "system" {
@@ -302,3 +285,20 @@ pub(crate) fn clear_gdi_layer(window: Window) {
 
 #[cfg(not(windows))]
 pub(crate) fn clear_gdi_layer(_window: Window) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backdrop_names() {
+        assert_eq!(find_backdrop("mica"), Some(Backdrop::Mica));
+        assert_eq!(find_backdrop("Acrilico"), Some(Backdrop::Acrylic)); // sin tilde también
+        assert_eq!(find_backdrop("ninguno"), Some(Backdrop::None));
+        assert_eq!(find_backdrop("vidrio"), None);
+        assert_eq!(Backdrop::None.alpha(), 255); // sin material, el fondo es opaco como siempre
+        // Con material, más transparente que sin él, y el acrílico más que Mica.
+        assert!(Backdrop::Acrylic.alpha() < Backdrop::Mica.alpha());
+        assert!(Backdrop::Mica.alpha() < 255);
+    }
+}
