@@ -617,6 +617,12 @@ pub fn tracking(repo: &Path) -> Result<HashMap<String, (u32, u32)>, String> {
 /// Abre un pull request de la rama actual con `gh`; devuelve su URL.
 pub fn create_pr(repo: &Path, title: &str, body: &str, base: &str) -> Result<String, String> {
     check(&[base])?;
+    // Sin un `origin` de GitHub no hay PR que crear. Fallar acá es inmediato y evita que `gh`
+    // tarde (o se quede esperando red) para terminar diciendo lo mismo.
+    let origin = read(repo, &["remote", "get-url", "origin"]).unwrap_or_default();
+    if github_slug(origin.trim()).is_none() {
+        return Err("origin no es un repo de GitHub".into());
+    }
     let mut cmd = crate::update::quiet("gh");
     cmd.current_dir(repo)
         .args(["pr", "create"])
@@ -1130,5 +1136,12 @@ mod tests {
         assert_eq!(url("ssh://git@github.com/o/r"), expected);
         assert_eq!(url("https://gitlab.com/o/r.git"), None);
         assert_eq!(url("git@example.com:o/r.git"), None);
+    }
+
+    #[test]
+    fn create_pr_necesita_un_origin_de_github() {
+        let (_temp, repo) = temp_repo("pr-origin");
+        let err = create_pr(&repo, "Título", "Cuerpo", "main").unwrap_err();
+        assert!(err.contains("GitHub"), "{err}");
     }
 }

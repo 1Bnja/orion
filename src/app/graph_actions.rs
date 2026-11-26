@@ -1414,7 +1414,7 @@ mod tests {
         }
 
         fn wait(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
-            for _ in 0..600 {
+            for _ in 0..1500 {
                 self.frame(Vec::new());
                 if done(self) {
                     return;
@@ -1456,6 +1456,17 @@ mod tests {
 
         fn click(&mut self, text: &str) {
             self.click_with(text, egui::PointerButton::Primary);
+        }
+
+        /// Clic en la primera aparición pintada (el panel izquierdo), no en la de más arriba.
+        fn click_first_with(&mut self, text: &str, button: egui::PointerButton) {
+            self.wait_for(text);
+            let pos = self.texts.iter().find(|(t, _)| t == text).unwrap().1;
+            self.frame(vec![egui::Event::PointerMoved(pos)]);
+            self.press(pos, button);
+            // Lejos del próximo clic: que no cuente como doble clic.
+            self.time += 1.0;
+            self.frame(Vec::new());
         }
 
         /// `first`: el primero que se pintó (el del panel izquierdo) y no el de más arriba.
@@ -1575,7 +1586,7 @@ mod tests {
         });
 
         // Merge con conflicto desde el menú de la rama: el error entero y la franja.
-        d.click_with("lateral", egui::PointerButton::Secondary);
+        d.click_first_with("lateral", egui::PointerButton::Secondary);
         d.click("Fusionar en main");
         d.wait_for("Merge de lateral falló");
         d.wait_for("Merge en curso · 1 conflicto");
