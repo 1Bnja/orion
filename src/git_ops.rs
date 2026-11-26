@@ -210,6 +210,105 @@ fn in_progress(repo: &Path) -> Result<Option<InProgress>, String> {
     .map(|(_, op)| op))
 }
 
+/// Más líneas que estas no se muestran: un diff enorme no se lee y pesa en cada frame.
+pub const MAX_DIFF_LINES: usize = 20_000;
+
+/// Los cambios sin commitear de un archivo, tal cual los da git (sin recortar, para poder
+/// aplicarlos por bloques): lo preparado (`staged`) o lo que falta preparar. De un archivo
+/// sin rastrear se muestra todo su contenido como agregado; de un binario, nada.
+pub fn wip_diff(repo: &Path, path: &str, staged: bool) -> Result<String, String> {
+    let spec = pathspec(path);
+    // La configuración del usuario no puede cambiar el formato: `git apply` lo necesita así.
+    let mut args = vec![
+        "--no-optional-locks",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+    ];
+    if staged {
+        args.push("--cached");
+    }
+    args.extend(["--", &spec]);
+    let diff = read(repo, &args)?;
+    if !diff.is_empty() || staged {
+        return Ok(diff);
+    }
+    let others = [
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        &spec,
+    ];
+    if read(repo, &others)?.is_empty() {
+        return Ok(diff);
+    }
+    let root = read(repo, &["rev-parse", "--show-toplevel"])?;
+    let file = Path::new(root.trim_end_matches(['\r', '\n'])).join(path);
+    // ponytail: se lee a lo sumo 2 MB; más que eso no entra en `MAX_DIFF_LINES`.
+    let mut bytes = Vec::new();
+    std::fs::File::open(&file)
+        .and_then(|f| std::io::Read::read_to_end(&mut std::io::Read::take(f, 2 << 20), &mut bytes))
+        .map_err(|e| format!("no pude leer {}: {e}", file.display()))?;
+    if bytes.contains(&0) {
+        return Ok(String::new());
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let added: String = text.lines().map(|line| format!("+{line}\n")).collect();
+    Ok(format!("@@ archivo nuevo @@\n{added}"))
+}
+
+/// El parche de un solo bloque de `diff` (el de un archivo): su cabecera y el bloque que
+/// empieza en la línea `start`. None si ahí no empieza un bloque que se pueda aplicar.
+pub fn hunk_patch(diff: &[String], start: usize) -> Option<String> {
+    let first = diff.iter().position(|line| line.starts_with("@@"))?;
+    // Sin cabecera (archivo nuevo) o con `@@@` (conflicto) no hay parche que aplicar.
+    if first == 0 || !diff.get(start)?.starts_with("@@ ") {
+        return None;
+    }
+    let end = diff[start + 1..]
+        .iter()
+        .position(|line| line.starts_with("@@"))
+        .map_or(diff.len(), |n| start + 1 + n);
+    let lines = diff[..first].iter().chain(&diff[start..end]);
+    Some(lines.map(|line| format!("{line}\n")).collect())
+}
+
+/// Prepara un bloque (`hunk_patch`) o, con `reverse`, lo quita de lo preparado. El árbol de
+/// trabajo no se toca.
+pub fn apply_hunk(repo: &Path, patch: &str, reverse: bool) -> Result<String, String> {
+    let mut args = vec!["apply", "--cached", "--whitespace=nowarn"];
+    if reverse {
+        args.push("--reverse");
+    }
+    args.push("-");
+    let mut cmd = command(repo, &args);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let error = |e: std::io::Error| format!("no pude ejecutar git ({e})");
+    let mut child = cmd.spawn().map_err(error)?;
+    // Soltar el stdin al terminar de escribir es lo que le dice a git que no hay más.
+    if let Some(mut stdin) = child.stdin.take() {
+        std::io::Write::write_all(&mut stdin, patch.as_bytes()).map_err(error)?;
+    }
+    let out = child.wait_with_output().map_err(error)?;
+    let message = join(
+        &String::from_utf8_lossy(&out.stdout),
+        &String::from_utf8_lossy(&out.stderr),
+    );
+    if out.status.success() {
+        Ok(message)
+    } else {
+        Err(message)
+    }
+}
+
 pub fn stage(repo: &Path, paths: &[String]) -> Result<String, String> {
     run_paths(repo, &["add", "-A"], paths)
 }
@@ -731,6 +830,63 @@ mod tests {
             assert!(create_branch(&repo, bad, "main", false).is_err());
             assert!(delete_branch(&repo, bad, true).is_err());
         }
+    }
+
+    #[test]
+    fn diffs_separados_y_preparar_por_bloques() {
+        let (_temp, repo) = temp_repo("hunks");
+        let lines = |changed: &[usize]| -> String {
+            (1..=30)
+                .map(|n| match changed.contains(&n) {
+                    true => format!("linea {n} cambiada\n"),
+                    false => format!("linea {n}\n"),
+                })
+                .collect()
+        };
+        write(&repo, "largo.txt", &lines(&[]));
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "largo"]);
+        // Dos cambios lejos uno del otro: dos bloques.
+        write(&repo, "largo.txt", &lines(&[2, 25]));
+
+        let split = |text: String| -> Vec<String> {
+            text.split_terminator('\n').map(String::from).collect()
+        };
+        let diff = |staged| split(wip_diff(&repo, "largo.txt", staged).unwrap());
+        let hunks = |diff: &[String]| -> Vec<usize> {
+            (0..diff.len())
+                .filter(|&i| diff[i].starts_with("@@ "))
+                .collect()
+        };
+        let unstaged = diff(false);
+        assert_eq!(hunks(&unstaged).len(), 2);
+        assert!(diff(true).is_empty());
+        assert!(hunk_patch(&unstaged, 0).is_none()); // la cabecera no es un bloque
+
+        // Preparar solo el segundo.
+        let patch = hunk_patch(&unstaged, hunks(&unstaged)[1]).unwrap();
+        apply_hunk(&repo, &patch, false).unwrap();
+        let (staged, left) = (diff(true), diff(false));
+        assert!(staged.iter().any(|l| l == "+linea 25 cambiada"));
+        assert!(!staged.iter().any(|l| l == "+linea 2 cambiada"));
+        assert!(left.iter().any(|l| l == "+linea 2 cambiada"));
+        assert!(!left.iter().any(|l| l == "+linea 25 cambiada"));
+        // Aplicarlo otra vez ya no calza: error, sin tocar nada.
+        assert!(apply_hunk(&repo, &patch, false).is_err());
+
+        // Quitarlo: vuelve a estar solo en el árbol de trabajo, que nunca cambió.
+        let patch = hunk_patch(&staged, hunks(&staged)[0]).unwrap();
+        apply_hunk(&repo, &patch, true).unwrap();
+        assert!(diff(true).is_empty());
+        assert_eq!(text(&repo, "largo.txt"), lines(&[2, 25]));
+
+        // Sin rastrear: se ve entero y no se aplica por bloques. Binario: nada.
+        write(&repo, "nuevo.txt", "uno\ndos\n");
+        let new = split(wip_diff(&repo, "nuevo.txt", false).unwrap());
+        assert_eq!(new, ["@@ archivo nuevo @@", "+uno", "+dos"]);
+        assert!(hunk_patch(&new, 0).is_none());
+        std::fs::write(repo.join("n.bin"), [1u8, 0, 2]).unwrap();
+        assert_eq!(wip_diff(&repo, "n.bin", false).unwrap(), "");
     }
 
     #[test]

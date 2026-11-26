@@ -627,9 +627,27 @@ impl Actions {
             });
     }
 
+    /// Prepara un bloque de un diff, o con `reverse` lo quita de lo preparado.
+    pub(super) fn apply_hunk(&mut self, ctx: &egui::Context, patch: String, reverse: bool) {
+        let what = if reverse {
+            "Quitar bloque"
+        } else {
+            "Preparar bloque"
+        };
+        self.run(ctx, what, move |r| git_ops::apply_hunk(r, &patch, reverse));
+    }
+
+    pub(super) fn busy(&self) -> bool {
+        !self.idle()
+    }
+
     /// El panel derecho del WIP: conflictos, sin preparar, preparados y el mensaje.
-    /// `open` = el archivo cuyo diff se ve. Devuelve el archivo pulsado.
-    pub(super) fn commit_panel(&mut self, ui: &mut egui::Ui, open: Option<&str>) -> Option<String> {
+    /// `open` = el archivo cuyo diff se ve: (si es lo preparado, ruta). Devuelve el pulsado.
+    pub(super) fn commit_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        open: Option<(bool, &str)>,
+    ) -> Option<(bool, String)> {
         let ctx = ui.ctx().clone();
         let idle = self.idle();
         // Antes de los campos de texto, para que el Enter no entre como salto de línea.
@@ -644,8 +662,9 @@ impl Actions {
                     path: path.clone(),
                     ..Default::default()
                 };
-                if file_row(ui, "conflicto", &file, open == Some(path), &[], false).0 {
-                    clicked = Some(path.clone());
+                let shown = open == Some((false, path.as_str()));
+                if file_row(ui, "conflicto", &file, shown, &[], false).0 {
+                    clicked = Some((false, path.clone()));
                 }
                 // Con `wrapped`, si el panel es angosto los botones bajan de línea en vez de
                 // ensanchar el panel.
@@ -686,14 +705,8 @@ impl Actions {
         }
         let buttons = [(Icon::Plus, "Preparar"), (Icon::Trash, "Descartar…")];
         for file in &status.unstaged {
-            let (row, button) = file_row(
-                ui,
-                "sin-preparar",
-                file,
-                open == Some(&file.path),
-                &buttons,
-                idle,
-            );
+            let shown = open == Some((false, file.path.as_str()));
+            let (row, button) = file_row(ui, "sin-preparar", file, shown, &buttons, idle);
             let paths = vec![file.path.clone()];
             match button {
                 Some(0) => self.run(&ctx, format!("Preparar {}", file.path), move |r| {
@@ -709,7 +722,7 @@ impl Actions {
                         job,
                     ));
                 }
-                None if row => clicked = Some(file.path.clone()),
+                None if row => clicked = Some((false, file.path.clone())),
                 None => {}
             }
         }
@@ -725,21 +738,16 @@ impl Actions {
             self.run(&ctx, "Quitar todo", move |r| git_ops::unstage(r, &paths));
         }
         for file in &status.staged {
-            let (row, button) = file_row(
-                ui,
-                "preparado",
-                file,
-                open == Some(&file.path),
-                &[(Icon::Close, "Quitar")],
-                idle,
-            );
+            let shown = open == Some((true, file.path.as_str()));
+            let buttons = [(Icon::Close, "Quitar")];
+            let (row, button) = file_row(ui, "preparado", file, shown, &buttons, idle);
             if button.is_some() {
                 let paths = vec![file.path.clone()];
                 self.run(&ctx, format!("Quitar {}", file.path), move |r| {
                     git_ops::unstage(r, &paths)
                 });
             } else if row {
-                clicked = Some(file.path.clone());
+                clicked = Some((true, file.path.clone()));
             }
         }
 
