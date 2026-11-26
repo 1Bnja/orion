@@ -21,6 +21,9 @@ toml = "1.2.1"
 # Decode the Tabler icon PNGs embedded at compile time.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Rasterize the home screen logo at the current display scale.
+resvg = { version = "0.50.0", default-features = false }
+
 # macOS: la barra de menú del sistema (la de la manzana), con las opciones de Orion.
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.21", default-features = false }
