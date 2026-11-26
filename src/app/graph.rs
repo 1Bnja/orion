@@ -2,6 +2,7 @@
 //! refs a la izquierda y, junto a ellas, las líneas del grafo.
 
 use super::chrome::{Icon, icon_text_button, label, medium, search_field, selectable_row, toggle};
+use super::graph_actions::{self, Actions, Target};
 use super::graph_panels::Panels;
 use crate::colors::theme;
 use crate::git_graph::{self, Commit, FileChange, Graph, Refs, Row};
@@ -367,7 +368,7 @@ impl GraphView {
     }
 
     /// La lista de commits. Con `more`, al final va «Cargar más»; devuelve true si se pulsó.
-    fn list(&mut self, ui: &mut egui::Ui, more: bool) -> bool {
+    fn list(&mut self, ui: &mut egui::Ui, more: bool, actions: &mut Actions) -> bool {
         if self.graph.commits.is_empty() {
             ui.weak("No hay commits que mostrar.");
             return false;
@@ -402,7 +403,7 @@ impl GraphView {
                         load_more = icon_text_button(ui, Icon::Plus, "Cargar más", true).clicked();
                     });
                 } else {
-                    self.row(ui, i, &needle, now, hovered);
+                    self.row(ui, i, &needle, now, hovered, actions);
                 }
             }
         });
@@ -412,12 +413,21 @@ impl GraphView {
         load_more
     }
 
-    fn row(&mut self, ui: &mut egui::Ui, i: usize, needle: &str, now: i64, hovered: Option<usize>) {
+    fn row(
+        &mut self,
+        ui: &mut egui::Ui,
+        i: usize,
+        needle: &str,
+        now: i64,
+        hovered: Option<usize>,
+        actions: &mut Actions,
+    ) {
         let selected = self.selected == Some(i);
         let (rect, response) = selectable_row(ui, ROW, selected);
         if response.clicked() {
             self.selected = Some(i);
         }
+        response.context_menu(|ui| actions.commit_menu(ui, &self.graph.commits[i].id));
         let lane = self.graph.rows[i].lane;
         if response.hovered() {
             self.hovered_lane = Some(lane);
@@ -455,20 +465,48 @@ impl GraphView {
                 (kind != RefKind::Remote || self.show_remotes)
                     && (kind != RefKind::Tag || self.show_tags)
             })
-            .map(|(kind, text)| chip(&painter, kind, text))
+            .map(|(kind, text)| (kind, text, chip(&painter, kind, text)))
             .collect();
         if !chips.is_empty() {
             let (left, end) = (rect.min.x + 4.0, graph_x - 4.0);
-            let total: f32 = chips.iter().map(|(width, _)| width + 4.0).sum::<f32>() - 4.0;
+            let total: f32 = chips
+                .iter()
+                .map(|(_, _, (width, _))| width + 4.0)
+                .sum::<f32>()
+                - 4.0;
             // La línea va antes que el nodo, que la tapa en la punta.
             painter.line_segment([pos2(end, y), center], Stroke::new(1.0, color));
             let clipped = painter.with_clip_rect(column(left, end).intersect(painter.clip_rect()));
             let mut x = (end - total).max(left);
-            for (width, mut shapes) in chips {
+            for (k, (kind, text, (width, mut shapes))) in chips.into_iter().enumerate() {
                 for shape in &mut shapes {
                     shape.translate(vec2(x, y));
                 }
                 clipped.extend(shapes);
+                // Cada chip responde al clic derecho (y el de una rama local, al doble clic).
+                let area = Rect::from_min_size(pos2(x, y - 9.0), vec2(width, 18.0))
+                    .intersect(column(left, end));
+                let target = match kind {
+                    RefKind::Head => text
+                        .strip_prefix("HEAD -> ")
+                        .map(|b| Target::Local(b.into())),
+                    RefKind::Orion | RefKind::Local => Some(Target::Local(text.into())),
+                    RefKind::Remote => Some(Target::Remote(text.into())),
+                    RefKind::Tag => Some(Target::Tag(text.into())),
+                };
+                if let Some(target) = target.filter(|_| area.is_positive()) {
+                    let chip =
+                        ui.interact(area, ui.make_persistent_id(("chip", i, k)), Sense::click());
+                    if chip.clicked() {
+                        self.selected = Some(i);
+                    }
+                    if let Target::Local(branch) = &target
+                        && chip.double_clicked()
+                    {
+                        actions.checkout(ui.ctx(), branch);
+                    }
+                    chip.context_menu(|ui| actions.ref_menu(ui, &target));
+                }
                 x += width + 4.0;
             }
         }
@@ -515,6 +553,8 @@ struct Loaded {
     graph: Graph,
     refs: Refs,
     wip: Vec<FileChange>,
+    /// Estado, tracking y último asunto, para las acciones.
+    state: graph_actions::State,
 }
 
 /// Una pestaña "Grafo": el grafo de un repo, leído con git en un hilo aparte.
@@ -530,6 +570,8 @@ pub(super) struct GraphTab {
     shown: bool,
     /// Los paneles de refs (izquierda) y detalle (derecha).
     panels: Panels,
+    /// Las acciones de git (barra, panel de commit, menús y diálogos).
+    actions: Actions,
     /// Cuántos commits se leen (crece con «Cargar más»).
     limit: usize,
     /// Solo los commits de esta rama; `None` = todas.
@@ -546,6 +588,7 @@ impl GraphTab {
     pub(super) fn new(repo: PathBuf) -> Self {
         Self {
             panels: Panels::new(repo.clone()),
+            actions: Actions::new(repo.clone()),
             repo,
             view: None,
             loading: None,
@@ -576,6 +619,7 @@ impl GraphTab {
                 // Sin refs o sin WIP el grafo igual sirve.
                 refs: git_graph::refs(&repo).unwrap_or_default(),
                 wip: git_graph::wip(&repo).unwrap_or_default(),
+                state: graph_actions::load(&repo),
             });
             let _ = tx.send(loaded);
             ctx.request_repaint(); // para que `poll` lo vea aunque nada más pase
@@ -597,6 +641,10 @@ impl GraphTab {
         }
         self.shown = shown;
         self.panels.poll();
+        // Terminó una operación de git: se recarga ya, aunque hubiera una carga en camino.
+        if self.actions.poll() {
+            self.restart(ctx);
+        }
 
         let result = self.loading.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(result) => Some(result),
@@ -609,6 +657,7 @@ impl GraphTab {
                 Ok(loaded) => {
                     self.error = None;
                     self.print = Some(loaded.print);
+                    self.actions.set_state(loaded.state, &loaded.refs);
                     self.panels.refs = loaded.refs;
                     self.panels.set_wip(loaded.wip);
                     match &mut self.view {
@@ -650,6 +699,11 @@ impl GraphTab {
         }
     }
 
+    /// La carpeta donde se pidió abrir una terminal (menú de un worktree), si alguna.
+    pub(super) fn take_terminal(&mut self) -> Option<PathBuf> {
+        self.actions.terminal.take()
+    }
+
     /// La segunda línea de su fila en la barra lateral.
     pub(super) fn detail(&self) -> String {
         match (&self.view, &self.error) {
@@ -674,13 +728,24 @@ impl GraphTab {
             }
             return;
         };
+        let selected = view.selected.map(|i| view.graph.commits[i].id.clone());
+        self.actions.bar(ui, selected.as_deref());
+        self.actions.messages(ui);
         let refresh = view.toolbar(ui, busy);
         ui.separator();
         // Los paneles van antes que la lista: así la lista ocupa lo que sobra.
-        let branch = self.panels.left(ui, view, self.branch.as_deref());
-        self.panels.right(ui, view);
+        let branch = self
+            .panels
+            .left(ui, view, self.branch.as_deref(), &mut self.actions);
+        self.panels.right(ui, view, &mut self.actions);
+        self.actions.conflict_band(ui);
         self.panels.header(ui, view);
-        let more = view.list(ui, view.graph.commits.len() >= self.limit);
+        let more = view.list(
+            ui,
+            view.graph.commits.len() >= self.limit,
+            &mut self.actions,
+        );
+        self.actions.dialogs(ui.ctx());
 
         let ctx = ui.ctx().clone();
         if let Some(branch) = branch {
@@ -842,7 +907,7 @@ pub(super) mod tests {
         let (mut refresh, mut more) = (true, true);
         let mut output = egui::Context::default().run_ui(Default::default(), |ui| {
             refresh = view.toolbar(ui, false);
-            more = view.list(ui, true);
+            more = view.list(ui, true, &mut Actions::new(PathBuf::from(".")));
         });
         assert!(!refresh && !more);
         // Los cambios de carril salen como curvas.
@@ -861,7 +926,7 @@ pub(super) mod tests {
     fn list_has_a_header_and_no_author_column() {
         let mut view = GraphView::new(sample());
         let mut output = egui::Context::default().run_ui(Default::default(), |ui| {
-            view.list(ui, false);
+            view.list(ui, false, &mut Actions::new(PathBuf::from(".")));
         });
         let texts: Vec<String> = output
             .shapes

@@ -25,6 +25,7 @@ macro_rules! keys {
 
 mod chrome;
 mod graph;
+mod graph_actions;
 mod graph_panels;
 mod home;
 #[cfg(target_os = "macos")]
@@ -1309,10 +1310,16 @@ impl eframe::App for Orion {
             }
         }
         // Pestañas Grafo: recoger lo que terminó, recargar la que vuelve a estar activa y vigilar el repo.
+        let mut terminals = Vec::new();
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             if let Content::Graph(graph) = &mut tab.content {
                 graph.poll(ctx, i == self.active);
+                terminals.extend(graph.take_terminal());
             }
+        }
+        // "Abrir una terminal aquí" en un worktree: igual que "Terminal en la carpeta del repo".
+        for dir in terminals {
+            self.launch_agent(ctx, Some(dir), "terminal", false, |_| String::new());
         }
         self.watch_config(ctx);
         self.collect_alerts(ctx);

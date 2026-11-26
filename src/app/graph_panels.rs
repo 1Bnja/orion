@@ -5,6 +5,7 @@ use super::chrome::{
     Icon, draw_icon, icon_button, icon_text_button, label, medium, section_header, selectable_row,
 };
 use super::graph::{GraphView, ROW, date_utc};
+use super::graph_actions::{Actions, Target, stash_index};
 use crate::colors::{surface, theme};
 use crate::git_graph::{self, Commit, Details, FileChange, RefItem, Refs};
 use eframe::egui::{self, FontId, RichText, Sense, pos2, vec2};
@@ -58,7 +59,7 @@ fn panel_frame() -> egui::Frame {
 }
 
 /// El ícono de un archivo según cómo cambió.
-fn change_icon(file: &FileChange, wip: bool) -> Icon {
+pub(super) fn change_icon(file: &FileChange, wip: bool) -> Icon {
     match (file.added, file.removed) {
         (Some(0), Some(removed)) if removed > 0 => Icon::FileMinus,
         (Some(added), Some(0)) if added > 0 => Icon::FilePlus,
@@ -200,6 +201,7 @@ impl Panels {
         ui: &mut egui::Ui,
         view: &mut GraphView,
         branch: Option<&str>,
+        actions: &mut Actions,
     ) -> Option<Option<String>> {
         let (mut change, mut clicked) = (None, None);
         egui::Panel::left("grafo-refs")
@@ -268,9 +270,31 @@ impl Panels {
                                     );
                                 }
                                 x += 18.0;
+                                // Junto a una rama local, cuánto va adelante y atrás de su upstream.
+                                let mut end = rect.max.x - 6.0;
+                                let track = (title == "Ramas")
+                                    .then(|| actions.tracking(&item.name))
+                                    .flatten()
+                                    .filter(|&(ahead, behind)| ahead + behind > 0);
+                                if let Some((ahead, behind)) = track {
+                                    let text = [(ahead, '↑'), (behind, '↓')]
+                                        .iter()
+                                        .filter(|(n, _)| *n > 0)
+                                        .map(|(n, arrow)| format!("{arrow}{n}"))
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
+                                    let drawn = ui.painter().text(
+                                        pos2(end, rect.center().y),
+                                        egui::Align2::RIGHT_CENTER,
+                                        text,
+                                        FontId::proportional(11.5),
+                                        theme().muted(),
+                                    );
+                                    end = drawn.min.x - 6.0;
+                                }
                                 let text_rect = egui::Rect::from_min_max(
                                     pos2(x, rect.min.y),
-                                    pos2(rect.max.x - 6.0, rect.max.y),
+                                    pos2(end, rect.max.y),
                                 );
                                 let (font, color) = if item.current {
                                     (medium(13.0), theme().fg)
@@ -283,14 +307,34 @@ impl Panels {
                                 if response.clicked() {
                                     clicked = Some(item.target.clone());
                                 }
-                                if branches {
-                                    response.context_menu(|ui| {
-                                        if ui.button("Solo esta rama").clicked() {
+                                let target = match title {
+                                    "Ramas" => Some(Target::Local(item.name.clone())),
+                                    "Remotas" => Some(Target::Remote(item.name.clone())),
+                                    "Tags" => Some(Target::Tag(item.name.clone())),
+                                    "Stashes" => stash_index(&item.name).map(Target::Stash),
+                                    _ => Some(Target::Worktree(PathBuf::from(&item.name))),
+                                };
+                                if title == "Ramas" && response.double_clicked() {
+                                    actions.checkout(ui.ctx(), &item.name);
+                                }
+                                response.context_menu(|ui| {
+                                    if branches {
+                                        let only = icon_text_button(
+                                            ui,
+                                            Icon::GitBranch,
+                                            "Solo esta rama",
+                                            true,
+                                        );
+                                        if only.clicked() {
                                             change = Some(Some(item.name.clone()));
                                             ui.close();
                                         }
-                                    });
-                                }
+                                        ui.separator();
+                                    }
+                                    if let Some(target) = &target {
+                                        actions.ref_menu(ui, target);
+                                    }
+                                });
                             }
                             if items.is_empty() {
                                 let (rect, _) = ui.allocate_exact_size(
@@ -315,7 +359,7 @@ impl Panels {
     }
 
     /// El panel del commit elegido o del WIP; si no hay ninguno, no se dibuja.
-    pub(super) fn right(&mut self, ui: &mut egui::Ui, view: &mut GraphView) {
+    pub(super) fn right(&mut self, ui: &mut egui::Ui, view: &mut GraphView, actions: &mut Actions) {
         if view.selected.is_some() {
             self.wip_open = false;
         }
@@ -356,24 +400,21 @@ impl Panels {
                     .show(ui, |ui| {
                         ui.add_space(6.0);
                         match &commit {
-                            Some(commit) => select = self.commit_info(ui, commit),
-                            None => {
-                                let (rect, _) = ui.allocate_exact_size(
-                                    vec2(ui.available_width(), 22.0),
-                                    Sense::hover(),
-                                );
-                                label(
-                                    ui.painter(),
-                                    rect,
-                                    "Cambios sin commitear",
-                                    medium(13.0),
-                                    theme().fg,
-                                );
+                            Some(commit) => {
+                                select = self.commit_info(ui, commit);
+                                ui.add_space(8.0);
+                                if let Some(files) = &files {
+                                    self.file_list(ui, &id, files);
+                                }
                             }
-                        }
-                        ui.add_space(8.0);
-                        if let Some(files) = &files {
-                            self.file_list(ui, &id, files);
+                            // El WIP: preparar, quitar, resolver conflictos y commitear.
+                            None => {
+                                let open = self.file.as_ref().map(|(_, path)| path.as_str());
+                                if let Some(path) = actions.commit_panel(ui, open) {
+                                    let same = open == Some(path.as_str());
+                                    self.file = (!same).then(|| (WIP.to_string(), path));
+                                }
+                            }
                         }
                     });
                 if let Some((_, path)) = self.file.clone() {
@@ -686,8 +727,9 @@ mod tests {
         panels.file = Some(key);
 
         let mut output = egui::Context::default().run_ui(Default::default(), |ui| {
-            assert_eq!(panels.left(ui, &mut view, Some("main")), None);
-            panels.right(ui, &mut view);
+            let mut actions = Actions::new(PathBuf::from("."));
+            assert_eq!(panels.left(ui, &mut view, Some("main"), &mut actions), None);
+            panels.right(ui, &mut view, &mut actions);
             panels.header(ui, &mut view);
         });
         let texts: Vec<String> = output
