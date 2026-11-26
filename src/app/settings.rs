@@ -100,6 +100,9 @@ impl Section {
                 "opencode",
                 "deepseek",
                 "modelo",
+            ],
+            Self::Avanzado => &[
+                "avanzado", "config", "config.toml", "archivo",
                 "motor",
                 "grafico",
                 "gpu",
@@ -107,9 +110,7 @@ impl Section {
                 "metal",
                 "vulkan",
                 "opengl",
-                "archivo",
             ],
-            Self::Avanzado => &["avanzado", "config", "config.toml", "archivo"],
         }
     }
 }

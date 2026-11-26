@@ -14,22 +14,16 @@ use std::sync::{Arc, Mutex};
 use crate::agents::{PROVIDERS, slug};
 use crate::config::{Executor, Settings};
 
-/// Quién planifica: el modelo más capaz, porque dividir bien la tarea es lo difícil.
-const PLANNER: &str = "claude-opus-5-5";
-
 /// Los ejecutores de Claude, siempre disponibles: id, para qué sirve (va en las instrucciones).
 const CLAUDE: [(&str, &str); 3] = [
     (
         "claude-opus-5-5",
-        "diseño, arquitectura o razonamiento difícil",
+        "Diseño, arquitectura y problemas difíciles",
     ),
-    (
-        "claude-sonnet-5-5",
-        "programar algo normal: una función, un arreglo, un test con lógica",
-    ),
+    ("claude-sonnet-5-5", "Funciones, arreglos y tests"),
     (
         "claude-haiku-5-5",
-        "tareas mecánicas: renombrar, formatear, documentar, cambios repetitivos",
+        "Cambios simples: renombrar, formatear y documentar",
     ),
 ];
 
@@ -120,37 +114,29 @@ fn installed(catalog: &[Executor]) -> Vec<Executor> {
         .collect()
 }
 
+/// Por qué un ejecutor no se puede usar (None = su programa está instalado).
+pub(crate) fn problem(e: &Executor) -> Option<String> {
+    use crate::agents::{Located, locate};
+    let program = e.command.split_whitespace().next().unwrap_or_default();
+    match locate(program) {
+        Some(Located::Ready(_)) => None,
+        Some(Located::Broken { missing }) => {
+            Some(format!("instalación rota (falta {})", missing.display()))
+        }
+        None => Some(format!("no encuentro `{program}`")),
+    }
+}
+
 /// Los ejecutores del catálogo que no se ofrecen, y por qué ("junie: no encuentro `junie`").
 pub(crate) fn unavailable(catalog: &[Executor]) -> Vec<String> {
-    use crate::agents::{Located, locate};
     catalog
         .iter()
-        .filter_map(|e| {
-            let program = e.command.split_whitespace().next().unwrap_or_default();
-            match locate(program) {
-                Some(Located::Ready(_)) => None,
-                Some(Located::Broken { missing }) => Some(format!(
-                    "{}: instalación rota (falta {})",
-                    e.id,
-                    missing.display()
-                )),
-                None => Some(format!("{}: no encuentro `{program}`", e.id)),
-            }
-        })
+        .filter_map(|e| Some(format!("{}: {}", e.id, problem(e)?)))
         .collect()
 }
 
 /// Más que esto ya no se puede seguir en pestañas (ni conviene gastar tanto de una vez).
 const MAX_SUBTASKS: usize = 6;
-
-/// Cómo se llama un ejecutor en la ventana: los de Claude, por su modelo ("claude-haiku-5-5" → "haiku");
-/// los demás, por su id.
-pub(crate) fn short_name(id: &str) -> &str {
-    match id.strip_prefix("claude-") {
-        Some(rest) => rest.split('-').next().unwrap_or(id),
-        None => id,
-    }
-}
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, PartialEq, Debug)]
 pub(crate) struct Subtask {
@@ -217,13 +203,14 @@ pub(crate) fn cancel(planner: &Planner) {
 pub(crate) fn plan(
     task: &str,
     dir: &Path,
+    model: &str,
     planner: &Planner,
     catalog: &[Executor],
 ) -> Result<(Vec<Subtask>, Vec<String>), String> {
     let executors = installed(catalog);
     let mut child = claude()?
         .current_dir(dir)
-        .args(["-p", "--model", PLANNER, "--output-format", "json"])
+        .args(["-p", "--model", model, "--output-format", "json"])
         .args(["--json-schema", &schema(&executors)])
         // Solo leer. Y sin MCP ni skills: cargarlos multiplica el contexto (y lo que cuesta) sin ayudar a planificar.
         .args(["--tools", "Read,Glob,Grep", "--strict-mcp-config"])
@@ -738,7 +725,6 @@ executor = "mi-agente --interactive {prompt}"
         let plan = parse_plan(&out, &legacy_catalog(&[])).unwrap();
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].title, "Tests");
-        assert_eq!(short_name(&plan[0].executor), "haiku");
     }
 
     #[test]
@@ -903,6 +889,7 @@ fn real_plan() {
     let (plan, offered) = plan(
         "Agrega un comentario de una línea arriba de fn main en src/main.rs",
         &dir,
+        "claude-opus-5-5",
         &Planner::default(),
         &catalog(&Settings::default()),
     )

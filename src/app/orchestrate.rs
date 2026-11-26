@@ -3,10 +3,12 @@
 //! Las que dependen de otras (`after`) esperan: arrancan, desde las ramas de aquellas, cuando sus
 //! agentes terminan (los cierras con /exit después de revisar) y dejaron commits.
 
+mod view;
+
+use super::overlay;
 use super::{AgentStatus, Orion, Tab};
-use crate::colors::theme;
 use crate::orchestrator::{
-    Dep, Gate, Planner, Subtask, agent_command, gate, has_commits, prepare_worktree, short_name,
+    Dep, Gate, Planner, Subtask, agent_command, gate, has_commits, prepare_worktree,
 };
 use eframe::egui;
 use std::collections::HashSet;
@@ -14,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use view::Intent;
 
 #[derive(Clone)]
 enum Step {
@@ -122,6 +125,14 @@ pub(super) struct Orchestrate {
     planner: Planner,
     /// El plan lanzado y cómo va cada subtarea; vacío = ninguno en curso.
     plan: Vec<(Subtask, Run)>,
+    /// Índice en `view::PLANNERS`: quién arma el plan.
+    planner_model: usize,
+    /// Los ejecutores que apagaste del equipo.
+    excluded: HashSet<String>,
+    /// La subtarea con el prompt desplegado.
+    expanded: Option<usize>,
+    /// Cuándo empezó la planificación en curso.
+    started: Option<Instant>,
     /// Un plan recuperado de la vez anterior no lanza nada hasta «Reanudar».
     paused: bool,
     /// Lo último guardado en orchestrate.json.
@@ -142,6 +153,10 @@ impl Default for Orchestrate {
             step: Arc::new(Mutex::new(Step::Writing)),
             planner: Planner::default(),
             plan: Vec::new(),
+            planner_model: 0,
+            excluded: HashSet::new(),
+            expanded: None,
+            started: None,
             paused: false,
             saved: Vec::new(),
             committed: HashSet::new(),
@@ -242,13 +257,6 @@ fn after_text(after: &[usize]) -> String {
     format!("después de {}", n.join(", "))
 }
 
-/// El atajo a Configuración → Agentes, para sumar ejecutores sin editar config.toml.
-fn add_agents_button(ui: &mut egui::Ui) -> bool {
-    ui.button("Agregar agentes…")
-        .on_hover_text("Abre Configuración en la sección Agentes")
-        .clicked()
-}
-
 impl Orion {
     /// Abre la ventana para la pestaña actual, que tiene que estar dentro de un repo git.
     pub(super) fn open_orchestrate(&mut self) {
@@ -276,288 +284,149 @@ impl Orion {
 
     /// Dibuja la ventana si está abierta. Devuelve el plan cuando aprietas "Lanzar".
     pub(super) fn orchestrate_window(&mut self, ctx: &egui::Context) -> Option<Vec<Subtask>> {
+        let open = self.orchestrate.open;
+        if !overlay::visible(ctx, "orquestador", open) {
+            return None;
+        }
+        let catalog = crate::orchestrator::catalog(&self.settings);
+        let team: Vec<view::Member> = (catalog.iter())
+            .map(|e| (e.clone(), crate::orchestrator::problem(e)))
+            .collect();
         let o = &mut self.orchestrate;
-        if !o.open {
-            return None;
-        }
-        let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        // Con un menú abierto, Escape es para él.
+        let escape = open
+            && !egui::Popup::is_any_open(ctx)
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         let step = o.step();
-        let (mut plan_now, mut launch, mut back, mut forget) = (false, false, false, false);
-        let mut add_agents = false;
-        // Elegiste otro ejecutor para una subtarea: (índice, id).
-        let mut pick: Option<(usize, String)> = None;
-        // Diste por terminada a mano la subtarea con ese índice.
-        let mut finish: Option<usize> = None;
-        // Pediste reintentar la subtarea con ese índice.
-        let mut retry: Option<usize> = None;
-        let (mut resume, mut clean) = (false, false);
-        let mut open = !escape;
-        let model = |s: &Subtask| {
-            egui::RichText::new(short_name(&s.executor))
-                .monospace()
-                .color(theme().ansi[4])
-        };
-        egui::Window::new("Orquestar tarea con agentes")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 48.0))
-            .min_width(480.0)
-            .max_width(480.0)
-            .show(ctx, |ui| {
-                ui.weak(format!("Repo: {}", o.dir.display()));
-                ui.add_space(4.0);
-                if !o.plan.is_empty() {
-                    for (i, (s, run)) in o.plan.iter().enumerate() {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.weak(format!("{}.", i + 1));
-                            ui.label(model(s));
-                            ui.label(&s.title).on_hover_text(&s.prompt);
-                            let (text, bad) = run.label(&s.title);
-                            let color = match (bad, run) {
-                                (true, _) => theme().ansi[1],
-                                (false, Run::Done { .. }) => theme().ansi[2],
-                                _ => ui.visuals().weak_text_color(),
-                            };
-                            ui.colored_label(color, text);
-                            if let Run::Working { branch, .. } = run
-                                && o.committed.contains(branch)
-                            {
-                                ui.colored_label(theme().ansi[3], "ya hizo commit")
-                                    .on_hover_text(
-                                        "Si ya terminó, ciérrala con /exit o con «Ya terminó»",
-                                    );
-                            }
-                            // Plan B si la shell no avisa cuándo termina el agente (cmd, WSL).
-                            if matches!(run, Run::Working { .. })
-                                && ui
-                                    .small_button("Ya terminó")
-                                    .on_hover_text(
-                                        "Darla por terminada: las que dependen de ella \
-                                         arrancan si dejó commits en su rama",
-                                    )
-                                    .clicked()
-                            {
-                                finish = Some(i);
-                            }
-                            if run.can_retry()
-                                && ui
-                                    .small_button("Reintentar")
-                                    .on_hover_text(
-                                        "Una bloqueada vuelve a esperar a sus dependencias; una \
-                                         que terminó mal se da por buena y se vuelve a mirar si \
-                                         su rama tiene commits",
-                                    )
-                                    .clicked()
-                            {
-                                retry = Some(i);
-                            }
-                        });
-                    }
-                    ui.weak(
-                        "Revisa lo que hizo cada agente y ciérralo con /exit: las subtareas que \
-                         dependen de él arrancan desde su rama si dejó commits.",
-                    );
-                    if o.paused {
-                        ui.colored_label(
-                            theme().ansi[3],
-                            "Plan recuperado de la vez anterior, en pausa. Usa «Reintentar» en \
-                             las subtareas que ya hicieron su commit y después «Reanudar».",
-                        );
-                        resume = ui
-                            .button("Reanudar")
-                            .on_hover_text("Vuelve a lanzar las que esperan, si pueden arrancar")
-                            .clicked();
-                    }
-                    if o.plan.iter().all(|(_, run)| run.succeeded()) {
-                        clean = ui
-                            .button("Limpiar worktrees")
-                            .on_hover_text(
-                                "Borra los worktrees de Orion que ninguna pestaña usa y no \
-                                 tienen cambios sin guardar; sus ramas, solo si ya se fusionaron",
-                            )
-                            .clicked();
-                    }
-                    forget = ui
-                        .button("Olvidar el plan")
-                        .on_hover_text("Las pestañas y ramas quedan; solo deja de lanzar las que faltan")
-                        .clicked();
-                    return;
-                }
-                match &step {
-                    Step::Writing => {
-                        let edit = egui::TextEdit::multiline(&mut o.task)
-                            .hint_text("¿Qué hay que hacer? Claude Code lo divide en subtareas, \
-                                        elige un modelo para cada una y abre un agente por subtarea, \
-                                        cada uno en su propia rama.")
-                            .desired_rows(5)
-                            .desired_width(f32::INFINITY);
-                        ui.add(edit).request_focus();
-                        let enter = ui.input_mut(|i| {
-                            i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)
-                        });
-                        ui.horizontal(|ui| {
-                            let ready = !o.task.trim().is_empty();
-                            let button = ui.add_enabled(ready, egui::Button::new("Planificar"));
-                            plan_now = ready && (button.clicked() || enter);
-                            ui.weak(keys!("+Enter"));
-                            add_agents = add_agents_button(ui);
-                        });
-                    }
-                    Step::Planning => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Claude Code está leyendo el repo y planificando…");
-                        });
-                        ui.weak("Puede tardar un par de minutos. Puedes cerrar esta ventana y volver.");
-                        back = ui.button("Cancelar").clicked();
-                    }
-                    Step::Ready(subtasks, offered, note) => {
-                        for (i, s) in subtasks.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.weak(format!("{}.", i + 1));
-                                // La recomendación del plan, cambiable por otro ejecutor instalado.
-                                egui::ComboBox::from_id_salt(("ejecutor", i))
-                                    .selected_text(model(s))
-                                    .show_ui(ui, |ui| {
-                                        for id in offered {
-                                            let on = *id == s.executor;
-                                            if ui.selectable_label(on, short_name(id)).clicked() {
-                                                pick = Some((i, id.clone()));
-                                            }
-                                        }
-                                    })
-                                    .response
-                                    .on_hover_text("Ejecutor de esta subtarea");
-                                ui.label(&s.title).on_hover_text(&s.prompt);
-                                if !s.after.is_empty() {
-                                    ui.weak(after_text(&s.after));
-                                }
-                            });
-                        }
-                        ui.weak("Pasa el mouse por una subtarea para ver su prompt.");
-                        ui.weak(note);
-                        if subtasks.iter().any(|s| !s.after.is_empty()) {
-                            ui.weak(
-                                "Las que van «después de» otra arrancan cuando cierres esa \
-                                 (con /exit) y haya hecho commit.",
-                            );
-                        }
-                        ui.horizontal(|ui| {
-                            let n = subtasks.len();
-                            let text = if n == 1 {
-                                "Lanzar 1 agente".into()
-                            } else {
-                                format!("Lanzar {n} agentes")
-                            };
-                            launch = ui.button(text).clicked();
-                            back = ui.button("Volver").clicked();
-                            add_agents = add_agents_button(ui);
-                        });
-                    }
-                    Step::Failed(e) => {
-                        ui.colored_label(theme().ansi[1], e);
-                        back = ui.button("Volver").clicked();
-                    }
-                }
-            });
-        o.open = open;
-        if add_agents {
-            // La tarea y el plan se conservan: al volver a Orquestar siguen ahí.
-            o.open = false;
-            self.open_agents_settings(ctx);
+        let mut intents = Vec::new();
+        let shown = overlay::show(ctx, "orquestador", open, view::WIDTH, 0.045, |ui| {
+            view::panel(ui, o, &step, &team, &mut intents);
+        })?;
+        // Saliendo: se ve, pero ya no hace nada.
+        if !open {
             return None;
         }
-        if let Some((i, id)) = pick
-            && let Step::Ready(subtasks, ..) = &mut *o.step.lock().unwrap()
-            && let Some(s) = subtasks.get_mut(i)
-        {
-            s.executor = id;
+        if escape || shown.clicked_outside {
+            intents.push(Intent::Close);
         }
-        if let Some(i) = finish
-            && let Some((_, run)) = o.plan.get_mut(i)
-            && let Run::Working { branch, base, .. } = run
-        {
-            let commits = has_commits(&o.dir, base, branch);
-            let (branch, base) = (std::mem::take(branch), std::mem::take(base));
-            *run = Run::Done {
-                branch,
-                base,
-                code: None,
-                commits,
-            };
+
+        // Lo pedido se aplica después de dibujar: otro frame para que se vea ya.
+        if !intents.is_empty() {
+            ctx.request_repaint();
         }
-        if let Some(i) = retry {
-            // Reintentar una bloqueada también vuelve a mirar las que terminaron y la bloquearon:
-            // si no, volvería a bloquearse en el próximo frame. Primero ellas, después la pedida.
-            let after = o.plan.get(i).map(|(s, _)| s.after.clone());
-            for j in after.unwrap_or_default().into_iter().chain([i]) {
-                let dir = &o.dir;
-                if let Some((_, run)) = o.plan.get_mut(j)
-                    && (j == i || matches!(run, Run::Done { .. } | Run::Closed { .. }))
-                    && run.can_retry()
-                {
-                    run.retry(|base, branch| has_commits(dir, base, branch));
+        let mut launch = None;
+        for intent in intents {
+            let o = &mut self.orchestrate;
+            match intent {
+                Intent::Close => o.open = false,
+                Intent::Plan => self.start_planning(ctx),
+                Intent::Back => {
+                    // Volver durante la planificación es cancelarla: se corta el proceso, no solo la vista.
+                    crate::orchestrator::cancel(&o.planner);
+                    o.set(Step::Writing);
+                }
+                Intent::Forget => {
+                    (o.plan, o.open, o.paused) = (Vec::new(), false, false);
+                    o.persist();
+                }
+                Intent::Resume => o.paused = false,
+                Intent::Clean => self.clean_worktrees(),
+                Intent::Launch => {
+                    // Se lee de nuevo: lo elegido en este mismo frame también cuenta.
+                    if let Step::Ready(subtasks, ..) = o.step() {
+                        (o.open, o.task, o.expanded) = (false, String::new(), None);
+                        o.set(Step::Writing);
+                        launch = Some(subtasks);
+                    }
+                }
+                Intent::Pick(i, id) => {
+                    if let Step::Ready(subtasks, ..) = &mut *o.step.lock().unwrap()
+                        && let Some(s) = subtasks.get_mut(i)
+                    {
+                        s.executor = id;
+                    }
+                }
+                Intent::Finish(i) => {
+                    if let Some((_, run)) = o.plan.get_mut(i)
+                        && let Run::Working { branch, base, .. } = run
+                    {
+                        let commits = has_commits(&o.dir, base, branch);
+                        let (branch, base) = (std::mem::take(branch), std::mem::take(base));
+                        *run = Run::Done {
+                            branch,
+                            base,
+                            code: None,
+                            commits,
+                        };
+                    }
+                }
+                Intent::Retry(i) => {
+                    // Reintentar una bloqueada también vuelve a mirar las que terminaron y la bloquearon:
+                    // si no, volvería a bloquearse en el próximo frame. Primero ellas, después la pedida.
+                    let after = o.plan.get(i).map(|(s, _)| s.after.clone());
+                    for j in after.unwrap_or_default().into_iter().chain([i]) {
+                        let dir = &o.dir;
+                        if let Some((_, run)) = o.plan.get_mut(j)
+                            && (j == i || matches!(run, Run::Done { .. } | Run::Closed { .. }))
+                            && run.can_retry()
+                        {
+                            run.retry(|base, branch| has_commits(dir, base, branch));
+                        }
+                    }
+                }
+                Intent::Reveal(pane) => {
+                    let found = self.tabs.iter().position(|t| t.agent_run == Some(pane));
+                    if let Some(tab) = found {
+                        (self.active, self.orchestrate.open) = (tab, false);
+                    }
+                }
+                Intent::EditConfig => {
+                    self.orchestrate.open = false;
+                    self.open_agents_settings(ctx);
                 }
             }
         }
-        if resume {
-            o.paused = false;
-        }
-        if forget {
-            (o.plan, o.open, o.paused) = (Vec::new(), false, false);
-            o.persist();
-            return None;
-        }
-        if clean {
-            self.clean_worktrees();
-            return None;
-        }
-        if back {
-            // Volver durante la planificación es cancelarla: se corta el proceso, no solo la vista.
-            crate::orchestrator::cancel(&o.planner);
-            o.set(Step::Writing);
-        }
-        if plan_now {
-            o.set(Step::Planning);
-            // ponytail: si se cancela en el instante antes de que arranque el proceso, igual corre;
-            // su resultado se descarta (el `step` ya es otro).
-            o.planner = Planner::default();
-            let catalog = crate::orchestrator::catalog(&self.settings);
-            let extra = self.settings.executors.len();
-            let (task, dir, step, planner, ctx) = (
-                o.task.clone(),
-                o.dir.clone(),
-                o.step.clone(),
-                o.planner.clone(),
-                ctx.clone(),
-            );
-            std::thread::spawn(move || {
-                let result = match crate::orchestrator::plan(&task, &dir, &planner, &catalog) {
-                    Ok((subtasks, offered)) => {
-                        // Por qué el menú ofrece lo que ofrece: cuántos vienen de config.toml y cuáles faltan.
-                        let missing = crate::orchestrator::unavailable(&catalog);
-                        let mut note = format!("Ejecutores de config.toml: {extra}.");
-                        if !missing.is_empty() {
-                            note += &format!(" No disponibles: {}.", missing.join("; "));
-                        }
-                        Step::Ready(subtasks, offered, note)
+        launch
+    }
+
+    /// Pide el plan en un hilo aparte, con el planificador y el equipo elegidos.
+    fn start_planning(&mut self, ctx: &egui::Context) {
+        let o = &mut self.orchestrate;
+        o.set(Step::Planning);
+        (o.started, o.expanded) = (Some(Instant::now()), None);
+        // ponytail: si se cancela en el instante antes de que arranque el proceso, igual corre;
+        // su resultado se descarta (el `step` ya es otro).
+        o.planner = Planner::default();
+        let mut catalog = crate::orchestrator::catalog(&self.settings);
+        catalog.retain(|e| !o.excluded.contains(&e.id));
+        let extra = self.settings.executors.len();
+        let model = view::PLANNERS[o.planner_model].0;
+        let (task, dir, step, planner, ctx) = (
+            o.task.clone(),
+            o.dir.clone(),
+            o.step.clone(),
+            o.planner.clone(),
+            ctx.clone(),
+        );
+        std::thread::spawn(move || {
+            let result = match crate::orchestrator::plan(&task, &dir, model, &planner, &catalog) {
+                Ok((subtasks, offered)) => {
+                    // Por qué el menú ofrece lo que ofrece: cuántos vienen de config.toml y cuáles faltan.
+                    let missing = crate::orchestrator::unavailable(&catalog);
+                    let mut note = match extra {
+                        0 => String::new(),
+                        n => format!("Agentes de tu config.toml: {n}."),
+                    };
+                    if !missing.is_empty() {
+                        note += &format!(" No disponibles: {}.", missing.join("; "));
                     }
-                    Err(e) => Step::Failed(e),
-                };
-                *step.lock().unwrap() = result;
-                ctx.request_repaint();
-            });
-        }
-        let Step::Ready(subtasks, ..) = step else {
-            return None;
-        };
-        if !launch {
-            return None;
-        }
-        (o.open, o.task) = (false, String::new());
-        o.set(Step::Writing);
-        Some(subtasks)
+                    Step::Ready(subtasks, offered, note)
+                }
+                Err(e) => Step::Failed(e),
+            };
+            *step.lock().unwrap() = result;
+            ctx.request_repaint();
+        });
     }
 
     /// Lanza el plan: las subtareas sin dependencias arrancan ya; las demás esperan su ronda.
