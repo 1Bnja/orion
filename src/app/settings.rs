@@ -4,6 +4,7 @@ use super::MAC;
 use super::Orion;
 use super::chrome::{Icon, RADIUS, draw_icon, icon_button, medium};
 use super::menu::{self, SettingsMenu, color_table};
+use super::settings_agents;
 use crate::backdrop::BACKDROPS;
 use crate::colors::{THEMES, theme};
 use crate::config::{Settings, config_path};
@@ -22,16 +23,18 @@ pub(crate) enum Section {
     Colores,
     Fuente,
     Terminal,
+    Agentes,
     Avanzado,
 }
 
 impl Section {
     /// Todas, en el orden en que se muestran.
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Apariencia,
         Self::Colores,
         Self::Fuente,
         Self::Terminal,
+        Self::Agentes,
         Self::Avanzado,
     ];
 
@@ -42,6 +45,7 @@ impl Section {
             Self::Colores => "Colores",
             Self::Fuente => "Fuente",
             Self::Terminal => "Terminal",
+            Self::Agentes => "Agentes",
             Self::Avanzado => "Avanzado",
         }
     }
@@ -52,6 +56,8 @@ impl Section {
             Self::Colores => Icon::Colors,
             Self::Fuente => Icon::Font,
             Self::Terminal => Icon::Terminal,
+            // Columnas: varios agentes trabajando en paralelo.
+            Self::Agentes => Icon::Split,
             Self::Avanzado => Icon::Advanced,
         }
     }
@@ -84,15 +90,17 @@ impl Section {
                 "zsh",
                 "wsl",
             ],
-            Self::Avanzado => &[
-                "avanzado",
-                "config",
-                "config.toml",
+            Self::Agentes => &[
                 "agentes",
                 "ejecutores",
                 "orquestador",
-                "archivo",
+                "ollama",
+                "codex",
+                "opencode",
+                "deepseek",
+                "modelo",
             ],
+            Self::Avanzado => &["avanzado", "config", "config.toml", "archivo"],
         }
     }
 }
@@ -133,6 +141,11 @@ fn normalize(text: &str) -> String {
         .collect()
 }
 
+/// La ventana del sistema donde vive la configuración.
+pub(super) fn viewport_id() -> ViewportId {
+    ViewportId::from_hash_of("orion-settings")
+}
+
 impl Orion {
     /// Settings in its own OS window (Cmd/Ctrl+,), so it can leave the terminal.
     pub(crate) fn settings_window(&mut self, ctx: &egui::Context) {
@@ -160,87 +173,86 @@ impl Orion {
         }
         {
             let menu = &mut self.menu;
-            ctx.show_viewport_immediate(
-                ViewportId::from_hash_of("orion-settings"),
-                builder,
-                |ui, class| {
-                    if ui.input(|i| {
-                        i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)
-                    }) {
-                        still_open = false;
-                    }
-                    let dark = !theme().is_light();
-                    if menu.theme_sent != Some(dark) {
-                        menu.theme_sent = Some(dark);
-                        ui.ctx()
-                            .send_viewport_cmd(ViewportCommand::SetTheme(if dark {
-                                egui::SystemTheme::Dark
-                            } else {
-                                egui::SystemTheme::Light
-                            }));
-                    }
+            ctx.show_viewport_immediate(viewport_id(), builder, |ui, class| {
+                if ui.input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape))
+                {
+                    still_open = false;
+                }
+                let dark = !theme().is_light();
+                if menu.theme_sent != Some(dark) {
+                    menu.theme_sent = Some(dark);
+                    ui.ctx()
+                        .send_viewport_cmd(ViewportCommand::SetTheme(if dark {
+                            egui::SystemTheme::Dark
+                        } else {
+                            egui::SystemTheme::Light
+                        }));
+                }
 
-                    let mut body = |ui: &mut egui::Ui| {
-                        settings_title_bar(ui, &mut still_open);
-                        ui.add_space(8.0);
-                        let matches = sections_matching(&menu.filter);
-                        if !matches.contains(&menu.section)
-                            && let Some(first) = matches.first()
-                        {
-                            menu.section = *first;
-                        }
-                        let height = ui.available_height();
-                        ui.horizontal_top(|ui| {
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(200.0, height),
-                                egui::Layout::top_down(egui::Align::Min),
-                                |ui| {
-                                    search_field(ui, &mut menu.filter);
-                                    ui.add_space(8.0);
-                                    if matches.is_empty() {
-                                        ui.weak("Sin resultados");
-                                    }
-                                    for section in &matches {
-                                        if section_nav(ui, *section, *section == menu.section) {
-                                            menu.section = *section;
-                                        }
-                                    }
-                                },
-                            );
-                            ui.separator();
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(ui.available_width(), height),
-                                egui::Layout::top_down(egui::Align::Min),
-                                |ui| {
-                                    if !matches.is_empty() {
-                                        section_content(ui, menu.section, &mut new, menu);
-                                    }
-                                },
-                            );
-                        });
-                    };
-                    if class == ViewportClass::EmbeddedWindow {
-                        egui::Window::new("Configuración")
-                            .collapsible(false)
-                            .default_size([760.0, 520.0])
-                            .show(ui.ctx(), |ui| body(ui));
-                    } else {
-                        egui::CentralPanel::default()
-                            .frame(
-                                egui::Frame::new()
-                                    // Opaco: esta ventana no lleva Mica ni acrílico detrás, así que
-                                    // el alfa de `surface()` dejaría ver lo que haya debajo sin desenfocar.
-                                    .fill(theme().sidebar())
-                                    .inner_margin(egui::Margin::symmetric(12, 8)),
-                            )
-                            .show(ui, body);
+                let mut body = |ui: &mut egui::Ui| {
+                    settings_title_bar(ui, &mut still_open);
+                    ui.add_space(8.0);
+                    let matches = sections_matching(&menu.filter);
+                    if !matches.contains(&menu.section)
+                        && let Some(first) = matches.first()
+                    {
+                        menu.section = *first;
                     }
-                },
-            );
+                    let height = ui.available_height();
+                    ui.horizontal_top(|ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(200.0, height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                search_field(ui, &mut menu.filter);
+                                ui.add_space(8.0);
+                                if matches.is_empty() {
+                                    ui.weak("Sin resultados");
+                                }
+                                for section in &matches {
+                                    if section_nav(ui, *section, *section == menu.section) {
+                                        menu.section = *section;
+                                    }
+                                }
+                            },
+                        );
+                        ui.separator();
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                if !matches.is_empty() {
+                                    section_content(ui, menu.section, &mut new, menu);
+                                }
+                            },
+                        );
+                    });
+                };
+                if class == ViewportClass::EmbeddedWindow {
+                    egui::Window::new("Configuración")
+                        .collapsible(false)
+                        .default_size([760.0, 520.0])
+                        .show(ui.ctx(), |ui| body(ui));
+                } else {
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::new()
+                                // Opaco: esta ventana no lleva Mica ni acrílico detrás, así que
+                                // el alfa de `surface()` dejaría ver lo que haya debajo sin desenfocar.
+                                .fill(theme().sidebar())
+                                .inner_margin(egui::Margin::symmetric(12, 8)),
+                        )
+                        .show(ui, body);
+                }
+            });
         }
         self.menu.open = still_open;
         if new != self.settings {
             self.change_settings(ctx, new);
+        }
+        // «Probar» se pide desde la ventana de ajustes, pero la pestaña se abre aquí.
+        if let Some(test) = self.menu.agents.test.take() {
+            self.test_agent(ctx, test);
         }
     }
 }
@@ -259,7 +271,7 @@ fn section_content(
     });
     ui.add_space(6.0);
     egui::ScrollArea::vertical()
-        .id_salt("ajustes")
+        .id_salt(("ajustes", section.title()))
         .auto_shrink([false, false])
         .show(ui, |ui| match section {
             Section::Apariencia => {
@@ -477,6 +489,7 @@ fn section_content(
                     },
                 );
             }
+            Section::Agentes => settings_agents::section(ui, new, &mut menu.agents),
             Section::Avanzado => {
                 if let Some(path) = config_path() {
                     setting_row(
@@ -496,10 +509,6 @@ fn section_content(
                 } else {
                     ui.weak("No encuentro la carpeta de configuración.");
                 }
-                ui.add_space(6.0);
-                ui.weak(
-                    "Los agentes ([[agent]]) y los ejecutores del orquestador ([[executor]]) se editan en ese archivo.",
-                );
             }
         });
 }
@@ -670,7 +679,7 @@ fn font_preview(ui: &mut egui::Ui, settings: &Settings) {
 }
 
 /// A settings row: fixed-width label column on the left, control on the right.
-fn setting_row(
+pub(super) fn setting_row(
     ui: &mut egui::Ui,
     name: &str,
     description: &str,
@@ -725,6 +734,18 @@ mod tests {
         assert_eq!(sections_matching("hex"), vec![Section::Colores]);
         assert_eq!(sections_matching("fondo"), vec![Section::Apariencia]);
         assert_eq!(sections_matching("shell"), vec![Section::Terminal]);
+        for query in [
+            "agentes",
+            "ejecutores",
+            "orquestador",
+            "ollama",
+            "codex",
+            "opencode",
+            "deepseek",
+            "modelo",
+        ] {
+            assert_eq!(sections_matching(query), vec![Section::Agentes], "{query}");
+        }
     }
 
     #[test]

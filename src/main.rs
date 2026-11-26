@@ -23,6 +23,7 @@ mod grid;
 mod icon;
 mod input;
 mod links;
+mod local_models;
 mod orchestrator;
 mod pty;
 mod update;
