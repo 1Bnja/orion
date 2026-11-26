@@ -55,6 +55,7 @@ use panes::Split;
 use project::Project;
 use session::{AgentStatus, AgentWatch, Session};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Lo que muestra una pestaña.
@@ -84,6 +85,8 @@ struct Tab {
     agent_notified: bool,
     /// El cwd con que se calculó `repo` por última vez (ver `repo_to_check`).
     repo_cwd: Option<PathBuf>,
+    /// El repo de ese cwd, que un hilo le está preguntando a git.
+    repo_check: Option<Receiver<Option<PathBuf>>>,
 }
 
 impl Tab {
@@ -108,6 +111,7 @@ impl Tab {
             agent_run: None,
             agent_notified: false,
             repo_cwd: None,
+            repo_check: None,
             focus,
             content,
             rects: Vec::new(),
@@ -1298,15 +1302,34 @@ impl eframe::App for Orion {
             }
         }
         // Una terminal suelta que hizo cd a un repo pasa a agruparse bajo él (y al revés).
-        // ponytail: git en el hilo de la ventana, solo cuando cambia el cwd (tarda poco).
+        // git responde desde un hilo: arrancarlo en el de la ventana se nota en cada `cd`.
         for tab in &mut self.tabs {
+            if let Some(rx) = &tab.repo_check {
+                match rx.try_recv() {
+                    Ok(repo) => {
+                        // Entretanto la pestaña pudo pasar a ser de un agente: su repo es fijo.
+                        if tab.worktree.is_none() && tab.agent.is_none() {
+                            tab.repo = repo;
+                        }
+                        tab.repo_check = None;
+                    }
+                    Err(TryRecvError::Empty) => continue,
+                    Err(TryRecvError::Disconnected) => tab.repo_check = None,
+                }
+            }
             let cwd = tab.focused().and_then(|s| s.cwd.as_deref());
             let worktree = tab.worktree.is_some();
             let agent = tab.agent.is_some();
             if let Some(cwd) = repo_to_check(worktree, agent, cwd, tab.repo_cwd.as_deref()) {
                 let cwd = cwd.to_path_buf();
-                tab.repo = crate::agents::repo_root(&cwd).ok();
-                tab.repo_cwd = Some(cwd);
+                tab.repo_cwd = Some(cwd.clone());
+                let (tx, rx) = mpsc::channel();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::agents::repo_root(&cwd).ok());
+                    ctx.request_repaint();
+                });
+                tab.repo_check = Some(rx);
             }
         }
         // Pestañas Grafo: recoger lo que terminó, recargar la que vuelve a estar activa y vigilar el repo.

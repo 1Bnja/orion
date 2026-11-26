@@ -5,10 +5,10 @@ use super::chrome::{Icon, icon_text_button, label, medium, search_field, selecta
 use super::graph_actions::{self, Actions, Target};
 use super::graph_panels::Panels;
 use crate::colors::theme;
-use crate::git_graph::{self, Commit, FileChange, Graph, Refs, Row};
+use crate::git_graph::{self, Commit, Graph, Refs, Row};
 use eframe::egui::epaint::{CubicBezierShape, RectShape};
 use eframe::egui::{self, Color32, FontId, Rect, Sense, Shape, Stroke, StrokeKind, pos2, vec2};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -546,15 +546,36 @@ impl GraphView {
 const LIMIT: usize = 2000;
 /// Cada cuánto se mira si el repo cambió, mientras la pestaña está a la vista.
 const FINGERPRINT_EVERY: Duration = Duration::from_secs(3);
+/// Lo mismo con la ventana sin el foco: se puede estar mirando en otra pantalla.
+const FINGERPRINT_UNFOCUSED: Duration = Duration::from_secs(15);
 
 /// Lo que trae una carga: el grafo, las refs y el WIP, más la huella del repo al empezar.
 struct Loaded {
     print: String,
     graph: Graph,
     refs: Refs,
-    wip: Vec<FileChange>,
     /// Estado, tracking y último asunto, para las acciones.
     state: graph_actions::State,
+}
+
+/// Todo lo que muestra la pestaña.
+fn load_all(repo: &Path, branch: Option<&str>, limit: usize) -> Result<Loaded, String> {
+    // La huella va primero: si el repo cambia durante la carga, la próxima lo nota.
+    let print = git_graph::fingerprint(repo).unwrap_or_default();
+    // El resto, a la vez.
+    std::thread::scope(|s| {
+        let refs = s.spawn(|| git_graph::refs(repo));
+        let state = s.spawn(|| graph_actions::load(repo));
+        let graph = git_graph::load_rev(repo, branch, limit);
+        // Sin refs o sin estado el grafo igual sirve.
+        let (refs, state) = (git_graph::joined(refs), git_graph::joined(state));
+        graph.map(|graph| Loaded {
+            print,
+            graph,
+            refs: refs.unwrap_or_default(),
+            state,
+        })
+    })
 }
 
 /// Una pestaña "Grafo": el grafo de un repo, leído con git en un hilo aparte.
@@ -611,17 +632,7 @@ impl GraphTab {
         let (repo, ctx) = (self.repo.clone(), ctx.clone());
         let (branch, limit) = (self.branch.clone(), self.limit);
         std::thread::spawn(move || {
-            // La huella va primero: si el repo cambia durante la carga, la próxima lo nota.
-            let print = git_graph::fingerprint(&repo).unwrap_or_default();
-            let loaded = git_graph::load_rev(&repo, branch.as_deref(), limit).map(|graph| Loaded {
-                print,
-                graph,
-                // Sin refs o sin WIP el grafo igual sirve.
-                refs: git_graph::refs(&repo).unwrap_or_default(),
-                wip: git_graph::wip(&repo).unwrap_or_default(),
-                state: graph_actions::load(&repo),
-            });
-            let _ = tx.send(loaded);
+            let _ = tx.send(load_all(&repo, branch.as_deref(), limit));
             ctx.request_repaint(); // para que `poll` lo vea aunque nada más pase
         });
         self.loading = Some(rx);
@@ -657,9 +668,9 @@ impl GraphTab {
                 Ok(loaded) => {
                     self.error = None;
                     self.print = Some(loaded.print);
+                    self.panels.set_wip(loaded.state.changed());
                     self.actions.set_state(loaded.state, &loaded.refs);
                     self.panels.refs = loaded.refs;
-                    self.panels.set_wip(loaded.wip);
                     match &mut self.view {
                         Some(view) => view.replace(loaded.graph),
                         None => self.view = Some(GraphView::new(loaded.graph)),
@@ -684,8 +695,14 @@ impl GraphTab {
             }
         }
         // Con una huella o una carga en camino no se pide otra: su hilo despierta la ventana.
+        // Al volver el foco, si ya pasó el intervalo corto, se mira enseguida.
+        let every = if ctx.input(|i| i.focused) {
+            FINGERPRINT_EVERY
+        } else {
+            FINGERPRINT_UNFOCUSED
+        };
         if shown && self.printing.is_none() && self.loading.is_none() {
-            if self.printed.elapsed() >= FINGERPRINT_EVERY {
+            if self.printed.elapsed() >= every {
                 let (tx, rx) = mpsc::channel();
                 let (repo, ctx) = (self.repo.clone(), ctx.clone());
                 std::thread::spawn(move || {
@@ -695,7 +712,7 @@ impl GraphTab {
                 self.printing = Some(rx);
                 self.printed = Instant::now();
             }
-            ctx.request_repaint_after(FINGERPRINT_EVERY.saturating_sub(self.printed.elapsed()));
+            ctx.request_repaint_after(every.saturating_sub(self.printed.elapsed()));
         }
     }
 
@@ -878,6 +895,29 @@ pub(super) mod tests {
         assert_eq!(ref_kind("origin/orion/tarea-1").0, RefKind::Remote);
         assert_eq!(ref_kind("feature/x").0, RefKind::Local);
         assert_eq!(ref_kind("tag: v0.1"), (RefKind::Tag, "v0.1"));
+    }
+
+    /// Cuánto tardan la carga completa y la huella (mediana de 7), sobre este repo o `ORION_REPO`.
+    /// No es un test de verdad: `cargo test load_time -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn load_time() {
+        let repo = std::env::var("ORION_REPO").unwrap_or(env!("CARGO_MANIFEST_DIR").into());
+        let repo = PathBuf::from(repo);
+        let median = |f: &dyn Fn()| {
+            let mut times: Vec<_> = (0..7)
+                .map(|_| {
+                    let start = Instant::now();
+                    f();
+                    start.elapsed()
+                })
+                .collect();
+            times.sort();
+            times[3]
+        };
+        let load = median(&|| assert!(load_all(&repo, None, LIMIT).is_ok()));
+        let print = median(&|| assert!(git_graph::fingerprint(&repo).is_ok()));
+        println!("carga completa: {load:?} · huella: {print:?}");
     }
 
     #[test]

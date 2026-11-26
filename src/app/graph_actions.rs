@@ -7,7 +7,7 @@ use super::chrome::{
 };
 use super::graph_panels::change_icon;
 use crate::colors::theme;
-use crate::git_graph::{FileChange, Refs};
+use crate::git_graph::{FileChange, Refs, joined};
 use crate::git_ops::{self, InProgress, PullMode, ResetMode, WorkStatus};
 use crate::links::{self, Link};
 use eframe::egui::{self, Color32, FontId, Key, Modifiers, RichText, Sense, pos2, vec2};
@@ -26,10 +26,31 @@ pub(super) struct State {
 
 /// Lee el estado del repo. Lo que falle queda vacío: el grafo igual sirve.
 pub(super) fn load(repo: &Path) -> State {
-    State {
-        status: git_ops::status(repo).unwrap_or_default(),
-        tracking: git_ops::tracking(repo).unwrap_or_default(),
-        subject: crate::agents::git(repo, &["log", "-1", "--format=%s"]).unwrap_or_default(),
+    std::thread::scope(|s| {
+        let status = s.spawn(|| git_ops::status(repo));
+        let tracking = s.spawn(|| git_ops::tracking(repo));
+        let subject = crate::agents::git(repo, &["log", "-1", "--format=%s"]);
+        State {
+            status: joined(status).unwrap_or_default(),
+            tracking: joined(tracking).unwrap_or_default(),
+            subject: subject.unwrap_or_default(),
+        }
+    })
+}
+
+impl State {
+    /// Los archivos con cambios sin commitear (preparados o no, y en conflicto), sin repetir.
+    pub(super) fn changed(&self) -> Vec<FileChange> {
+        let status = &self.status;
+        let conflicted = status.conflicted.iter().map(|path| FileChange {
+            path: path.clone(),
+            ..Default::default()
+        });
+        let all = status.staged.iter().chain(&status.unstaged).cloned();
+        let mut files: Vec<FileChange> = all.chain(conflicted).collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        files.dedup_by(|a, b| a.path == b.path);
+        files
     }
 }
 
@@ -1203,6 +1224,27 @@ mod tests {
         // Rebase: "Usar el mío" → take(…, false); "Usar el de ellos" → take(…, true).
         assert!(!take_ours(Some(InProgress::Rebase), true));
         assert!(take_ours(Some(InProgress::Rebase), false));
+    }
+
+    #[test]
+    fn el_wip_junta_los_cambios_sin_repetir_archivos() {
+        let change = |path: &str| FileChange {
+            path: path.into(),
+            ..Default::default()
+        };
+        let state = State {
+            status: WorkStatus {
+                // `a.txt` está preparado y además editado otra vez.
+                staged: vec![change("b.txt"), change("a.txt")],
+                unstaged: vec![change("a.txt"), change("nuevo.txt")],
+                conflicted: vec!["c.txt".into()],
+                in_progress: None,
+            },
+            ..Default::default()
+        };
+        let paths: Vec<String> = state.changed().into_iter().map(|f| f.path).collect();
+        assert_eq!(paths, ["a.txt", "b.txt", "c.txt", "nuevo.txt"]);
+        assert!(State::default().changed().is_empty());
     }
 
     #[test]

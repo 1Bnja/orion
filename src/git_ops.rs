@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::git_graph::FileChange;
+use crate::git_graph::{FileChange, joined};
 
 /// Una operación a medias que espera `continue_op` o `abort`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,15 +118,6 @@ fn run_paths(repo: &Path, args: &[&str], paths: &[String]) -> Result<String, Str
 }
 
 pub fn status(repo: &Path) -> Result<WorkStatus, String> {
-    // Cada registro de `ls-files -u` es `modo hash etapa\truta`; hay uno por etapa.
-    let unmerged = read(repo, &["ls-files", "-u", "--full-name", "-z", "--", ":/"])?;
-    let mut conflicted: Vec<String> = unmerged
-        .split('\0')
-        .filter_map(|record| record.split_once('\t'))
-        .map(|(_, path)| path.to_string())
-        .collect();
-    conflicted.dedup();
-
     let changes = |cached: bool| -> Result<Vec<FileChange>, String> {
         let mut args = vec![
             "--no-optional-locks",
@@ -153,25 +144,39 @@ pub fn status(repo: &Path) -> Result<WorkStatus, String> {
                     removed: removed.parse().ok(),
                 })
             })
-            .filter(|file| !conflicted.contains(&file.path))
             .collect())
     };
-    let staged = changes(true)?;
-    let mut unstaged = changes(false)?;
-    let untracked = read(
-        repo,
-        &[
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "--full-name",
-            "-z",
-            "--",
-            ":/",
-        ],
-    )?;
+    // Todas las consultas a la vez: cada `git` cuesta mucho más en arrancar que en responder.
+    let (unmerged, staged, unstaged, untracked, in_progress) = std::thread::scope(|s| {
+        // Cada registro de `ls-files -u` es `modo hash etapa\truta`; hay uno por etapa.
+        let unmerged = s.spawn(|| read(repo, &["ls-files", "-u", "--full-name", "-z", "--", ":/"]));
+        let staged = s.spawn(|| changes(true));
+        let unstaged = s.spawn(|| changes(false));
+        let untracked = s.spawn(|| {
+            let args = ["ls-files", "--others", "--exclude-standard", "--full-name"];
+            read(repo, &[&args[..], &["-z", "--", ":/"]].concat())
+        });
+        let in_progress = in_progress(repo);
+        (
+            joined(unmerged),
+            joined(staged),
+            joined(unstaged),
+            joined(untracked),
+            in_progress,
+        )
+    });
+    let mut conflicted: Vec<String> = unmerged?
+        .split('\0')
+        .filter_map(|record| record.split_once('\t'))
+        .map(|(_, path)| path.to_string())
+        .collect();
+    conflicted.dedup();
+    // Los archivos en conflicto van aparte.
+    let (mut staged, mut unstaged) = (staged?, unstaged?);
+    staged.retain(|file| !conflicted.contains(&file.path));
+    unstaged.retain(|file| !conflicted.contains(&file.path));
     unstaged.extend(
-        untracked
+        untracked?
             .split('\0')
             .filter(|path| !path.is_empty())
             .map(|path| FileChange {
@@ -185,7 +190,7 @@ pub fn status(repo: &Path) -> Result<WorkStatus, String> {
         staged,
         unstaged,
         conflicted,
-        in_progress: in_progress(repo)?,
+        in_progress: in_progress?,
     })
 }
 
