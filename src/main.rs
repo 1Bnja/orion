@@ -18,6 +18,7 @@ mod colors;
 mod config;
 mod fonts;
 mod git_graph;
+mod git_ops;
 mod grid;
 mod icon;
 mod input;
