@@ -251,3 +251,54 @@ mod tests {
         assert!(Backdrop::Mica.alpha() < 255);
     }
 }
+
+#[cfg(windows)]
+#[link(name = "gdi32")]
+unsafe extern "system" {
+    fn GetStockObject(kind: i32) -> isize;
+}
+
+#[cfg(windows)]
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetClientRect(hwnd: isize, rect: *mut [i32; 4]) -> i32;
+    fn GetDC(hwnd: isize) -> isize;
+    fn ReleaseDC(hwnd: isize, dc: isize) -> i32;
+    fn FillRect(dc: isize, rect: *const [i32; 4], brush: isize) -> i32;
+}
+
+/// Pinta de negro la capa GDI de la ventana entera. Hay que llamarla cada vez que la ventana
+/// cambia de tamaño.
+///
+/// Con DirectX 12, Orion dibuja por DirectComposition, encima de esa capa, que nadie pinta. Al
+/// agrandar la ventana, Windows no limpia la parte nueva de la capa, y donde quedó el contenido
+/// viejo se veía un rectángulo más claro del tamaño anterior. Como winit deja la ventana con
+/// blur-behind, el negro de GDI cuenta como transparente: así se ve el material parejo detrás.
+///
+/// Solo con DirectX 12. Con OpenGL esa capa es donde se dibuja, y pintarla taparía el contenido.
+/// ponytail: con WGPU_DX12_PRESENTATION_SYSTEM=hwnd (solo para pruebas) no usa DirectComposition y
+/// esto sobra; si alguien lo usa de verdad, mirar también ese modo.
+#[cfg(windows)]
+pub(crate) fn clear_gdi_layer(window: Window) {
+    let RawWindowHandle::Win32(h) = window.0 else {
+        return;
+    };
+    let hwnd = h.hwnd.get();
+    const BLACK_BRUSH: i32 = 4;
+    // SAFETY: el DC se pide y se devuelve aquí mismo, y `rect` vive durante las llamadas.
+    unsafe {
+        let mut rect = [0; 4];
+        if GetClientRect(hwnd, &mut rect) == 0 {
+            return;
+        }
+        let dc = GetDC(hwnd);
+        if dc == 0 {
+            return;
+        }
+        FillRect(dc, &rect, GetStockObject(BLACK_BRUSH));
+        ReleaseDC(hwnd, dc);
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn clear_gdi_layer(_window: Window) {}

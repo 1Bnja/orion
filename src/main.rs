@@ -53,7 +53,8 @@ fn main() -> Result<(), pty::Error> {
 
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Orion")
-        .with_inner_size([900.0, 560.0])
+        .with_inner_size([1280.0, 800.0])
+        .with_min_inner_size([720.0, 480.0])
         // El de la barra de tareas y la esquina de la ventana (el del .exe lo pone build.rs).
         .with_icon(eframe::egui::IconData {
             rgba: icon::render(64),
