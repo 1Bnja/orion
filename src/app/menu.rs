@@ -178,8 +178,16 @@ impl Orion {
         if theme_changed {
             apply_theme(ctx, &new);
         }
-        let look_changed = theme_changed || new.backdrop != self.settings.backdrop;
+        let backdrop_changed = new.backdrop != self.settings.backdrop;
+        if new.renderer != self.settings.renderer {
+            self.show_toast("Reinicia Orion para usar el motor gráfico nuevo");
+        }
+        let look_changed = theme_changed || backdrop_changed;
         self.settings = new;
+        let wanted = find_backdrop(&self.settings.backdrop).unwrap_or(Backdrop::None);
+        if backdrop_changed && crate::renderer::shown_backdrop(wanted) != wanted {
+            self.show_toast("Reinicia Orion para ver ese fondo");
+        }
         if look_changed {
             self.apply_window_look();
         }
@@ -187,7 +195,8 @@ impl Orion {
 
     /// El material de la ventana (Mica o acrílico) y la barra de título clara u oscura según el tema.
     pub(crate) fn apply_window_look(&self) {
-        let backdrop = find_backdrop(&self.settings.backdrop).unwrap_or(Backdrop::None);
+        let wanted = find_backdrop(&self.settings.backdrop).unwrap_or(Backdrop::None);
+        let backdrop = crate::renderer::shown_backdrop(wanted);
         set_surface_alpha(backdrop.alpha());
         if let Some(window) = self.window {
             crate::backdrop::apply(window, backdrop, !theme().is_light());

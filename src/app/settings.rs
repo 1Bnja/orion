@@ -9,6 +9,7 @@ use crate::colors::{THEMES, theme};
 use crate::config::{Settings, config_path};
 use crate::links::{Link, open};
 use crate::pty::{SHELLS, installed_shells};
+use crate::renderer;
 use eframe::egui;
 use eframe::egui::{
     Sense, ViewportBuilder, ViewportClass, ViewportCommand, ViewportId, pos2, vec2,
@@ -89,6 +90,13 @@ impl Section {
                 "agentes",
                 "ejecutores",
                 "orquestador",
+                "motor",
+                "grafico",
+                "gpu",
+                "directx",
+                "metal",
+                "vulkan",
+                "opengl",
                 "archivo",
             ],
         }
@@ -458,6 +466,23 @@ fn section_content(
                 );
             }
             Section::Avanzado => {
+                let active = format!("En uso: {}. Se aplica al reiniciar.", renderer::describe());
+                setting_row(ui, "Motor gráfico", &active, |ui| {
+                    egui::ComboBox::from_id_salt("renderer")
+                        .selected_text(&new.renderer)
+                        .show_ui(ui, |ui| {
+                            for (name, gpu) in renderer::GPUS {
+                                if gpu.available() {
+                                    ui.selectable_value(&mut new.renderer, name.to_string(), name);
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Automático usa el nativo del sistema (DirectX 12 en Windows, Metal en \
+                             macOS) y, si no arranca, prueba los demás. Cambia a OpenGL si algo se ve mal.",
+                        );
+                });
                 if let Some(path) = config_path() {
                     setting_row(
                         ui,

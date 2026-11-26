@@ -384,6 +384,7 @@ impl Orion {
         settings: Settings,
         grid: (u16, u16),
     ) -> Result<Self, Error> {
+        crate::renderer::note_adapter(cc);
         apply_font(&cc.egui_ctx, &settings.font.family);
         menu::apply_theme(&cc.egui_ctx, &settings);
         // Real OS windows for child viewports (settings), not popups trapped in the terminal.

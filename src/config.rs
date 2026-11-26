@@ -54,6 +54,12 @@ pub(crate) fn config_text(settings: &Settings) -> String {
     let backdrops: Vec<&str> = BACKDROPS.iter().map(|b| b.0).collect();
     let backdrops = backdrops.join(", ");
     let check_updates = settings.check_updates;
+    let renderer = toml::Value::String(settings.renderer.clone());
+    let renderers: Vec<&str> = (crate::renderer::GPUS.iter())
+        .filter(|g| g.1.available())
+        .map(|g| g.0)
+        .collect();
+    let renderers = renderers.join(", ");
     let mut themes_extra = String::new();
     for t in &settings.custom_themes {
         themes_extra += &t.to_toml();
@@ -99,6 +105,9 @@ theme = {theme}
 backdrop = {backdrop}
 # Al abrir, buscar si hay una versión nueva de Orion (se instala solo si tú lo pides).
 check_updates = {check_updates}
+# Motor gráfico (se aplica al reiniciar). Hay: {renderers}.
+# Automático usa el nativo del sistema y, si no arranca, prueba los demás.
+renderer = {renderer}
 # Shell de las pestañas nuevas ({key}+Shift+T). Hay: {shells}.
 # Para abrir una pestaña con otro proyecto o shell: clic en "+ Nueva pestaña",
 # o la paleta ({key}+Shift+P).
@@ -157,6 +166,8 @@ pub(crate) struct Settings {
     pub(crate) backdrop: String,
     /// Al abrir, revisar si hay una versión nueva en GitHub.
     pub(crate) check_updates: bool,
+    /// Graphics backend, applied on restart.
+    pub(crate) renderer: String,
     /// Cambios de color de la interfaz ([colors]); lo que falte usa el tema.
     pub(crate) colors: ColorSettings,
     pub(crate) font: FontSettings,
@@ -358,6 +369,7 @@ impl Default for Settings {
             shell: SHELLS[0].name.into(),
             backdrop: BACKDROPS[0].0.into(),
             check_updates: true,
+            renderer: crate::renderer::GPUS[0].0.into(),
             colors: ColorSettings::default(),
             font: FontSettings::default(),
             custom_themes: Vec::new(),
@@ -567,6 +579,9 @@ pub(crate) fn parse_settings(text: &str) -> Result<Settings, String> {
     let backdrop = find_backdrop(&settings.backdrop)
         .ok_or_else(|| format!("no hay un fondo \"{}\"", settings.backdrop))?;
     settings.backdrop = BACKDROPS.iter().find(|b| b.1 == backdrop).unwrap().0.into();
+    let gpu = crate::renderer::find_gpu(&settings.renderer)
+        .ok_or_else(|| format!("no conozco el motor gráfico \"{}\"", settings.renderer))?;
+    settings.renderer = gpu.name().into();
     Ok(settings)
 }
 
