@@ -3,10 +3,10 @@
 //! Usa la misma base que la paleta y el orquestador (`overlay`).
 
 use super::chrome::{Icon, draw_icon_size, draw_logo, medium};
-use crate::logo::Logo;
 use super::overlay::{self, Button, Kind, dim_text, faint_text, mix, panel_fill, tint};
 use super::{AgentChoice, Orion, folder_name};
 use crate::colors::theme;
+use crate::logo::Logo;
 use eframe::egui::{
     self, Color32, CursorIcon, FontId, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
@@ -149,7 +149,14 @@ fn folder_chips(
 }
 
 /// Una tarjeta de agente que se marca con un clic.
-fn agent_card(ui: &mut Ui, name: &str, about: &str, on: bool, width: f32, logo: Logo) -> egui::Response {
+fn agent_card(
+    ui: &mut Ui,
+    name: &str,
+    about: &str,
+    on: bool,
+    width: f32,
+    logo: Logo,
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(width, 54.0), Sense::click());
     let ctx = ui.ctx().clone();
     let hover = ctx.animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.06);
@@ -176,7 +183,12 @@ fn agent_card(ui: &mut Ui, name: &str, about: &str, on: bool, width: f32, logo: 
         ui.painter()
             .rect_stroke(check, 5.0, stroke, StrokeKind::Inside);
     }
-    draw_logo(ui, logo, pos2(body.min.x + 14.0, body.min.y + 19.0), theme().fg);
+    draw_logo(
+        ui,
+        logo,
+        pos2(body.min.x + 14.0, body.min.y + 19.0),
+        theme().fg,
+    );
     let line = |y: f32, right: f32| {
         Rect::from_min_max(
             pos2(body.min.x + 40.0, y - 9.0),
@@ -402,7 +414,10 @@ impl Orion {
             });
         }
 
-        let logos: std::collections::HashMap<_, _> = choices.iter().map(|(choice, name, _)| (name.clone(), choice.logo(&self.settings))).collect();
+        let logos: std::collections::HashMap<_, _> = choices
+            .iter()
+            .map(|(choice, name, _)| (name.clone(), choice.logo(&self.settings)))
+            .collect();
         let p = &mut self.project;
         let shown = overlay::show(ctx, "proyecto", open, WIDTH, 0.07, |ui| {
             header(ui, &mut asked);

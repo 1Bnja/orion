@@ -1,8 +1,8 @@
 //! Perfiles de agente: una pestaña que lanza un comando (el agente), opcionalmente en un
 //! git worktree propio para que varios agentes trabajen en paralelo sin pisarse.
 
-use crate::pty::ShellKind;
 use crate::logo::Logo;
+use crate::pty::ShellKind;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -663,7 +663,7 @@ mod tests {
     #[test]
     fn providers_draw_their_logo_or_the_generic_fallback() {
         let mut seen = Vec::new();
-        for p in &PROVIDERS {
+        for p in PROVIDERS {
             if p.logo != Logo::Generic {
                 assert!(!seen.contains(&p.logo), "{}", p.name);
                 seen.push(p.logo);

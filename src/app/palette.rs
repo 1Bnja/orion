@@ -3,10 +3,10 @@
 //! sin memorizarlos. Las listas largas (temas, fondos, shells) son subpáginas; al buscar aparece todo.
 
 use super::chrome::{Icon, draw_icon_size, draw_logo, medium};
-use crate::logo::Logo;
 use super::overlay::{self, dim_text, faint_text, mix, tint};
 use super::{Action, Orion};
 use crate::colors::theme;
+use crate::logo::Logo;
 use eframe::egui::text::{LayoutJob, TextFormat, TextWrapping};
 use eframe::egui::{self, Color32, FontId, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 
@@ -540,7 +540,13 @@ impl Orion {
                 .disabled_if(no_tab, NO_TAB),
         ]);
 
-        list.push(Command::run(Agents, Icon::Plus, "Agregar agente…", "Configura agentes y modelos locales", Action::AddAgent));
+        list.push(Command::run(
+            Agents,
+            Icon::Plus,
+            "Agregar agente…",
+            "Configura agentes y modelos locales",
+            Action::AddAgent,
+        ));
         for i in self.providers() {
             let provider = &crate::agents::PROVIDERS[i];
             list.push(Command::run(
@@ -753,7 +759,9 @@ impl Orion {
             if let Kind::Run(action) = &command.kind {
                 command.logo = match *action {
                     Action::Provider(i) => Some(crate::agents::PROVIDERS[i].logo),
-                    Action::Agent(i) => Some(crate::agents::logo_for(&self.settings.agents[i].command)),
+                    Action::Agent(i) => {
+                        Some(crate::agents::logo_for(&self.settings.agents[i].command))
+                    }
                     Action::InProject(_, choice, _) => Some(choice.logo(&self.settings)),
                     Action::OpenSaved(i) => self.saved_logo(&self.saved[i].agent),
                     _ => command.logo,

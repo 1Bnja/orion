@@ -102,7 +102,10 @@ impl Section {
                 "modelo",
             ],
             Self::Avanzado => &[
-                "avanzado", "config", "config.toml", "archivo",
+                "avanzado",
+                "config",
+                "config.toml",
+                "archivo",
                 "motor",
                 "grafico",
                 "gpu",
