@@ -13,6 +13,8 @@ use eframe::egui::{
     self, Color32, CursorIcon, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2,
     vec2,
 };
+use std::collections::HashMap;
+use std::time::Duration;
 
 pub(super) const WIDTH: f32 = 720.0;
 /// Cada cuánto se repinta mientras algo gira: la ventana entera, así que no al máximo.
@@ -116,6 +118,7 @@ pub(super) fn panel(
     o: &mut Orchestrate,
     step: &Step,
     team: &[Member],
+    activity: &HashMap<u64, String>,
     out: &mut Vec<Intent>,
 ) {
     let current = if !o.plan.is_empty() {
@@ -141,7 +144,7 @@ pub(super) fn panel(
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                 if !o.plan.is_empty() {
-                    running(ui, o, out);
+                    running(ui, o, activity, out);
                 } else {
                     match step {
                         Step::Writing => writing(ui, o, team, out),
@@ -859,7 +862,24 @@ fn active_round(rounds: &[usize], runs: &[&Run]) -> Option<usize> {
         .min()
 }
 
-fn running(ui: &mut Ui, o: &Orchestrate, out: &mut Vec<Intent>) {
+/// Cuánto lleva trabajando un agente: "12 s", "hace 3 min", "hace 1 h 5 min".
+fn elapsed(d: Duration) -> String {
+    let secs = d.as_secs();
+    match (secs / 3600, secs / 60 % 60) {
+        (0, 0) => format!("{secs} s"),
+        (0, m) => format!("hace {m} min"),
+        (h, 0) => format!("hace {h} h"),
+        (h, m) => format!("hace {h} h {m} min"),
+    }
+}
+
+/// Si una fila de la terminal dice algo: no solo blancos ni dibujo de cajas.
+pub(super) fn meaningful(row: &str) -> bool {
+    row.chars()
+        .any(|c| !c.is_whitespace() && !('\u{2500}'..='\u{257F}').contains(&c))
+}
+
+fn running(ui: &mut Ui, o: &Orchestrate, activity: &HashMap<u64, String>, out: &mut Vec<Intent>) {
     if o.paused {
         note(
             ui,
@@ -998,6 +1018,11 @@ fn running(ui: &mut Ui, o: &Orchestrate, out: &mut Vec<Intent>) {
                             .size(11.5)
                             .color(dim_text()),
                     );
+                    if let Run::Working { pane, .. } = run
+                        && let Some(since) = o.since.get(pane)
+                    {
+                        note(ui, &format!("·  {}", elapsed(since.elapsed())));
+                    }
                     let detail = match run {
                         Run::Working { branch, .. }
                         | Run::Done { branch, .. }
@@ -1009,6 +1034,15 @@ fn running(ui: &mut Ui, o: &Orchestrate, out: &mut Vec<Intent>) {
                         note(ui, &format!("·  {detail}"));
                     }
                 });
+                if let Run::Working { pane, .. } = run
+                    && let Some(row) = activity.get(pane)
+                {
+                    ui.horizontal(|ui| {
+                        ui.add_space(32.0);
+                        let text = RichText::new(row).size(11.0).color(dim_text());
+                        ui.add(egui::Label::new(text).truncate());
+                    });
+                }
                 if let Some(why) = why {
                     ui.horizontal(|ui| {
                         ui.add_space(32.0);
@@ -1160,6 +1194,26 @@ mod tests {
         let plan = [task(&[]), task(&[]), task(&[0]), task(&[1, 2])];
         let refs: Vec<&Subtask> = plan.iter().collect();
         assert_eq!(rounds(&refs), [1, 1, 2, 3]);
+    }
+
+    #[test]
+    fn rows_with_only_blanks_or_box_drawing_say_nothing() {
+        assert!(!meaningful(""));
+        assert!(!meaningful("    "));
+        assert!(!meaningful("  ─│┌┐  "));
+        assert!(meaningful("│ Leyendo src/app.rs │"));
+        assert!(meaningful("cargo test"));
+    }
+
+    #[test]
+    fn elapsed_time_reads_in_the_biggest_units() {
+        let at = |secs| elapsed(Duration::from_secs(secs));
+        assert_eq!(at(0), "0 s");
+        assert_eq!(at(59), "59 s");
+        assert_eq!(at(60), "hace 1 min");
+        assert_eq!(at(200), "hace 3 min");
+        assert_eq!(at(3600), "hace 1 h");
+        assert_eq!(at(3900), "hace 1 h 5 min");
     }
 
     #[test]
