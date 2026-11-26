@@ -32,6 +32,7 @@ use alacritty_terminal::vte::ansi::Color;
 use alacritty_terminal::vte::ansi::CursorShape;
 use alacritty_terminal::vte::ansi::NamedColor;
 use eframe::egui;
+use eframe::egui::emath::GuiRounding;
 use eframe::egui::text::ByteIndex;
 use eframe::egui::text::LayoutJob;
 use eframe::egui::text::LayoutSection;
@@ -199,6 +200,31 @@ pub(crate) fn push_char(job: &mut LayoutJob, c: char, format: TextFormat) {
             byte_range: start..end,
             format,
         }),
+    }
+}
+
+/// Bloques (▀▄█▌▐▛▜…) como rectángulos que llenan la celda: con letras quedan huecos por el interlineado.
+fn block_rects(c: char, cell: egui::Rect) -> Vec<egui::Rect> {
+    let part = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        egui::Rect::from_min_max(cell.lerp_inside([x0, y0]), cell.lerp_inside([x1, y1]))
+    };
+    let n = c as u32;
+    match n {
+        0x2580 => vec![part(0.0, 0.0, 1.0, 0.5)],
+        0x2581..=0x2588 => vec![part(0.0, 1.0 - (n - 0x2580) as f32 / 8.0, 1.0, 1.0)],
+        0x2589..=0x258F => vec![part(0.0, 0.0, (0x2590 - n) as f32 / 8.0, 1.0)],
+        0x2590 => vec![part(0.5, 0.0, 1.0, 1.0)],
+        0x2594 => vec![part(0.0, 0.0, 1.0, 0.125)],
+        0x2595 => vec![part(0.875, 0.0, 1.0, 1.0)],
+        0x2596..=0x259F => {
+            let quads = [4, 8, 1, 13, 9, 7, 11, 2, 6, 14][(n - 0x2596) as usize];
+            [(1, 0.0, 0.0), (2, 0.5, 0.0), (4, 0.0, 0.5), (8, 0.5, 0.5)]
+                .into_iter()
+                .filter(|(bit, ..)| quads & bit != 0)
+                .map(|(_, x, y)| part(x, y, x + 0.5, y + 0.5))
+                .collect()
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -716,6 +742,27 @@ impl Session {
                             strikethrough: line(c.flags.contains(Flags::STRIKEOUT)),
                             ..Default::default()
                         };
+                        let min = origin + egui::vec2(col as f32 * cell.x, 0.0);
+                        let blocks = block_rects(
+                            c.c,
+                            egui::Rect::from_min_size(
+                                min,
+                                egui::vec2(width as f32 * cell.x, cell.y),
+                            ),
+                        );
+                        if !blocks.is_empty() {
+                            for rect in blocks {
+                                painter.rect_filled(
+                                    rect.round_to_pixels(painter.pixels_per_point()),
+                                    0.0,
+                                    fg,
+                                );
+                            }
+                            for _ in 0..width {
+                                push_char(&mut text, ' ', format.clone());
+                            }
+                            continue;
+                        }
                         let glyph = push_cell(ui.ctx(), &mut text, c.c, format, width, cell.x);
                         loose.extend(glyph.map(|glyph| (col, glyph)));
                     }
