@@ -30,21 +30,60 @@ pub struct Graph {
     pub lanes: usize,
 }
 
-/// Lee hasta `limit` commits de todas las ramas y arma el grafo.
-pub fn load(repo: &Path, limit: usize) -> Result<Graph, String> {
+/// Una referencia del repo (rama, tag, stash o worktree) y el commit al que apunta.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RefItem {
+    pub name: String,
+    /// Hash del commit.
+    pub target: String,
+    pub current: bool,
+}
+
+/// Todas las referencias del repo, agrupadas por tipo.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Refs {
+    pub local: Vec<RefItem>,
+    pub remote: Vec<RefItem>,
+    pub tags: Vec<RefItem>,
+    pub stashes: Vec<RefItem>,
+    pub worktrees: Vec<RefItem>,
+}
+
+/// Un archivo cambiado y sus líneas; `None` en binarios y en archivos no rastreados.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FileChange {
+    pub path: String,
+    pub added: Option<u32>,
+    pub removed: Option<u32>,
+}
+
+/// El detalle de un commit.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Details {
+    /// Mensaje completo.
+    pub message: String,
+    pub files: Vec<FileChange>,
+}
+
+/// Lee hasta `limit` commits y arma el grafo: de todas las ramas, o con `rev` solo los
+/// alcanzables desde ahí.
+pub fn load_rev(repo: &Path, rev: Option<&str>, limit: usize) -> Result<Graph, String> {
     let n = limit.to_string();
     // Un solo comando: cada commit en una línea, con campos separados por 0x1f.
-    let text = crate::agents::git(
-        repo,
-        &[
-            "log",
-            "--all",
-            "--topo-order",
-            "-n",
-            &n,
-            "--format=%H\x1f%P\x1f%D\x1f%an\x1f%at\x1f%s",
-        ],
-    )?;
+    let mut args = vec![
+        "log",
+        "--topo-order",
+        "-n",
+        &n,
+        "--format=%H\x1f%P\x1f%D\x1f%an\x1f%at\x1f%s",
+    ];
+    match rev {
+        // `--end-of-options` evita que un rev que empiece con `-` se lea como opción.
+        Some(rev) => args.extend(["--end-of-options", rev]),
+        None => args.push("--all"),
+    }
+    args.push("--");
+    let text = crate::agents::git(repo, &args)?;
     let commits = parse(&text);
     let rows = layout(&commits);
 
@@ -62,6 +101,218 @@ pub fn load(repo: &Path, limit: usize) -> Result<Graph, String> {
         rows,
         lanes,
     })
+}
+
+/// Ramas locales y remotas, tags, stashes y worktrees del repo.
+pub fn refs(repo: &Path) -> Result<Refs, String> {
+    let mut refs = Refs::default();
+
+    let text = crate::agents::git(
+        repo,
+        &[
+            "for-each-ref",
+            // `*objectname` solo existe en tags anotados: es el commit al que apuntan.
+            "--format=%(HEAD)%1f%(objectname)%1f%(*objectname)%1f%(refname)",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+    )?;
+    for line in text.lines() {
+        // El primer campo es `*` o un espacio (que `git` puede haber recortado).
+        let mut fields = line.split('\x1f');
+        let (Some(head), Some(object), Some(peeled), Some(full)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let (list, name) = if let Some(name) = full.strip_prefix("refs/heads/") {
+            (&mut refs.local, name)
+        } else if let Some(name) = full.strip_prefix("refs/remotes/") {
+            if name.ends_with("/HEAD") {
+                continue;
+            }
+            (&mut refs.remote, name)
+        } else if let Some(name) = full.strip_prefix("refs/tags/") {
+            (&mut refs.tags, name)
+        } else {
+            continue;
+        };
+        list.push(RefItem {
+            name: name.to_string(),
+            target: if peeled.is_empty() { object } else { peeled }.to_string(),
+            current: head == "*",
+        });
+    }
+
+    let text = crate::agents::git(repo, &["stash", "list", "--format=%H%x1f%gd: %gs"])?;
+    refs.stashes = text
+        .lines()
+        .filter_map(|line| line.split_once('\x1f'))
+        .map(|(target, name)| RefItem {
+            name: name.to_string(),
+            target: target.to_string(),
+            current: false,
+        })
+        .collect();
+
+    // Se comparan rutas canónicas: git y Windows no siempre las escriben igual.
+    let here = crate::agents::repo_root(repo)
+        .ok()
+        .and_then(|root| root.canonicalize().ok());
+    let text = crate::agents::git(repo, &["worktree", "list", "--porcelain"])?;
+    let mut path = "";
+    for line in text.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            path = p;
+        } else if let Some(head) = line.strip_prefix("HEAD ") {
+            // Un repo bare no trae línea HEAD y queda fuera.
+            refs.worktrees.push(RefItem {
+                name: path.to_string(),
+                target: head.to_string(),
+                current: here.is_some() && Path::new(path).canonicalize().ok() == here,
+            });
+        }
+    }
+
+    Ok(refs)
+}
+
+/// Mensaje completo y archivos cambiados de un commit. Un merge puede venir sin archivos.
+pub fn details(repo: &Path, id: &str) -> Result<Details, String> {
+    // El NUL tras `%B` separa el mensaje del numstat.
+    let text = crate::agents::git(
+        repo,
+        &[
+            "show",
+            "--numstat",
+            "--no-renames",
+            "-z",
+            "--format=%B%x00",
+            "--end-of-options",
+            id,
+            "--",
+        ],
+    )?;
+    let (message, numstat) = text.split_once('\0').unwrap_or((&text, ""));
+    Ok(Details {
+        message: message.trim_end().to_string(),
+        files: parse_numstat(numstat),
+    })
+}
+
+/// El diff de un archivo en un commit. `path` es relativo a la raíz del repo.
+/// ponytail: `agents::git` recorta la salida, así que se pierden las líneas en blanco finales;
+/// si la UI las necesita, habrá que leer la salida cruda.
+pub fn diff(repo: &Path, id: &str, path: &str) -> Result<String, String> {
+    let path = format!(":(top,literal){path}");
+    crate::agents::git(
+        repo,
+        &[
+            "show",
+            "--format=",
+            "--no-renames",
+            "--no-color",
+            "--no-ext-diff",
+            "--end-of-options",
+            id,
+            "--",
+            &path,
+        ],
+    )
+}
+
+/// Cambios sin commitear (staged, unstaged y no rastreados). Vacío = limpio.
+pub fn wip(repo: &Path) -> Result<Vec<FileChange>, String> {
+    // Sin commits todavía no hay HEAD: se compara contra el árbol vacío.
+    // ponytail: es el hash SHA-1; un repo SHA-256 sin commits daría error.
+    let base = match crate::agents::git(repo, &["rev-parse", "--verify", "-q", "HEAD"]) {
+        Ok(_) => "HEAD",
+        Err(_) => "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    };
+    let tracked = crate::agents::git(
+        repo,
+        &["diff", base, "--numstat", "--no-renames", "-z", "--"],
+    )?;
+    let untracked = crate::agents::git(
+        repo,
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+            "-z",
+            "--",
+            ":/",
+        ],
+    )?;
+    let mut files = parse_numstat(&tracked);
+    files.extend(
+        untracked
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(|path| FileChange {
+                path: path.to_string(),
+                added: None,
+                removed: None,
+            }),
+    );
+    Ok(files)
+}
+
+/// Un texto que cambia si cambian HEAD, alguna ref o el WIP; sirve para saber cuándo recargar.
+pub fn fingerprint(repo: &Path) -> Result<String, String> {
+    // Falla en un repo sin commits, y ahí vacío es una respuesta válida.
+    let head =
+        crate::agents::git(repo, &["rev-parse", "--verify", "-q", "HEAD"]).unwrap_or_default();
+    // `%(HEAD)` delata un cambio de rama aunque ambas apunten al mismo commit.
+    let refs = crate::agents::git(
+        repo,
+        &["for-each-ref", "--format=%(HEAD)%(objectname)%(refname)"],
+    )?;
+    // Sin locks opcionales, para no chocar con los git de los agentes al consultar seguido.
+    let status = crate::agents::git(repo, &["--no-optional-locks", "status", "--porcelain"])?;
+    let mut print = format!("{head}\n{refs}\n{status}");
+
+    // `status` no cambia al volver a editar un archivo ya modificado: se suman tamaño y fecha.
+    let root = crate::agents::repo_root(repo)?;
+    let dirty = crate::agents::git(
+        repo,
+        &[
+            "ls-files",
+            "--modified",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+            "-z",
+            "--",
+            ":/",
+        ],
+    )?;
+    for path in dirty.split('\0').filter(|path| !path.is_empty()) {
+        if let Ok(meta) = std::fs::metadata(root.join(path)) {
+            print += &format!("\n{path} {} {:?}", meta.len(), meta.modified().ok());
+        }
+    }
+    Ok(print)
+}
+
+/// Separa la salida de `--numstat -z --no-renames`: `agregadas\tquitadas\truta` y un NUL.
+fn parse_numstat(text: &str) -> Vec<FileChange> {
+    text.split('\0')
+        .filter_map(|record| {
+            let mut fields = record.trim_start_matches('\n').splitn(3, '\t');
+            let added = fields.next()?;
+            let removed = fields.next()?;
+            let path = fields.next()?;
+            Some(FileChange {
+                path: path.to_string(),
+                // En binarios numstat pone `-`, que no parsea: queda `None`.
+                added: added.parse().ok(),
+                removed: removed.parse().ok(),
+            })
+        })
+        .collect()
 }
 
 /// Separa el texto de `git log` en commits. Una línea por commit, seis campos por 0x1f:
@@ -285,7 +536,7 @@ mod tests {
         run(&repo, &["checkout", "-q", "main"]);
         run(&repo, &["merge", "--no-ff", "-q", "-m", "merge", "lateral"]);
 
-        let graph = load(&repo, 100).unwrap();
+        let graph = load_rev(&repo, None, 100).unwrap();
         assert_eq!(graph.commits.len(), 4);
         assert_eq!(graph.lanes, 2);
 
@@ -317,6 +568,194 @@ mod tests {
         assert_eq!(graph.rows[root].lane, 0);
         assert!(graph.rows[root].edges.is_empty());
         assert!(graph.rows.last().unwrap().edges.is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Crea un repo temporal con un commit en `main`; devuelve la carpeta base y el repo.
+    fn temp_repo(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("orion-graph-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run(&repo, &["init", "-q"]);
+        run(&repo, &["config", "user.name", "t"]);
+        run(&repo, &["config", "user.email", "t@t"]);
+        add_commit(&repo, "raiz.txt", "raiz\n", "raiz");
+        run(&repo, &["branch", "-M", "main"]);
+        (base, repo)
+    }
+
+    fn head(repo: &Path) -> String {
+        crate::agents::git(repo, &["rev-parse", "HEAD"]).unwrap()
+    }
+
+    #[test]
+    fn load_rev_de_una_rama_no_trae_commits_de_la_otra() {
+        let (base, repo) = temp_repo("rev");
+        run(&repo, &["checkout", "-q", "-b", "lateral"]);
+        add_commit(&repo, "lateral.txt", "lado\n", "lateral");
+        run(&repo, &["checkout", "-q", "main"]);
+        add_commit(&repo, "main.txt", "main\n", "solo-main");
+
+        let subjects = |rev| -> Vec<String> {
+            let graph = load_rev(&repo, rev, 100).unwrap();
+            graph.commits.into_iter().map(|c| c.subject).collect()
+        };
+        assert_eq!(subjects(Some("main")), vec!["solo-main", "raiz"]);
+        assert_eq!(subjects(Some("lateral")), vec!["lateral", "raiz"]);
+        assert_eq!(subjects(None).len(), 3);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn refs_agrupa_ramas_tags_stashes_y_worktrees() {
+        let (base, repo) = temp_repo("refs");
+        let first = head(&repo);
+
+        let empty = refs(&repo).unwrap();
+        assert!(empty.remote.is_empty());
+        assert!(empty.tags.is_empty());
+        assert!(empty.stashes.is_empty());
+
+        run(&repo, &["tag", "ligero"]);
+        run(&repo, &["tag", "-a", "-m", "v1", "anotado"]);
+        run(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let origin_head = "refs/remotes/origin/HEAD";
+        run(
+            &repo,
+            &["symbolic-ref", origin_head, "refs/remotes/origin/main"],
+        );
+        let other = base.join("otro");
+        let other_arg = other.to_str().unwrap();
+        run(&repo, &["worktree", "add", "-q", "-b", "otra", other_arg]);
+        std::fs::write(repo.join("raiz.txt"), "cambio\n").unwrap();
+        run(&repo, &["stash", "push", "-q", "-m", "guardado"]);
+
+        let all = refs(&repo).unwrap();
+        let item = |name: &str, current| RefItem {
+            name: name.to_string(),
+            target: first.clone(),
+            current,
+        };
+        assert_eq!(all.local, vec![item("main", true), item("otra", false)]);
+        assert_eq!(all.remote, vec![item("origin/main", false)]);
+        assert_eq!(
+            all.tags,
+            vec![item("anotado", false), item("ligero", false)]
+        );
+        assert_eq!(all.stashes.len(), 1);
+        assert!(all.stashes[0].name.starts_with("stash@{0}: "));
+        assert!(all.stashes[0].name.ends_with("guardado"));
+        assert_eq!(all.worktrees.len(), 2);
+        assert!(all.worktrees[0].current);
+        assert!(!all.worktrees[1].current);
+        assert!(all.worktrees[1].name.ends_with("otro"));
+        assert_eq!(all.worktrees[1].target, first);
+
+        // Visto desde el otro worktree, el actual es ese.
+        let from_other = refs(&other).unwrap();
+        assert!(!from_other.worktrees[0].current);
+        assert!(from_other.worktrees[1].current);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn details_trae_mensaje_completo_y_numstat() {
+        let (base, repo) = temp_repo("details");
+        std::fs::write(repo.join("año.bin"), [0u8, 1, 2]).unwrap();
+        add_commit(&repo, "raiz.txt", "uno\ndos\n", "asunto\n\ncuerpo");
+
+        let info = details(&repo, &head(&repo)).unwrap();
+        assert_eq!(info.message, "asunto\n\ncuerpo");
+        let binary = FileChange {
+            path: "año.bin".to_string(),
+            added: None,
+            removed: None,
+        };
+        let text = FileChange {
+            path: "raiz.txt".to_string(),
+            added: Some(2),
+            removed: Some(1),
+        };
+        assert_eq!(info.files, vec![binary, text]);
+
+        // Un merge no falla.
+        run(&repo, &["checkout", "-q", "-b", "lateral"]);
+        add_commit(&repo, "lateral.txt", "lado\n", "lateral");
+        run(&repo, &["checkout", "-q", "main"]);
+        run(&repo, &["merge", "--no-ff", "-q", "-m", "merge", "lateral"]);
+        assert_eq!(details(&repo, &head(&repo)).unwrap().message, "merge");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn diff_funciona_en_el_primer_commit_y_en_los_siguientes() {
+        let (base, repo) = temp_repo("diff");
+        let first = head(&repo);
+        add_commit(&repo, "raiz.txt", "nueva\n", "cambio");
+
+        let initial = diff(&repo, &first, "raiz.txt").unwrap();
+        assert!(initial.contains("+raiz"));
+        let next = diff(&repo, &head(&repo), "raiz.txt").unwrap();
+        assert!(next.contains("-raiz"));
+        assert!(next.contains("+nueva"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn wip_lista_staged_unstaged_y_no_rastreados() {
+        let (base, repo) = temp_repo("wip");
+        assert!(wip(&repo).unwrap().is_empty());
+
+        std::fs::write(repo.join("raiz.txt"), "raiz\nmas\n").unwrap();
+        std::fs::write(repo.join("staged.txt"), "a\n").unwrap();
+        run(&repo, &["add", "staged.txt"]);
+        std::fs::write(repo.join("suelto.txt"), "b\n").unwrap();
+
+        let change = |path: &str, added, removed| FileChange {
+            path: path.to_string(),
+            added,
+            removed,
+        };
+        assert_eq!(
+            wip(&repo).unwrap(),
+            vec![
+                change("raiz.txt", Some(1), Some(0)),
+                change("staged.txt", Some(1), Some(0)),
+                change("suelto.txt", None, None),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn fingerprint_cambia_con_commits_ramas_y_ediciones() {
+        let (base, repo) = temp_repo("fingerprint");
+        let mut seen = vec![fingerprint(&repo).unwrap()];
+        assert_eq!(fingerprint(&repo).unwrap(), seen[0]);
+        let mut changed = || {
+            let now = fingerprint(&repo).unwrap();
+            assert!(!seen.contains(&now));
+            seen.push(now);
+        };
+
+        add_commit(&repo, "otro.txt", "otro\n", "otro");
+        changed();
+        run(&repo, &["branch", "nueva"]);
+        changed();
+        run(&repo, &["checkout", "-q", "nueva"]);
+        changed();
+        std::fs::write(repo.join("raiz.txt"), "editado\n").unwrap();
+        changed();
+        // Otra edición del mismo archivo, que `status` por sí solo no notaría.
+        std::fs::write(repo.join("raiz.txt"), "editado otra vez\n").unwrap();
+        changed();
 
         let _ = std::fs::remove_dir_all(&base);
     }
