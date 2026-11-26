@@ -4,8 +4,8 @@
 use super::chrome::{
     Icon, draw_icon, icon_button, icon_text_button, label, medium, section_header, selectable_row,
 };
-use super::graph::{GraphView, ROW, date_utc};
-use super::graph_actions::{Actions, Target};
+use super::graph::{GraphView, Prefs, ROW, date_utc};
+use super::graph_actions::{Actions, Target, open_file};
 use crate::colors::{surface, theme};
 use crate::git_graph::{self, Commit, Details, FileChange, RefItem, Refs};
 use crate::git_ops;
@@ -111,7 +111,10 @@ pub(super) struct Panels {
     wip_open: bool,
     /// Qué secciones del panel izquierdo están abiertas (ramas, remotas, tags, stashes,
     /// worktrees).
-    sections: [bool; 5],
+    pub(super) sections: [bool; 5],
+    /// Anchos actuales de los dos paneles.
+    pub(super) left_w: f32,
+    pub(super) right_w: f32,
     /// Aviso del último clic (ej. el commit no está cargado).
     notice: Option<String>,
     /// El archivo cuyo diff se ve: (commit o `WIP`, ruta).
@@ -124,14 +127,16 @@ pub(super) struct Panels {
 }
 
 impl Panels {
-    pub(super) fn new(repo: PathBuf) -> Self {
+    pub(super) fn new(repo: PathBuf, prefs: &Prefs) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
             repo,
             refs: Refs::default(),
             wip: Vec::new(),
             wip_open: false,
-            sections: [true, true, false, false, false],
+            sections: prefs.sections,
+            left_w: prefs.left_w,
+            right_w: prefs.right_w,
             notice: None,
             file: None,
             details: HashMap::new(),
@@ -230,9 +235,9 @@ impl Panels {
         actions: &mut Actions,
     ) -> Option<Option<String>> {
         let (mut change, mut clicked) = (None, None);
-        egui::Panel::left("grafo-refs")
+        let panel = egui::Panel::left("grafo-refs")
             .resizable(true)
-            .default_size(210.0)
+            .default_size(self.left_w)
             .size_range(120.0..=420.0)
             .frame(panel_frame())
             .show_separator_line(false)
@@ -380,6 +385,7 @@ impl Panels {
                         }
                     });
             });
+        self.left_w = panel.response.rect.width();
         if let Some(hash) = clicked {
             self.select(view, &hash);
         }
@@ -414,9 +420,9 @@ impl Panels {
             None => Some(self.wip.clone()),
         };
         let mut select = None;
-        egui::Panel::right("grafo-detalle")
+        let panel = egui::Panel::right("grafo-detalle")
             .resizable(true)
-            .default_size(380.0)
+            .default_size(self.right_w)
             .size_range(240.0..=900.0)
             .frame(panel_frame())
             .show_separator_line(false)
@@ -454,6 +460,7 @@ impl Panels {
                     self.diff_view(ui, &ctx, key, actions);
                 }
             });
+        self.right_w = panel.response.rect.width();
         if let Some(hash) = select {
             self.select(view, &hash);
         }
@@ -579,7 +586,10 @@ impl Panels {
                 FontId::proportional(12.5),
                 theme().fg,
             );
-            if response.on_hover_text(&file.path).clicked() {
+            let response = response.on_hover_text(&file.path);
+            if response.double_clicked() {
+                open_file(&self.repo, &file.path);
+            } else if response.clicked() {
                 self.file = (!open).then(|| (id.to_string(), file.path.clone()));
             }
         }
@@ -762,7 +772,7 @@ mod tests {
         let mut view = GraphView::new(sample());
         view.selected = Some(1);
         let id = view.graph.commits[1].id.clone();
-        let mut panels = Panels::new(PathBuf::from("."));
+        let mut panels = Panels::new(PathBuf::from("."), &Prefs::default());
         let item = |name: &str, current| RefItem {
             name: name.into(),
             target: id.clone(),

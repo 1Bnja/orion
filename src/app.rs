@@ -1148,6 +1148,12 @@ impl Orion {
             area.min + egui::vec2(left, 0.0),
             area.max - egui::Vec2::splat(PANE_GAP),
         );
+        // Con una ventana de Orion encima, el teclado no es del Grafo.
+        let keys = !(self.menu.open
+            || self.palette.open
+            || self.orchestrate.open
+            || self.project.open
+            || self.review.is_some());
         let tab = &mut self.tabs[self.active];
         tab.rects.clear();
         let panes = match &mut tab.content {
@@ -1162,7 +1168,10 @@ impl Orion {
                 egui::Frame::central_panel(pane_ui.style())
                     .fill(surface(theme().bg))
                     .corner_radius(PANE_RADIUS)
-                    .show(&mut pane_ui, |ui| graph.ui(ui));
+                    .show(&mut pane_ui, |ui| {
+                        graph.keys = keys;
+                        graph.ui(ui);
+                    });
                 let stroke = egui::Stroke::new(1.0, theme().line());
                 ui.painter()
                     .rect_stroke(inner, PANE_RADIUS, stroke, egui::StrokeKind::Inside);

@@ -261,8 +261,22 @@ fn file_row(
             }
         }
     }
-    let clicked = response.on_hover_text(&file.path).clicked();
+    let response = response.on_hover_text(&file.path);
+    // El segundo clic de un doble clic no vuelve a cerrar el diff: abre el editor.
+    let clicked = response.clicked() && !response.double_clicked();
     (clicked && pressed.is_none(), pressed)
+}
+
+/// Abre en el editor un archivo del repo, si todavía existe.
+pub(super) fn open_file(repo: &Path, path: &str) {
+    let path = repo.join(path);
+    if path.is_file() {
+        links::open(Link::File {
+            path,
+            line: None,
+            col: None,
+        });
+    }
 }
 
 /// Las acciones de una pestaña Grafo.
@@ -637,6 +651,10 @@ impl Actions {
         self.run(ctx, what, move |r| git_ops::apply_hunk(r, &patch, reverse));
     }
 
+    pub(super) fn dialog_open(&self) -> bool {
+        self.dialog.is_some()
+    }
+
     pub(super) fn busy(&self) -> bool {
         !self.idle()
     }
@@ -707,6 +725,7 @@ impl Actions {
         for file in &status.unstaged {
             let shown = open == Some((false, file.path.as_str()));
             let (row, button) = file_row(ui, "sin-preparar", file, shown, &buttons, idle);
+            self.open_on_double_click(ui, &file.path);
             let paths = vec![file.path.clone()];
             match button {
                 Some(0) => self.run(&ctx, format!("Preparar {}", file.path), move |r| {
@@ -741,6 +760,7 @@ impl Actions {
             let shown = open == Some((true, file.path.as_str()));
             let buttons = [(Icon::Close, "Quitar")];
             let (row, button) = file_row(ui, "preparado", file, shown, &buttons, idle);
+            self.open_on_double_click(ui, &file.path);
             if button.is_some() {
                 let paths = vec![file.path.clone()];
                 self.run(&ctx, format!("Quitar {}", file.path), move |r| {
@@ -805,6 +825,19 @@ impl Actions {
             }
         });
         clicked
+    }
+
+    /// Doble clic en la fila recién dibujada (la de `path`): se abre en el editor.
+    fn open_on_double_click(&self, ui: &egui::Ui, path: &str) {
+        let last = ui.min_rect();
+        let row = egui::Rect::from_min_max(pos2(last.min.x, last.max.y - 24.0), last.max);
+        let double = ui.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+        });
+        if double && ui.rect_contains_pointer(row) {
+            open_file(&self.repo, path);
+        }
     }
 
     fn commit(&mut self, ctx: &egui::Context, push: bool) {

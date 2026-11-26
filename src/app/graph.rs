@@ -54,6 +54,8 @@ pub(super) struct GraphView {
     pub(super) show_tags: bool,
     /// Fila a la que la lista se desplaza en el próximo frame.
     pub(super) scroll_to: Option<usize>,
+    /// Las filas que se vieron en el último frame.
+    visible: std::ops::Range<usize>,
     /// Ancho de la columna de refs, que se ajusta arrastrando su borde.
     refs_w: f32,
     /// Carril del commit bajo el puntero en el frame anterior: se resalta en todas las filas.
@@ -92,6 +94,67 @@ fn matches(commit: &Commit, needle: &str) -> bool {
         .into_iter()
         .chain(&commit.refs)
         .any(|text| text.to_lowercase().contains(needle))
+}
+
+/// La coincidencia que sigue a `from` (o la anterior, con `back`), dando la vuelta.
+fn next_match(commits: &[Commit], needle: &str, from: Option<usize>, back: bool) -> Option<usize> {
+    let n = commits.len();
+    if needle.is_empty() || n == 0 {
+        return None;
+    }
+    // Sin selección se empieza justo antes de la primera (o de la última).
+    let from = from.unwrap_or(if back { 0 } else { n - 1 });
+    (1..=n)
+        .map(|k| (from + if back { n - k } else { k }) % n)
+        .find(|&i| matches(&commits[i], needle))
+}
+
+/// Cómo dejaste la vista: se guarda en graph.json, al lado de config.toml.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(super) struct Prefs {
+    refs_w: f32,
+    show_remotes: bool,
+    show_tags: bool,
+    /// Las secciones abiertas del panel izquierdo.
+    pub(super) sections: [bool; 5],
+    /// Anchos de los paneles de refs y de detalle.
+    pub(super) left_w: f32,
+    pub(super) right_w: f32,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            refs_w: REFS_W,
+            show_remotes: true,
+            show_tags: true,
+            sections: [true, true, false, false, false],
+            left_w: 210.0,
+            right_w: 380.0,
+        }
+    }
+}
+
+fn prefs_path() -> Option<PathBuf> {
+    // Los tests no leen ni pisan los del usuario.
+    if cfg!(test) {
+        return None;
+    }
+    crate::config::config_path().map(|p| p.with_file_name("graph.json"))
+}
+
+fn load_prefs() -> Prefs {
+    let text = prefs_path().and_then(|p| std::fs::read_to_string(p).ok());
+    text.and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Si no se puede escribir, la próxima vez la vista arranca como estaba antes.
+fn save_prefs(prefs: &Prefs) {
+    if let (Some(path), Ok(text)) = (prefs_path(), serde_json::to_string_pretty(prefs)) {
+        let _ = std::fs::write(path, text);
+    }
 }
 
 /// Fecha relativa a `now`; ambos en segundos desde 1970.
@@ -264,6 +327,7 @@ impl GraphView {
             show_remotes: true,
             show_tags: true,
             scroll_to: None,
+            visible: 0..0,
             refs_w: REFS_W,
             hovered_lane: None,
         }
@@ -280,12 +344,18 @@ impl GraphView {
     /// La barra de arriba; `busy` = se está recargando. Devuelve true si se pidió refrescar.
     fn toolbar(&mut self, ui: &mut egui::Ui, busy: bool) -> bool {
         ui.horizontal(|ui| {
-            search_field(
+            let search = search_field(
                 ui,
                 &mut self.filter,
                 "Buscar por asunto, autor, hash o ref…",
                 280.0,
             );
+            // Enter salta a la siguiente coincidencia; con Shift, a la anterior.
+            let (enter, back) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.modifiers.shift));
+            if search.lost_focus() && enter {
+                search.request_focus();
+                self.jump(back);
+            }
             ui.add_space(8.0);
             toggle(ui, "Remotas", &mut self.show_remotes);
             toggle(ui, "Tags", &mut self.show_tags);
@@ -367,6 +437,44 @@ impl GraphView {
             .vline(graph_x, rect.y_range(), Stroke::new(1.0, color));
     }
 
+    /// Elige la fila `i` y, si no está a la vista, desplaza la lista hasta ella.
+    fn go_to(&mut self, i: usize) {
+        self.selected = Some(i);
+        // El margen: las filas de las puntas pueden verse a medias.
+        if i <= self.visible.start || i + 2 >= self.visible.end {
+            self.scroll_to = Some(i);
+        }
+    }
+
+    /// Salta a la siguiente coincidencia de la búsqueda (o a la anterior), dando la vuelta.
+    fn jump(&mut self, back: bool) {
+        let needle = self.filter.trim().to_lowercase();
+        let found = next_match(&self.graph.commits, &needle, self.selected, back);
+        if let Some(i) = found {
+            self.go_to(i);
+        }
+    }
+
+    /// Flechas arriba y abajo: el commit anterior o el siguiente.
+    fn arrows(&mut self, ctx: &egui::Context) {
+        let (up, down) = ctx.input_mut(|i| {
+            let none = egui::Modifiers::NONE;
+            (
+                i.consume_key(none, egui::Key::ArrowUp),
+                i.consume_key(none, egui::Key::ArrowDown),
+            )
+        });
+        let Some(last) = self.graph.commits.len().checked_sub(1) else {
+            return;
+        };
+        match self.selected {
+            _ if !(up || down) => {}
+            None => self.go_to(0),
+            Some(i) if up => self.go_to(i.saturating_sub(1)),
+            Some(i) => self.go_to((i + 1).min(last)),
+        }
+    }
+
     /// La lista de commits. Con `more`, al final va «Cargar más»; devuelve true si se pulsó.
     fn list(&mut self, ui: &mut egui::Ui, more: bool, actions: &mut Actions) -> bool {
         if self.graph.commits.is_empty() {
@@ -395,6 +503,7 @@ impl GraphView {
         let count = self.graph.commits.len();
         let mut load_more = false;
         area.show_rows(ui, ROW, count + usize::from(more), |ui, visible| {
+            self.visible = visible.clone();
             for i in visible {
                 if i == count {
                     let size = vec2(ui.available_width(), ROW);
@@ -602,13 +711,20 @@ pub(super) struct GraphTab {
     printing: Option<Receiver<Result<String, String>>>,
     /// Cuándo se pidió la última huella.
     printed: Instant,
+    /// Lo último que se leyó o guardó de graph.json.
+    prefs: Prefs,
+    /// Las flechas mueven la selección (no si hay una ventana de Orion encima).
+    pub(super) keys: bool,
 }
 
 impl GraphTab {
     /// Una pestaña vacía: carga el grafo la primera vez que queda activa.
     pub(super) fn new(repo: PathBuf) -> Self {
+        let prefs = load_prefs();
         Self {
-            panels: Panels::new(repo.clone()),
+            panels: Panels::new(repo.clone(), &prefs),
+            prefs,
+            keys: true,
             actions: Actions::new(repo.clone()),
             repo,
             view: None,
@@ -673,7 +789,13 @@ impl GraphTab {
                     self.panels.refs = loaded.refs;
                     match &mut self.view {
                         Some(view) => view.replace(loaded.graph),
-                        None => self.view = Some(GraphView::new(loaded.graph)),
+                        None => {
+                            let mut view = GraphView::new(loaded.graph);
+                            view.refs_w = self.prefs.refs_w.clamp(REFS_MIN, REFS_MAX);
+                            view.show_remotes = self.prefs.show_remotes;
+                            view.show_tags = self.prefs.show_tags;
+                            self.view = Some(view);
+                        }
                     }
                 }
                 Err(e) => self.error = Some(e),
@@ -745,6 +867,11 @@ impl GraphTab {
             }
             return;
         };
+        // Antes de la barra de búsqueda y de los campos de texto: si se está escribiendo,
+        // las flechas son suyas.
+        if self.keys && !self.actions.dialog_open() && !ui.ctx().egui_wants_keyboard_input() {
+            view.arrows(ui.ctx());
+        }
         let selected = view.selected.map(|i| view.graph.commits[i].id.clone());
         self.actions.bar(ui, selected.as_deref());
         self.actions.messages(ui);
@@ -763,6 +890,19 @@ impl GraphTab {
             &mut self.actions,
         );
         self.actions.dialogs(ui.ctx());
+        // Al soltar el mouse, no a cada píxel mientras se arrastra un borde.
+        let now = Prefs {
+            refs_w: view.refs_w,
+            show_remotes: view.show_remotes,
+            show_tags: view.show_tags,
+            sections: self.panels.sections,
+            left_w: self.panels.left_w,
+            right_w: self.panels.right_w,
+        };
+        if now != self.prefs && !ui.input(|i| i.pointer.any_down()) {
+            save_prefs(&now);
+            self.prefs = now;
+        }
 
         let ctx = ui.ctx().clone();
         if let Some(branch) = branch {
@@ -918,6 +1058,31 @@ pub(super) mod tests {
         let load = median(&|| assert!(load_all(&repo, None, LIMIT).is_ok()));
         let print = median(&|| assert!(git_graph::fingerprint(&repo).is_ok()));
         println!("carga completa: {load:?} · huella: {print:?}");
+    }
+
+    #[test]
+    fn search_jumps_around_the_matches() {
+        let commits = sample().commits;
+        let hits: Vec<usize> = (0..commits.len())
+            .filter(|&i| matches(&commits[i], "claude"))
+            .collect();
+        assert!(hits.len() >= 2, "{hits:?}");
+        let next = |from, back| next_match(&commits, "claude", from, back);
+        assert_eq!(next(None, false), Some(hits[0]));
+        assert_eq!(next(None, true), hits.last().copied());
+        assert_eq!(next(Some(hits[0]), false), Some(hits[1]));
+        // Da la vuelta en las dos direcciones.
+        assert_eq!(next(hits.last().copied(), false), Some(hits[0]));
+        assert_eq!(next(Some(hits[0]), true), hits.last().copied());
+        assert_eq!(next_match(&commits, "no está", None, false), None);
+        assert_eq!(next_match(&commits, "", None, false), None);
+    }
+
+    #[test]
+    fn prefs_survive_missing_fields() {
+        let prefs: Prefs = serde_json::from_str(r#"{"show_tags":false}"#).unwrap();
+        assert!(!prefs.show_tags && prefs.show_remotes);
+        assert_eq!(prefs.left_w, Prefs::default().left_w);
     }
 
     #[test]

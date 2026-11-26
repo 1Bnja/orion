@@ -292,7 +292,12 @@ pub(super) fn section_header(
 }
 
 /// Search field with the magnifier inside, like the one in Configuración.
-pub(super) fn search_field(ui: &mut egui::Ui, filter: &mut String, hint: &str, width: f32) {
+pub(super) fn search_field(
+    ui: &mut egui::Ui,
+    filter: &mut String,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
     let height = 28.0;
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     let stroke = egui::Stroke::new(1.0, theme().line());
@@ -319,7 +324,7 @@ pub(super) fn search_field(ui: &mut egui::Ui, filter: &mut String, hint: &str, w
             .hint_text(hint)
             .frame(egui::Frame::NONE)
             .desired_width(f32::INFINITY),
-    );
+    )
 }
 
 /// The parts of `rect` that `hole` does not cover, as up to four rectangles.
