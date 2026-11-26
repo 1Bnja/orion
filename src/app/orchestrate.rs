@@ -7,11 +7,12 @@ mod view;
 
 use super::overlay;
 use super::{AgentStatus, Orion, Tab};
+use crate::grid::{is_spacer, visible_rows};
 use crate::orchestrator::{
     Dep, Gate, Planner, Subtask, agent_command, gate, has_commits, prepare_worktree,
 };
 use eframe::egui;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -142,6 +143,8 @@ pub(super) struct Orchestrate {
     /// La búsqueda de esos commits en camino, y cuándo se pidió la última.
     checking: Option<Receiver<Vec<String>>>,
     checked: Instant,
+    /// Desde cuándo trabaja el agente de cada panel. No se guarda: un plan recuperado no la tiene.
+    since: HashMap<u64, Instant>,
 }
 
 impl Default for Orchestrate {
@@ -162,6 +165,7 @@ impl Default for Orchestrate {
             committed: HashSet::new(),
             checking: None,
             checked: Instant::now(),
+            since: HashMap::new(),
         }
     }
 }
@@ -292,6 +296,7 @@ impl Orion {
         let team: Vec<view::Member> = (catalog.iter())
             .map(|e| (e.clone(), crate::orchestrator::problem(e)))
             .collect();
+        let activity = self.last_activity();
         let o = &mut self.orchestrate;
         // Con un menú abierto, Escape es para él.
         let escape = open
@@ -300,7 +305,7 @@ impl Orion {
         let step = o.step();
         let mut intents = Vec::new();
         let shown = overlay::show(ctx, "orquestador", open, view::WIDTH, 0.045, |ui| {
-            view::panel(ui, o, &step, &team, &mut intents);
+            view::panel(ui, o, &step, &team, &activity, &mut intents);
         })?;
         // Saliendo: se ve, pero ya no hace nada.
         if !open {
@@ -503,6 +508,10 @@ impl Orion {
         if !news.is_empty() {
             self.show_toast(news.join(" · "));
         }
+        let o = &mut self.orchestrate;
+        o.since.retain(|id, _| {
+            (o.plan.iter()).any(|(_, run)| matches!(run, Run::Working { pane, .. } if pane == id))
+        });
         self.orchestrate.persist();
     }
 
@@ -573,6 +582,25 @@ impl Orion {
         }
     }
 
+    /// La última fila con texto de la terminal de cada agente que trabaja, por id de panel.
+    fn last_activity(&self) -> HashMap<u64, String> {
+        (self.orchestrate.plan.iter())
+            .filter_map(|(_, run)| {
+                let &Run::Working { pane, .. } = run else {
+                    return None;
+                };
+                let tab = self.tabs.iter().find(|t| t.agent_run == Some(pane))?;
+                let session = tab.panes()?.get(pane)?;
+                let row = visible_rows(&session.term).iter().rev().find_map(|row| {
+                    let cells = row.iter().filter(|c| !is_spacer(c));
+                    let text: String = cells.map(|c| c.c).collect();
+                    view::meaningful(&text).then(|| text.trim_end().to_string())
+                })?;
+                Some((pane, row))
+            })
+            .collect()
+    }
+
     /// Abre la subtarea `i` en un worktree que parte de las ramas de sus dependencias.
     fn start_subtask(&mut self, ctx: &egui::Context, i: usize, branches: &[String]) -> Run {
         let s = self.orchestrate.plan[i].0.clone();
@@ -590,6 +618,7 @@ impl Orion {
         let tab = &mut self.tabs[self.active];
         (tab.repo, tab.worktree) = (Some(repo), Some(path));
         let pane = tab.agent_run.unwrap_or(tab.focus);
+        self.orchestrate.since.insert(pane, Instant::now());
         Run::Working { pane, branch, base }
     }
 }
