@@ -32,6 +32,7 @@ mod home;
 mod macmenu;
 mod menu;
 mod orchestrate;
+mod overlay;
 mod palette;
 mod panes;
 mod project;

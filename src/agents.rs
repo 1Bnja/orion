@@ -2,8 +2,9 @@
 //! git worktree propio para que varios agentes trabajen en paralelo sin pisarse.
 
 use crate::pty::ShellKind;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 /// Un CLI de agente que Orion sabe abrir. El perfil `[[agent]]` sigue siendo la vía libre para
@@ -130,8 +131,20 @@ fn check(path: PathBuf) -> Located {
 }
 
 /// Dónde está `base` y si sirve; `None` si no está instalado.
+/// Como `scan`, se recalcula si tiene más de 5 s: buscar recorre todo el PATH (milisegundos en
+/// Windows) y el orquestador lo pregunta en cada frame.
 pub(crate) fn locate(base: &str) -> Option<Located> {
-    find_binary(base, &search_dirs()).map(check)
+    type Found = HashMap<String, (Instant, Option<Located>)>;
+    static CACHE: LazyLock<Mutex<Found>> = LazyLock::new(Default::default);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, found)) = cache.get(base)
+        && at.elapsed() < Duration::from_secs(5)
+    {
+        return found.clone();
+    }
+    let found = find_binary(base, &search_dirs()).map(check);
+    cache.insert(base.into(), (Instant::now(), found.clone()));
+    found
 }
 
 /// Qué hay de cada agente de `PROVIDERS`. Se recalcula si tiene más de 5 s: se pregunta en cada frame.

@@ -364,6 +364,15 @@ impl Theme {
         v.error_fg_color = self.ansi[1];
         v.text_cursor.stroke = egui::Stroke::new(2.0, fg);
         v.slider_trailing_fill = true;
+        // Sombras suaves y centradas: la de egui cae en diagonal y se ve como un borde sucio.
+        let shadow = |offset, blur, alpha: u8| egui::epaint::Shadow {
+            offset: [0, offset],
+            blur,
+            spread: 0,
+            color: Color32::from_black_alpha(if self.is_light() { alpha / 2 } else { alpha }),
+        };
+        v.window_shadow = shadow(12, 40, 110);
+        v.popup_shadow = shadow(8, 24, 90);
 
         let w = &mut v.widgets;
         w.noninteractive = widget(
