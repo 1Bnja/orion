@@ -2,7 +2,7 @@
 name = "orion"
 version = "0.11.0"
 edition = "2024"
-description = "Una terminal simple para Windows 11 y macOS"
+description = "Una terminal simple para Windows 11, macOS y Linux"
 license = "MIT"
 repository = "https://github.com/1Bnja/orion"
 
@@ -13,7 +13,7 @@ base64 = "0.22"
 eframe = { version = "0.37.0", features = ["glow", "wgpu"] }
 portable-pty = "0.9.0"
 raw-window-handle = "0.6"
-# Selector de carpetas nativo para "Nuevo proyecto" (Windows y macOS).
+# Selector de carpetas nativo para "Nuevo proyecto". En Linux necesita un backend: ver abajo.
 rfd = { version = "0.15", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
@@ -44,6 +44,10 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 # Solo en Windows: las fuentes instaladas se leen del registro.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.10"
+
+# Linux: el selector de carpetas por el portal de escritorio (GNOME, KDE, Flatpak), sin enlazar GTK.
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 
 # `cargo run` (debug): las dependencias (egui, alacritty_terminal, el parser) se compilan optimizadas.
 # Se compilan una sola vez, así que no se nota al recompilar.

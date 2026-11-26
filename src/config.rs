@@ -581,11 +581,17 @@ impl Default for FontSettings {
 }
 
 /// Windows: %APPDATA%\orion\config.toml. macOS: ~/Library/Application Support/orion/config.toml.
+/// Linux: $XDG_CONFIG_HOME/orion/config.toml, o ~/.config/orion/config.toml sin esa variable.
 pub(crate) fn config_path() -> Option<PathBuf> {
     #[cfg(windows)]
     let appdata = PathBuf::from(std::env::var_os("APPDATA")?);
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     let appdata = PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support");
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let appdata = match std::env::var_os("XDG_CONFIG_HOME").filter(|dir| !dir.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
+    };
     Some(appdata.join("orion").join("config.toml"))
 }
 

@@ -223,7 +223,9 @@ pub(crate) fn apply_chrome(dark: bool) {
 }
 
 /// La ventana nativa de lo que nos pase eframe: el HWND en Windows, la `NSView` en macOS.
+/// En Linux no hay material que pedir: `of` da None y el campo no se usa.
 #[derive(Clone, Copy)]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub(crate) struct Window(RawWindowHandle);
 
 impl Window {

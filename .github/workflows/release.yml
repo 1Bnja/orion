@@ -1,9 +1,9 @@
-# Release: al subir un tag v* (ej. v0.1.0), compila Orion para Windows y macOS, arma los zips y los
-# publica juntos en una sola release de GitHub.
+# Release: al subir un tag v* (ej. v0.1.0), compila Orion para Windows, macOS y Linux, arma los
+# archivos y los publica juntos en una sola release de GitHub.
 #   git tag v0.1.0
 #   git push origin v0.1.0
-# También se puede correr a mano (Actions → Release → Run workflow): arma los zips y los deja como
-# artefactos, sin publicar nada. Sirve para probar.
+# También se puede correr a mano (Actions → Release → Run workflow): arma los archivos y los deja
+# como artefactos, sin publicar nada. Sirve para probar.
 name: Release
 
 on:
@@ -73,10 +73,32 @@ jobs:
           path: target/dist/*.zip*
           if-no-files-found: error
 
+  linux:
+    # El binario enlaza la glibc de ubuntu-latest: corre en distribuciones de esa época en adelante.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test
+
+      - name: Armar el tar.gz
+        run: ./scripts/package-linux.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orion-linux-x64
+          path: target/dist/*.tar.gz*
+          if-no-files-found: error
+
   publish:
-    # Solo con un tag, y solo si las dos plataformas salieron bien: nunca una release a medias.
+    # Solo con un tag, y solo si las tres plataformas salieron bien: nunca una release a medias.
     if: github.ref_type == 'tag'
-    needs: [windows, macos]
+    needs: [windows, macos, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -88,7 +110,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" dist/*.zip dist/*.sha256 \
+          gh release create "${{ github.ref_name }}" dist/*.zip dist/*.tar.gz dist/*.sha256 \
             --repo "${{ github.repository }}" \
             --title "Orion ${{ github.ref_name }}" \
             --generate-notes

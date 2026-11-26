@@ -9,8 +9,10 @@ use std::process::Command;
 /// Abre una URL o un archivo con lo que el sistema tenga predeterminado.
 #[cfg(windows)]
 const OPENER: &str = "explorer.exe";
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 const OPENER: &str = "open";
+#[cfg(not(any(windows, target_os = "macos")))]
+const OPENER: &str = "xdg-open";
 /// VS Code desde la línea de comandos (en Windows es un .cmd).
 #[cfg(windows)]
 const CODE: &str = "code.cmd";

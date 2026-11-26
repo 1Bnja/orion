@@ -4,7 +4,7 @@
 
 <h1 align="center">Orion</h1>
 
-<p align="center">A simple, fast and quiet terminal for Windows and macOS.</p>
+<p align="center">A simple, fast and quiet terminal for Windows, macOS and Linux.</p>
 
 ---
 
@@ -79,12 +79,14 @@ Before launching, each subtask has a menu to switch its executor. See
 - **Suggestions from your history** as you type; `→` accepts them.
 - **Themes**: Orion (night sky) by default, a monochrome option with color only where it means
   something, plus five more dark and light themes.
-- **Translucent background**: Mica or acrylic on Windows 11, native vibrancy on macOS.
+- **Translucent background**: Mica or acrylic on Windows 11, native vibrancy on macOS (Linux
+  uses a solid background).
 - **Any font**: pick an installed one, or drop a `.ttf` / `.otf` file onto the window.
 - **Several shells**: PowerShell, Windows PowerShell, cmd and WSL on Windows; zsh, bash, fish
-  and PowerShell on macOS.
+  and PowerShell on macOS and Linux.
 - **A complete terminal**: 24-bit color, mouse support, full-screen apps, selection and clipboard.
-- **Updates itself**: Orion lets you know when a new version is out and installs it in one click.
+- **Updates itself**: Orion lets you know when a new version is out and installs it in one click
+  (Windows and macOS; on Linux, download the new release).
 
 ## Install
 
@@ -117,6 +119,24 @@ xattr -dr com.apple.quarantine /Applications/Orion.app
 To remove it, move `Orion.app` to the Trash (and, if you want, your settings in
 `~/Library/Application Support/orion`).
 
+### Linux
+
+1. Download `orion-<version>-linux-x64.tar.gz` from
+   [Releases](https://github.com/1Bnja/orion/releases/latest). It's built on a recent Ubuntu, so
+   it needs a distribution from that time or newer (x86_64, X11 or Wayland).
+2. Unpack it and copy the files to your user folders, so Orion shows up in your app menu:
+
+```sh
+tar -xzf orion-*-linux-x64.tar.gz
+cd orion-*-linux-x64
+install -Dm755 orion ~/.local/bin/orion
+install -Dm644 orion.desktop ~/.local/share/applications/orion.desktop
+install -Dm644 orion.png ~/.local/share/icons/hicolor/256x256/apps/orion.png
+```
+
+`~/.local/bin` has to be in your `PATH` (it is on most distributions). To remove Orion, delete
+those three files (and, if you want, your settings in `~/.config/orion`).
+
 ## Shortcuts
 
 On macOS, use `Cmd` where the table says `Ctrl`, except `Ctrl+C` to interrupt and `Ctrl+Tab` to
@@ -146,6 +166,7 @@ Change everything from `Ctrl+,`, or edit `config.toml`:
 
 - Windows: `%APPDATA%\orion\config.toml`
 - macOS: `~/Library/Application Support/orion/config.toml`
+- Linux: `~/.config/orion/config.toml` (or `$XDG_CONFIG_HOME/orion/config.toml`)
 
 Changes apply as soon as you save the file, without restarting.
 
@@ -260,7 +281,8 @@ agent's name and command:
 
 ```text
 Edit my Orion config.toml (Windows: %APPDATA%\orion\config.toml; macOS:
-~/Library/Application Support/orion/config.toml). Keep every existing entry and add:
+~/Library/Application Support/orion/config.toml; Linux: ~/.config/orion/config.toml).
+Keep every existing entry and add:
 - an [[agent]] with name = "<name>" and command = "<command>"
 - an [[executor]] with id = "<id>", use_for = "<when to use it>" and command = "<command with {prompt}>"
 The command must open the agent in interactive mode with the initial prompt.

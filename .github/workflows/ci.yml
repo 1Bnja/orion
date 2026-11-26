@@ -13,11 +13,11 @@ concurrency:
 
 jobs:
   check:
-    # Orion corre en Windows y macOS: se prueba en los dos (macos-latest es un Mac con Apple Silicon).
+    # Orion corre en Windows, macOS y Linux: se prueba en los tres (macos-latest es un Mac con Apple Silicon).
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
