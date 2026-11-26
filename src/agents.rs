@@ -17,41 +17,155 @@ pub(crate) struct Provider {
     pub(crate) command: &'static str,
     /// Una línea para el tooltip: quién lo hace y cómo instalarlo.
     pub(crate) about: &'static str,
+    /// Plantilla interactiva con el prompt inicial enviado, nunca un modo de solo impresión.
+    pub(crate) executor: Option<&'static str>,
+    /// Para qué tareas conviene (le llega al planificador).
+    pub(crate) use_for: &'static str,
+    /// Comando o documentación oficial de instalación, para futuras interfaces.
+    #[allow(dead_code)]
+    pub(crate) install: &'static str,
 }
 
 /// Los agentes que Orion reconoce sin configurar nada. Para cualquier otro, un `[[agent]]`.
-pub(crate) static PROVIDERS: [Provider; 5] = [
+pub(crate) static PROVIDERS: &[Provider] = &[
     Provider {
         name: "Claude Code",
         binary: "claude",
         command: "claude",
         about: "Anthropic · code.claude.com",
+        executor: Some("claude {prompt}"),
+        use_for: "programar, revisar código y resolver tareas complejas con Claude",
+        install: "https://code.claude.com/docs/en/setup",
     },
     Provider {
         name: "Gemini CLI",
         binary: "gemini",
         command: "gemini",
         about: "Google · npm i -g @google/gemini-cli",
+        executor: Some("gemini --prompt-interactive {prompt}"),
+        use_for: "explorar repositorios, programar y revisar código con Gemini",
+        install: "https://geminicli.com/docs/get-started/installation/",
     },
     Provider {
         name: "Codex",
         binary: "codex",
         command: "codex",
         about: "OpenAI · npm i -g @openai/codex",
+        executor: Some("codex {prompt}"),
+        use_for: "implementar cambios, depurar y escribir tests con Codex",
+        install: "https://github.com/openai/codex#installation-and-setup",
     },
     Provider {
         name: "OpenCode",
         binary: "opencode",
         command: "opencode",
         about: "open source · opencode.ai",
+        executor: Some("opencode --prompt {prompt}"),
+        use_for: "programar con el modelo configurado en OpenCode, incluido DeepSeek",
+        install: "https://opencode.ai/docs/",
     },
     Provider {
         name: "Aider",
         binary: "aider",
         command: "aider",
         about: "cualquier modelo, incluido DeepSeek · aider.chat",
+        // --message procesa la respuesta y termina; no abre un chat interactivo.
+        executor: None,
+        use_for: "editar código con distintos modelos, incluidos DeepSeek y modelos locales",
+        install: "https://aider.chat/docs/install.html",
+    },
+    Provider {
+        name: "Qwen Code",
+        binary: "qwen",
+        command: "qwen",
+        about: "Qwen · github.com/QwenLM/qwen-code",
+        executor: Some("qwen --prompt-interactive {prompt}"),
+        use_for: "implementar cambios y tests con Qwen Code",
+        install: "https://github.com/QwenLM/qwen-code#installation",
+    },
+    Provider {
+        name: "Copilot",
+        binary: "copilot",
+        command: "copilot",
+        about: "GitHub · github.com/github/copilot-cli",
+        executor: Some("copilot -i {prompt}"),
+        use_for: "programar y revisar cambios con GitHub Copilot",
+        install: "https://github.com/github/copilot-cli#installation",
+    },
+    Provider {
+        name: "Cursor Agent",
+        binary: "cursor-agent",
+        command: "cursor-agent",
+        about: "Cursor · cursor.com/docs/cli",
+        executor: Some("cursor-agent {prompt}"),
+        use_for: "implementar, refactorizar y revisar código con Cursor",
+        install: "https://cursor.com/docs/cli/installation",
+    },
+    Provider {
+        name: "Goose",
+        binary: "goose",
+        command: "goose session",
+        about: "open source · github.com/aaif-goose/goose",
+        executor: Some("goose run --interactive --text {prompt}"),
+        use_for: "programar y automatizar tareas con las herramientas configuradas en Goose",
+        install: "https://github.com/aaif-goose/goose#install",
+    },
+    Provider {
+        name: "Crush",
+        binary: "crush",
+        command: "crush",
+        about: "Charm · github.com/charmbracelet/crush",
+        // crush run es no interactivo; --prompt cambia el prompt de sistema.
+        executor: None,
+        use_for: "programar con los modelos y herramientas configurados en Crush",
+        install: "https://github.com/charmbracelet/crush#installation",
+    },
+    Provider {
+        name: "Amp",
+        binary: "amp",
+        command: "amp",
+        about: "Amp · ampcode.com",
+        // El prompt inicial documentado usa stdin; no hay un argumento verificado.
+        executor: None,
+        use_for: "programar, explorar código y refactorizar con Amp",
+        install: "https://ampcode.com/docs/cli",
+    },
+    Provider {
+        name: "Kimi CLI",
+        binary: "kimi",
+        command: "kimi",
+        about: "Moonshot AI · moonshotai.github.io/kimi-cli",
+        // --prompt sale después de procesar la consulta.
+        executor: None,
+        use_for: "programar y automatizar tareas con Kimi",
+        install: "https://moonshotai.github.io/kimi-cli/en/",
+    },
+    Provider {
+        name: "Ollama",
+        binary: "ollama",
+        // Selector interactivo de integraciones; no fija ni descarga un modelo.
+        command: "ollama launch",
+        about: "modelos locales e integraciones · ollama.com",
+        executor: None,
+        use_for: "abrir un agente de código conectado a modelos locales de Ollama",
+        install: "https://ollama.com/download",
     },
 ];
+
+/// Identificador estable para perfiles y ramas: minúsculas y separadores simples.
+pub(crate) fn slug(name: &str) -> String {
+    let slug = name
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        "agent".into()
+    } else {
+        slug
+    }
+}
 
 /// Carpetas donde buscar los CLIs: el PATH y donde los dejan los instaladores.
 fn search_dirs() -> Vec<PathBuf> {
@@ -203,11 +317,7 @@ pub(crate) fn create_worktree(
     from: Option<&str>,
 ) -> Result<PathBuf, String> {
     let root = repo_root(dir)?;
-    let slug: String = agent
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect();
+    let slug = slug(agent);
     let base = root.join(".orion");
     let folder = base.join("worktrees");
     std::fs::create_dir_all(&folder)
@@ -479,6 +589,30 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), PROVIDERS.len());
+    }
+
+    #[test]
+    fn provider_ids_and_binaries_are_unique() {
+        let ids: std::collections::HashSet<_> = PROVIDERS.iter().map(|p| slug(p.name)).collect();
+        let binaries: std::collections::HashSet<_> = PROVIDERS.iter().map(|p| p.binary).collect();
+        assert_eq!(ids.len(), PROVIDERS.len());
+        assert_eq!(binaries.len(), PROVIDERS.len());
+        for provider in PROVIDERS {
+            assert!(!provider.use_for.is_empty());
+            assert!(!provider.install.is_empty());
+            if let Some(template) = provider.executor {
+                assert!(template.contains("{prompt}"), "{}", provider.name);
+                assert_eq!(template.split_whitespace().next(), Some(provider.binary));
+            }
+        }
+    }
+
+    #[test]
+    fn slugs_normalize_separators_and_keep_unicode_letters() {
+        assert_eq!(slug("Gemini CLI"), "gemini-cli");
+        assert_eq!(slug("  Mi__Agente / rápido! "), "mi-agente-rápido");
+        assert_eq!(slug("---"), "agent");
+        assert_eq!(slug(""), "agent");
     }
 
     #[test]

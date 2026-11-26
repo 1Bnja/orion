@@ -55,6 +55,7 @@ pub(crate) fn config_text(settings: &Settings) -> String {
     let backdrops = backdrops.join(", ");
     let check_updates = settings.check_updates;
     let ui_scale = settings.ui_scale;
+    let auto_executors = settings.auto_executors;
     let mut themes_extra = String::new();
     for t in &settings.custom_themes {
         themes_extra += &t.to_toml();
@@ -69,10 +70,19 @@ pub(crate) fn config_text(settings: &Settings) -> String {
         let worktree = agent.worktree;
         agents +=
             &format!("\n[[agent]]\nname = {name}\ncommand = {command}\nworktree = {worktree}\n");
+        for (key, value) in [
+            ("id", &agent.id),
+            ("use_for", &agent.use_for),
+            ("executor", &agent.executor),
+        ] {
+            if let Some(value) = value {
+                agents += &format!("{key} = {}\n", toml::Value::String(value.clone()));
+            }
+        }
     }
     if agents.is_empty() {
         agents =
-            "\n# [[agent]]\n# name = \"Mi agente\"\n# command = \"mi-agente\"\n# worktree = true\n"
+            "\n# [[agent]]\n# name = \"Mi agente\"\n# command = \"mi-agente\"\n# worktree = true\n# id = \"mi-agente\"\n# use_for = \"programar y escribir tests\"\n# executor = \"mi-agente --prompt {prompt}\"\n"
                 .into();
     }
     let mut executors = String::new();
@@ -103,6 +113,9 @@ backdrop = {backdrop}
 ui_scale = {ui_scale:.2}
 # Al abrir, buscar si hay una versión nueva de Orion (se instala solo si tú lo pides).
 check_updates = {check_updates}
+# Ofrecer automáticamente los CLIs conocidos como ejecutores cuando estén instalados.
+# false conserva los modelos de Claude y los perfiles/ejecutores definidos aquí.
+auto_executors = {auto_executors}
 # Shell de las pestañas nuevas ({key}+Shift+T). Hay: {shells}.
 # Para abrir una pestaña con otro proyecto o shell: clic en "+ Nueva pestaña",
 # o la paleta ({key}+Shift+P).
@@ -123,10 +136,15 @@ line_height = {:.2}
 # en una rama nueva (orion/nombre-1, -2…): así varios agentes trabajan en paralelo sin pisarse.
 # Para que lleve tu .env y similares, lístalos en un archivo .worktreeinclude en la raíz del repo
 # (una ruta relativa por línea, archivos o carpetas).
+# Para usar el mismo perfil en el orquestador, agrega use_for y executor (plantilla interactiva
+# con {{prompt}}). id es opcional: por defecto se deriva del nombre ("Mi agente" → "mi-agente").
+# Un perfil sin ambos campos sigue siendo solo un acceso en la paleta.
 
 # Ejecutores: el orquestador (palette → "Orquestar tarea con agentes") reparte las subtareas entre ellos.
 # Claude Opus planifica y elige, para cada subtarea, el ejecutor más barato que sirva según `use_for`.
-# Los tres modelos de Claude vienen siempre incluidos; un [[executor]] con el mismo id los reemplaza.
+# Los tres modelos de Claude vienen siempre incluidos. Con auto_executors = true también se
+# incluyen los providers con prompt interactivo verificado (Codex, OpenCode, Gemini CLI, etc.).
+# Precedencia por id: Claude < providers < [[agent]] < [[executor]]; el último reemplaza al anterior.
 # Solo se ofrecen los ejecutores cuyo programa (la primera palabra de `command`) está instalado.
 # {{prompt}} se reemplaza por el prompt de la subtarea, en una línea y entre comillas;
 # si falta, el prompt se agrega al final. Los ! y % se quitan del prompt.
@@ -163,6 +181,8 @@ pub(crate) struct Settings {
     pub(crate) check_updates: bool,
     /// Escala de la interfaz sobre la del sistema (el zoom de egui).
     pub(crate) ui_scale: f32,
+    /// Incluir los providers con plantilla interactiva en el catálogo del orquestador.
+    pub(crate) auto_executors: bool,
     /// Cambios de color de la interfaz ([colors]); lo que falte usa el tema.
     pub(crate) colors: ColorSettings,
     pub(crate) font: FontSettings,
@@ -350,6 +370,12 @@ pub(crate) struct Executor {
 #[derive(serde::Deserialize, Clone, PartialEq, Debug)]
 pub(crate) struct Agent {
     pub(crate) name: String,
+    /// Id del ejecutor; si falta se deriva del nombre.
+    pub(crate) id: Option<String>,
+    /// Con `executor`, habilita este perfil para el orquestador.
+    pub(crate) use_for: Option<String>,
+    /// Plantilla interactiva con `{prompt}`, independiente del comando de la paleta.
+    pub(crate) executor: Option<String>,
     /// Lo que se escribe en la shell para lanzarlo.
     pub(crate) command: String,
     /// Antes de lanzarlo, crear un git worktree en una rama nueva.
@@ -365,6 +391,7 @@ impl Default for Settings {
             backdrop: BACKDROPS[0].0.into(),
             check_updates: true,
             ui_scale: 1.0,
+            auto_executors: true,
             colors: ColorSettings::default(),
             font: FontSettings::default(),
             custom_themes: Vec::new(),
@@ -630,6 +657,7 @@ mod tests {
         assert_eq!(s.font.size, 16.0);
         // Un config viejo, sin line_height, toma el valor por defecto.
         assert_eq!(s.font.line_height, 1.2);
+        assert!(s.auto_executors); // los configs anteriores activan la detección automática
     }
 
     #[test]
@@ -697,6 +725,9 @@ mod tests {
         assert!(back.agents.is_empty() && back.executors.is_empty()); // el ejemplo va comentado
         s.agents = vec![Agent {
             name: "Revisor".into(),
+            id: Some("revisor-propio".into()),
+            use_for: Some(r#"revisar "tests" en C:\repo"#.into()),
+            executor: Some(r#"mi-agente --modo "revisar" --prompt {prompt}"#.into()),
             command: r#"mi-agente --modo "revisar""#.into(),
             worktree: true,
         }];
@@ -710,8 +741,53 @@ mod tests {
             s.font.size = 18.0;
             s.font.line_height = 1.35;
             s.ui_scale = 1.25;
-            let back: Settings = toml::from_str(&config_text(&s)).unwrap();
-            assert!(back == s, "no volvió igual: {family}");
+            for auto in [true, false] {
+                s.auto_executors = auto;
+                let back = parse_settings(&config_text(&s)).unwrap();
+                assert!(back == s, "no volvió igual: {family}, auto={auto}");
+            }
         }
+    }
+
+    #[test]
+    fn old_profiles_keep_optional_executor_fields_absent_when_saved() {
+        let settings =
+            parse_settings("[[agent]]\nname = 'Solo paleta'\ncommand = 'mi-agente'").unwrap();
+        let agent = &settings.agents[0];
+        assert_eq!(agent.id, None);
+        assert_eq!(agent.use_for, None);
+        assert_eq!(agent.executor, None);
+        assert!(!agent.worktree);
+        let text = config_text(&settings);
+        for key in ["id", "use_for", "executor"] {
+            assert!(
+                !text
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{key} =")))
+            );
+        }
+        assert!(parse_settings(&text).unwrap() == settings);
+    }
+
+    #[test]
+    fn unified_profiles_round_trip_with_implicit_and_explicit_ids() {
+        let settings = parse_settings(
+            r#"
+auto_executors = false
+[[agent]]
+name = "Mi agente"
+command = "mi-agente"
+use_for = "programar"
+executor = "mi-agente --prompt {prompt}"
+[[agent]]
+name = "Otro agente"
+command = "otro"
+id = "mi-id"
+executor = "otro {prompt}"
+"#,
+        )
+        .unwrap();
+        assert!(!settings.auto_executors);
+        assert!(parse_settings(&config_text(&settings)).unwrap() == settings);
     }
 }

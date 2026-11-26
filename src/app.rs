@@ -1562,6 +1562,9 @@ mod tests {
         let mut settings = Settings::default();
         settings.agents.push(crate::config::Agent {
             name: "Mi agente".into(),
+            id: None,
+            use_for: None,
+            executor: None,
             command: "mi-agente".into(),
             worktree: true,
         });

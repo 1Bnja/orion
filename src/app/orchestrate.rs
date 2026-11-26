@@ -507,7 +507,7 @@ impl Orion {
             // ponytail: si se cancela en el instante antes de que arranque el proceso, igual corre;
             // su resultado se descarta (el `step` ya es otro).
             o.planner = Planner::default();
-            let catalog = crate::orchestrator::catalog(&self.settings.executors);
+            let catalog = crate::orchestrator::catalog(&self.settings);
             let extra = self.settings.executors.len();
             let (task, dir, step, planner, ctx) = (
                 o.task.clone(),
@@ -696,7 +696,7 @@ impl Orion {
             Ok(ready) => ready,
             Err(e) => return Run::Blocked(e),
         };
-        let catalog = crate::orchestrator::catalog(&self.settings.executors);
+        let catalog = crate::orchestrator::catalog(&self.settings);
         let command = |shell: &crate::pty::ShellKind| agent_command(shell, &s, &catalog);
         if !self.launch_agent(ctx, Some(path.clone()), &s.title, false, command) {
             return Run::Blocked("no pude abrir su pestaña".into());
