@@ -388,14 +388,14 @@ impl Orion {
         menu::apply_theme(&cc.egui_ctx, &settings);
         // Real OS windows for child viewports (settings), not popups trapped in the terminal.
         cc.egui_ctx.set_embed_viewports(false);
-        let orion = Self {
+        let mut orion = Self {
             // Start on the empty home; the first terminal opens from a shortcut or the sidebar.
             tabs: Vec::new(),
             active: 0,
             settings,
             menu: SettingsMenu::default(),
             palette: Palette::default(),
-            orchestrate: Default::default(),
+            orchestrate: orchestrate::Orchestrate::restore(),
             project: Default::default(),
             review: None,
             saved: project::load_saved(),
@@ -419,6 +419,9 @@ impl Orion {
             mac_menu: macmenu::MacMenu::install(&cc.egui_ctx),
         };
         orion.apply_window_look();
+        if orion.orchestrate.paused() {
+            orion.show_toast("Quedó un plan sin terminar: ábrelo en Orquestar tarea con agentes");
+        }
         // Al abrir, revisar si hay una versión nueva. En debug (`cargo run`) no: sería la del .exe de desarrollo.
         if orion.settings.check_updates && !cfg!(debug_assertions) {
             orion.updater.check(&cc.egui_ctx);

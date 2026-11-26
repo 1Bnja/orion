@@ -97,7 +97,7 @@ pub(crate) fn short_name(id: &str) -> &str {
     }
 }
 
-#[derive(serde::Deserialize, Clone, PartialEq, Debug)]
+#[derive(serde::Deserialize, serde::Serialize, Clone, PartialEq, Debug)]
 pub(crate) struct Subtask {
     /// Corto: da nombre a la rama y la carpeta del worktree.
     pub(crate) title: String,
