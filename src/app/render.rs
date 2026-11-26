@@ -342,8 +342,11 @@ impl Session {
                     .fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
                 // Interlineado: la fila es más alta que la letra y la letra va centrada en ella.
                 // Redondeado a píxeles enteros para que las fuentes pixeladas no se vean borrosas.
-                let cell = egui::vec2(width, (text_height * settings.line_height).round());
-                let text_dy = ((cell.y - text_height) / 2.0).round();
+                // Píxeles de la pantalla, no puntos: con escala 150 % un punto es 1,5 píxeles.
+                let ppp = ui.ctx().pixels_per_point();
+                let to_pixels = |points: f32| (points * ppp).round() / ppp;
+                let cell = egui::vec2(width, to_pixels(text_height * settings.line_height));
+                let text_dy = to_pixels((cell.y - text_height) / 2.0);
                 let margins = egui::vec2(GUTTER + PADDING, 2.0 * PADDING);
                 let grid = grid_size(ui.available_size() - margins, cell);
                 if grid != self.grid {

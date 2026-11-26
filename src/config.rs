@@ -54,6 +54,7 @@ pub(crate) fn config_text(settings: &Settings) -> String {
     let backdrops: Vec<&str> = BACKDROPS.iter().map(|b| b.0).collect();
     let backdrops = backdrops.join(", ");
     let check_updates = settings.check_updates;
+    let ui_scale = settings.ui_scale;
     let mut themes_extra = String::new();
     for t in &settings.custom_themes {
         themes_extra += &t.to_toml();
@@ -97,6 +98,9 @@ theme = {theme}
 # Material detrás de la terminal (Windows 11 y macOS). Hay: {backdrops}.
 # Mica es un tinte suave y casi sólido; acrílico desenfoca lo que hay detrás de la ventana.
 backdrop = {backdrop}
+# Tamaño de toda la interfaz (letra incluida), sobre la escala de pantalla del sistema:
+# 1.0 = la del sistema, 1.5 = 50 % más grande. También con {key}+= y {key}+- ({key}+0 vuelve a 1).
+ui_scale = {ui_scale:.2}
 # Al abrir, buscar si hay una versión nueva de Orion (se instala solo si tú lo pides).
 check_updates = {check_updates}
 # Shell de las pestañas nuevas ({key}+Shift+T). Hay: {shells}.
@@ -157,6 +161,8 @@ pub(crate) struct Settings {
     pub(crate) backdrop: String,
     /// Al abrir, revisar si hay una versión nueva en GitHub.
     pub(crate) check_updates: bool,
+    /// Escala de la interfaz sobre la del sistema (el zoom de egui).
+    pub(crate) ui_scale: f32,
     /// Cambios de color de la interfaz ([colors]); lo que falte usa el tema.
     pub(crate) colors: ColorSettings,
     pub(crate) font: FontSettings,
@@ -358,6 +364,7 @@ impl Default for Settings {
             shell: SHELLS[0].name.into(),
             backdrop: BACKDROPS[0].0.into(),
             check_updates: true,
+            ui_scale: 1.0,
             colors: ColorSettings::default(),
             font: FontSettings::default(),
             custom_themes: Vec::new(),
@@ -534,6 +541,9 @@ pub(crate) fn config_modified() -> Option<SystemTime> {
     std::fs::metadata(config_path()?).ok()?.modified().ok()
 }
 
+/// Mínimo y máximo de `ui_scale`.
+pub(crate) const UI_SCALE: (f32, f32) = (0.5, 3.0);
+
 /// Interpreta el texto de config.toml. El error dice la línea y qué está mal, en una sola línea.
 /// Los valores absurdos (tamaño 0, interlineado 50) se llevan al rango que funciona.
 pub(crate) fn parse_settings(text: &str) -> Result<Settings, String> {
@@ -545,6 +555,7 @@ pub(crate) fn parse_settings(text: &str) -> Result<Settings, String> {
     })?;
     settings.font.size = settings.font.size.clamp(6.0, 72.0);
     settings.font.line_height = settings.font.line_height.clamp(1.0, 3.0);
+    settings.ui_scale = settings.ui_scale.clamp(UI_SCALE.0, UI_SCALE.1);
     settings.colors.validate()?;
     for custom in &settings.custom_themes {
         custom.validate()?;
@@ -628,8 +639,11 @@ mod tests {
             err.as_deref().is_some_and(|e| e.starts_with("línea 3:")),
             "{err:?}"
         );
-        let s = parse_settings("[font]\nsize = 0\nline_height = 50").unwrap();
-        assert_eq!((s.font.size, s.font.line_height), (6.0, 3.0));
+        let s = parse_settings("ui_scale = 9\n[font]\nsize = 0\nline_height = 50").unwrap();
+        assert_eq!(
+            (s.font.size, s.font.line_height, s.ui_scale),
+            (6.0, 3.0, 3.0)
+        );
         // Tema: sin importar mayúsculas; uno que no existe es un error.
         assert_eq!(
             parse_settings("theme = 'dracula'").unwrap().theme,
@@ -695,6 +709,7 @@ mod tests {
             s.font.family = family.into();
             s.font.size = 18.0;
             s.font.line_height = 1.35;
+            s.ui_scale = 1.25;
             let back: Settings = toml::from_str(&config_text(&s)).unwrap();
             assert!(back == s, "no volvió igual: {family}");
         }

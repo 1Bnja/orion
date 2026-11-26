@@ -43,7 +43,7 @@ mod sidebar;
 mod titlebar;
 
 use crate::colors::{surface, theme};
-use crate::config::{Settings, config_modified, reload_settings};
+use crate::config::{Settings, UI_SCALE, config_modified, reload_settings};
 use crate::fonts::{apply_font, is_font_file};
 use crate::pty::{Error, find_shell, usable_shell};
 use crate::update::{self, State as UpdateState, Updater};
@@ -386,6 +386,8 @@ impl Orion {
     ) -> Result<Self, Error> {
         apply_font(&cc.egui_ctx, &settings.font.family);
         menu::apply_theme(&cc.egui_ctx, &settings);
+        // Sobre la escala de Windows, que eframe ya respeta (pixels_per_point = sistema × zoom).
+        cc.egui_ctx.set_zoom_factor(settings.ui_scale);
         // Real OS windows for child viewports (settings), not popups trapped in the terminal.
         cc.egui_ctx.set_embed_viewports(false);
         let mut orion = Self {
@@ -1260,6 +1262,13 @@ impl eframe::App for Orion {
 
     // logic corre antes de cada ui y también con la ventana oculta: así ningún canal se acumula.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Ctrl+= / Ctrl+- / Ctrl+0 son el zoom de egui: lo guardamos como ui_scale.
+        let zoom = ctx.zoom_factor();
+        if (zoom - self.settings.ui_scale).abs() > 0.001 {
+            let mut new = self.settings.clone();
+            new.ui_scale = ((zoom * 100.0).round() / 100.0).clamp(UI_SCALE.0, UI_SCALE.1);
+            self.change_settings(ctx, new);
+        }
         if self.tabs.is_empty() {
             self.watch_config(ctx);
             match self.updater.state() {
