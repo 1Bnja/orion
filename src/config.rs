@@ -64,6 +64,12 @@ pub(crate) fn config_text(settings: &Settings) -> String {
             .map(toml::Value::String)
             .collect(),
     );
+    let renderer = toml::Value::String(settings.renderer.clone());
+    let renderers: Vec<&str> = (crate::renderer::GPUS.iter())
+        .filter(|g| g.1.available())
+        .map(|g| g.0)
+        .collect();
+    let renderers = renderers.join(", ");
     let mut themes_extra = String::new();
     for t in &settings.custom_themes {
         themes_extra += &t.to_toml();
@@ -127,6 +133,9 @@ auto_executors = {auto_executors}
 # Ids de los CLIs detectados que no quieres en el orquestador (Configuración → Agentes).
 # No afecta a tus [[agent]] ni [[executor]].
 disabled_executors = {disabled_executors}
+# Motor gráfico (se aplica al reiniciar). Hay: {renderers}.
+# Automático usa el nativo del sistema y, si no arranca, prueba los demás.
+renderer = {renderer}
 # Shell de las pestañas nuevas ({key}+Shift+T). Hay: {shells}.
 # Para abrir una pestaña con otro proyecto o shell: clic en "+ Nueva pestaña",
 # o la paleta ({key}+Shift+P).
@@ -196,6 +205,8 @@ pub(crate) struct Settings {
     pub(crate) auto_executors: bool,
     /// Ids de providers detectados que el usuario sacó del orquestador.
     pub(crate) disabled_executors: Vec<String>,
+    /// Graphics backend, applied on restart.
+    pub(crate) renderer: String,
     /// Cambios de color de la interfaz ([colors]); lo que falte usa el tema.
     pub(crate) colors: ColorSettings,
     pub(crate) font: FontSettings,
@@ -406,6 +417,7 @@ impl Default for Settings {
             ui_scale: 1.0,
             auto_executors: true,
             disabled_executors: Vec::new(),
+            renderer: crate::renderer::GPUS[0].0.into(),
             colors: ColorSettings::default(),
             font: FontSettings::default(),
             custom_themes: Vec::new(),
@@ -619,6 +631,9 @@ pub(crate) fn parse_settings(text: &str) -> Result<Settings, String> {
     let backdrop = find_backdrop(&settings.backdrop)
         .ok_or_else(|| format!("no hay un fondo \"{}\"", settings.backdrop))?;
     settings.backdrop = BACKDROPS.iter().find(|b| b.1 == backdrop).unwrap().0.into();
+    let gpu = crate::renderer::find_gpu(&settings.renderer)
+        .ok_or_else(|| format!("no conozco el motor gráfico \"{}\"", settings.renderer))?;
+    settings.renderer = gpu.name().into();
     Ok(settings)
 }
 

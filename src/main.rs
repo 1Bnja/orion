@@ -27,6 +27,7 @@ mod local_models;
 mod logo;
 mod orchestrator;
 mod pty;
+mod renderer;
 mod update;
 
 fn main() -> Result<(), pty::Error> {
@@ -72,18 +73,45 @@ fn main() -> Result<(), pty::Error> {
     } else {
         viewport.with_decorations(false)
     };
-    let options = eframe::NativeOptions {
-        viewport,
-        // OpenGL: en Windows respeta la transparencia de la ventana; el motor por defecto (wgpu) no siempre.
-        renderer: eframe::Renderer::Glow,
-        ..Default::default()
+    let started = std::rc::Rc::new(std::cell::Cell::new(false));
+    let run = |gpu| {
+        let (renderer, wgpu_options) = renderer::options(gpu);
+        let options = eframe::NativeOptions {
+            viewport: viewport.clone(),
+            renderer,
+            wgpu_options,
+            ..Default::default()
+        };
+        let (settings, started) = (settings.clone(), started.clone());
+        eframe::run_native(
+            "Orion",
+            options,
+            Box::new(move |cc| {
+                started.set(true);
+                Ok(Box::new(app::Orion::new(cc, settings, grid)?))
+            }),
+        )
+        // Con OpenGL, el error de eframe no se puede pasar entre hilos (no es `Send`): lo pasamos a texto.
+        .map_err(|e| e.to_string())
     };
-    eframe::run_native(
-        "Orion",
-        options,
-        Box::new(|cc| Ok(Box::new(app::Orion::new(cc, settings, grid)?))),
-    )
-    // Con OpenGL, el error de eframe no se puede pasar entre hilos (no es `Send`): lo pasamos a texto.
-    .map_err(|e| e.to_string())?;
+
+    // El motor de Configuración; ORION_RENDERER lo cambia sin tocar config.toml (por si uno se ve mal).
+    let forced = std::env::var("ORION_RENDERER").ok();
+    let choice = (forced.as_deref().and_then(renderer::find_gpu))
+        .or_else(|| renderer::find_gpu(&settings.renderer))
+        .unwrap_or(renderer::Gpu::Auto);
+    let material = backdrop::find_backdrop(&settings.backdrop).unwrap_or(backdrop::Backdrop::None);
+    let attempts = renderer::attempts(choice, material);
+    for (i, &gpu) in attempts.iter().enumerate() {
+        renderer::set_active(gpu);
+        match run(gpu) {
+            // No llegó ni a abrir la ventana (sin ese motor en este equipo): se prueba el siguiente.
+            // eframe reusa el mismo bucle de eventos, así que se puede volver a llamar.
+            Err(e) if !started.get() && i + 1 < attempts.len() => {
+                eprintln!("orion: {} no pudo arrancar ({e})", gpu.name());
+            }
+            result => return Ok(result?),
+        }
+    }
     Ok(())
 }
