@@ -92,10 +92,19 @@ pub(crate) fn attempts(choice: Gpu, backdrop: Backdrop) -> Vec<Gpu> {
         Gpu::Auto => vec![Gpu::DirectX12, Gpu::Vulkan],
         chosen => vec![chosen],
     };
-    order.push(Gpu::OpenGl);
+    if !order.contains(&Gpu::OpenGl) {
+        order.push(Gpu::OpenGl);
+    }
     order.retain(|g| g.available());
-    order.dedup();
-    order
+    // Sin duplicados en cualquier posición: `dedup` solo quita los consecutivos, y en macOS con
+    // fondo transparente la lista ya empieza por OpenGL.
+    let mut unique = Vec::with_capacity(order.len());
+    for gpu in order {
+        if !unique.contains(&gpu) {
+            unique.push(gpu);
+        }
+    }
+    unique
 }
 
 /// Las opciones de eframe para dibujar con `gpu`.

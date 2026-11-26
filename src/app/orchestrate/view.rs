@@ -130,7 +130,9 @@ pub(super) fn panel(
     stepper(ui, current);
     overlay::divider(ui);
 
-    let room = (ui.ctx().content_rect().height() * 0.92 - 200.0).max(200.0);
+    // Con escala de UI alta (hasta 300 %) el alto en puntos baja: no hay que forzar 200 puntos o
+    // el footer de Lanzar queda fuera de la pantalla.
+    let room = (ui.ctx().content_rect().height() * 0.92 - 200.0).max(80.0);
     egui::ScrollArea::vertical()
         .id_salt(("orquestador", current))
         .max_height(room)

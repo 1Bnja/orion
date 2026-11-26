@@ -118,6 +118,10 @@ pub(super) fn show<R>(
         .fixed_pos(left.round())
         .constrain(false)
         .fade_in(false)
+        // Inmóvil: así el Area detecta clics y bloquea al scrim. Si se pudiera arrastrar, egui le
+        // da solo `Sense::DRAG` y los clics en textos, márgenes y huecos llegarían al fondo y
+        // cerrarían la ventana.
+        .movable(false)
         .interactable(open)
         .show(ctx, |ui| {
             ui.set_opacity(eased);

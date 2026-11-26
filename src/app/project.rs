@@ -534,8 +534,13 @@ impl Orion {
             .filter(|(_, name, _)| self.project.picked.contains(name))
             .map(|(c, ..)| *c)
             .collect();
-        self.project.open = false;
-        (!picks.is_empty()).then_some((dir, picks, self.project.worktree))
+        // La ventana la cierra `launch_project` solo si salió bien: si falla, sigue abierta para
+        // corregir y muestra el error. Cerrarla acá convertiría un fallo en algo invisible.
+        if picks.is_empty() {
+            self.project.error = Some("Los agentes marcados ya no están disponibles.".into());
+            return None;
+        }
+        Some((dir, picks, self.project.worktree))
     }
 }
 

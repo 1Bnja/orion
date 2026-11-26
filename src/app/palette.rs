@@ -774,7 +774,11 @@ impl Orion {
     /// Dibuja la paleta (abierta, o terminando de cerrarse). Devuelve la acción elegida (Enter o clic).
     pub(super) fn palette_window(&mut self, ctx: &egui::Context) -> Option<Action> {
         let open = self.palette.open;
-        // Los comandos solo se arman mientras se ve (o se está yendo).
+        // Los comandos solo se arman mientras se ve (o se está yendo): cerrada, ni siquiera se
+        // recorre el catálogo en cada frame.
+        if !overlay::visible(ctx, "palette", open) {
+            return None;
+        }
         let commands = self.commands();
         let p = &mut self.palette;
 
