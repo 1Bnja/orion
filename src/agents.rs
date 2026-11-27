@@ -562,6 +562,25 @@ pub(crate) fn merge_branch(repo: &Path, branch: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Si el trabajo de `branch` ya está en la rama actual (HEAD) de `repo`, aunque haya entrado por
+/// squash merge: es ancestro, o fusionarla no cambiaría el árbol de HEAD.
+#[allow(dead_code)] // todavía ningún llamador; lo usará otra subtarea.
+pub(crate) fn integrated(repo: &Path, branch: &str) -> bool {
+    if git(repo, &["merge-base", "--is-ancestor", branch, "HEAD"]).is_ok() {
+        return true;
+    }
+    let Ok(out) = git(repo, &["merge-tree", "--write-tree", "HEAD", branch]) else {
+        return false;
+    };
+    let Some(tree) = out.lines().next() else {
+        return false;
+    };
+    let Ok(head) = git(repo, &["rev-parse", "HEAD^{tree}"]) else {
+        return false;
+    };
+    tree.trim() == head.trim()
+}
+
 /// Borra el worktree (con sus cambios sin guardar) y su rama, fusionada o no.
 /// ponytail: corre en el hilo de la ventana (git tarda poco).
 pub(crate) fn discard_worktree(repo: &Path, path: &Path, branch: &str) -> Result<(), String> {
@@ -876,6 +895,35 @@ no-existe
         assert_eq!(git(&repo, &["status", "--porcelain"]).unwrap(), "");
         let kept = std::fs::read_to_string(repo.join("a.txt")).unwrap();
         assert_eq!(kept.trim(), "del repo");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn integrated_detects_a_normally_merged_branch() {
+        let (base, repo, wt) = repo_with_agent("integrated-merge");
+        commit_file(&wt, "b.txt", "hola\n");
+        assert!(!integrated(&repo, "orion/a-1"));
+        merge_branch(&repo, "orion/a-1").unwrap();
+        assert!(integrated(&repo, "orion/a-1"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn integrated_detects_a_squash_merged_branch() {
+        let (base, repo, wt) = repo_with_agent("integrated-squash");
+        commit_file(&wt, "b.txt", "hola\n");
+        commit_file(&wt, "c.txt", "dos\n");
+        git(&repo, &["merge", "--squash", "orion/a-1"]).unwrap();
+        git(&repo, &["commit", "-q", "-m", "squash"]).unwrap();
+        assert!(integrated(&repo, "orion/a-1"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn integrated_is_false_for_an_unmerged_commit() {
+        let (base, repo, wt) = repo_with_agent("integrated-no");
+        commit_file(&wt, "b.txt", "hola\n");
+        assert!(!integrated(&repo, "orion/a-1"));
         let _ = std::fs::remove_dir_all(&base);
     }
 
