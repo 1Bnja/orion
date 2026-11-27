@@ -1022,6 +1022,34 @@ fn elapsed(d: Duration) -> String {
     }
 }
 
+/// Qué le falta a una subtarea en espera: "Espera a #2 (trabajando, 4 min) y #3 (en espera)".
+/// Cada dependencia es su índice en el plan, cómo va y cuánto lleva su agente, si se sabe.
+fn waiting_text<'a>(deps: impl IntoIterator<Item = (usize, &'a Run, Option<Duration>)>) -> String {
+    let mut pending: Vec<String> = (deps.into_iter())
+        .filter(|(_, run, _)| !run.succeeded())
+        .map(|(i, run, time)| {
+            let state = match run {
+                Run::Working { .. } => match time {
+                    Some(time) => format!("trabajando, {}", elapsed(time)),
+                    None => "trabajando".into(),
+                },
+                Run::Waiting => "en espera".into(),
+                Run::Blocked(_) => "bloqueada".into(),
+                _ => "necesita atención".into(),
+            };
+            format!("#{} ({state})", i + 1)
+        })
+        .collect();
+    let Some(last) = pending.pop() else {
+        return "Por arrancar".into();
+    };
+    if pending.is_empty() {
+        format!("Espera a {last}")
+    } else {
+        format!("Espera a {} y {last}", pending.join(", "))
+    }
+}
+
 /// Si una fila de la terminal dice algo: no solo blancos ni dibujo de cajas.
 pub(super) fn meaningful(row: &str) -> bool {
     row.chars()
@@ -1181,7 +1209,16 @@ fn running(ui: &mut Ui, o: &Orchestrate, activity: &HashMap<u64, String>, out: &
                         Run::Working { branch, .. }
                         | Run::Done { branch, .. }
                         | Run::Closed { branch, .. } => Some(branch.clone()),
-                        Run::Waiting if !s.after.is_empty() => Some(super::after_text(&s.after)),
+                        Run::Waiting if !s.after.is_empty() => {
+                            Some(waiting_text(s.after.iter().map(|&j| {
+                                let run = &o.plan[j].1;
+                                let since = match run {
+                                    Run::Working { pane, .. } => o.since.get(pane),
+                                    _ => None,
+                                };
+                                (j, run, since.map(|since| since.elapsed()))
+                            })))
+                        }
                         _ => None,
                     };
                     if let Some(detail) = detail {
@@ -1381,6 +1418,40 @@ mod tests {
         assert_eq!(at(200), "3 min");
         assert_eq!(at(3600), "1 h");
         assert_eq!(at(3900), "1 h 5 min");
+    }
+
+    #[test]
+    fn a_waiting_subtask_says_what_it_is_missing() {
+        let working = Run::Working {
+            pane: 1,
+            branch: "b".into(),
+            base: "0".into(),
+        };
+        let done = Run::Done {
+            branch: "b".into(),
+            base: "0".into(),
+            code: Some(0),
+            commits: true,
+        };
+        let blocked = Run::Blocked("x".into());
+        let four = Some(Duration::from_secs(240));
+        assert_eq!(
+            waiting_text([
+                (0, &done, None),
+                (1, &working, four),
+                (2, &Run::Waiting, None)
+            ]),
+            "Espera a #2 (trabajando, 4 min) y #3 (en espera)"
+        );
+        assert_eq!(
+            waiting_text([
+                (0, &working, None),
+                (1, &blocked, None),
+                (2, &Run::Waiting, None)
+            ]),
+            "Espera a #1 (trabajando), #2 (bloqueada) y #3 (en espera)"
+        );
+        assert_eq!(waiting_text([(0, &done, None)]), "Por arrancar");
     }
 
     #[test]
