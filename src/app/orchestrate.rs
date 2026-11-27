@@ -3,6 +3,7 @@
 //! Las que dependen de otras (`after`) esperan: arrancan, desde las ramas de aquellas, cuando sus
 //! agentes terminan (los cierras con /exit después de revisar) y dejaron commits.
 
+mod graph;
 mod view;
 
 use super::overlay;
