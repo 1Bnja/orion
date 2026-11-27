@@ -484,12 +484,26 @@ pub(crate) fn orion_worktrees(repo: &Path) -> Vec<(PathBuf, String)> {
 /// Devuelve si también se borró la rama (solo si está `integrated`; si no, se conserva).
 /// En Windows la carpeta puede seguir bloqueada un momento tras cerrar su shell: reintenta.
 pub(crate) fn remove_worktree(repo: &Path, path: &Path, branch: &str) -> Result<bool, String> {
-    let registered = || orion_worktrees(repo).iter().any(|(_, b)| b == branch);
-    let was_registered = registered();
+    // None si git no responde: sin saberlo, no se borra nada a mano.
+    let registered = || {
+        let list = git(repo, &["worktree", "list", "--porcelain"]).ok()?;
+        let line = format!("branch refs/heads/{branch}");
+        Some(list.lines().any(|l| l == line))
+    };
+    let was_registered = registered() == Some(true);
+    // Con `status.showUntrackedFiles=no`, git borraría los archivos sin seguimiento sin avisar.
+    let target = path.to_string_lossy();
+    let remove = [
+        "-c",
+        "status.showUntrackedFiles=normal",
+        "worktree",
+        "remove",
+        &target,
+    ];
     let mut tries = 0;
-    while let Err(e) = git(repo, &["worktree", "remove", &path.to_string_lossy()]) {
+    while let Err(e) = git(repo, &remove) {
         // Si git ya lo dio de baja, pasó sus comprobaciones y solo falló al borrar la carpeta.
-        if was_registered && !registered() {
+        if was_registered && registered() == Some(false) {
             for _ in 0..5 {
                 if std::fs::remove_dir_all(path).is_ok() || !path.exists() {
                     break;
@@ -512,7 +526,8 @@ const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Si el worktree tiene cambios sin commitear (o archivos sin seguimiento).
 pub(crate) fn is_dirty(worktree: &Path) -> bool {
-    git(worktree, &["status", "--porcelain"]).is_ok_and(|s| !s.is_empty())
+    let args = ["status", "--porcelain", "--untracked-files=normal"];
+    git(worktree, &args).is_ok_and(|s| !s.is_empty())
 }
 
 /// Si la rama local `branch` existe.
@@ -601,22 +616,28 @@ pub(crate) fn merge_branch(repo: &Path, branch: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Si el trabajo de `branch` ya está en la rama actual (HEAD) de `repo`, aunque haya entrado por
-/// squash merge: es ancestro, o fusionarla no cambiaría el árbol de HEAD.
+/// Si el trabajo de `branch` ya está en la rama actual de `repo`, aunque haya entrado por
+/// squash merge: es ancestro, o fusionarla no cambiaría el árbol de HEAD. Con HEAD suelto no hay
+/// rama actual: siempre false.
 pub(crate) fn integrated(repo: &Path, branch: &str) -> bool {
-    if git(repo, &["merge-base", "--is-ancestor", branch, "HEAD"]).is_ok() {
+    if current_branch(repo).is_err() {
+        return false;
+    }
+    // La ruta completa: un tag con el mismo nombre no debe contar.
+    let branch = format!("refs/heads/{branch}");
+    if git(repo, &["merge-base", "--is-ancestor", &branch, "HEAD"]).is_ok() {
         return true;
     }
-    let Ok(out) = git(repo, &["merge-tree", "--write-tree", "HEAD", branch]) else {
-        return false;
-    };
-    let Some(tree) = out.lines().next() else {
-        return false;
-    };
     let Ok(head) = git(repo, &["rev-parse", "HEAD^{tree}"]) else {
         return false;
     };
-    tree.trim() == head.trim()
+    // En los dos sentidos: un driver `merge=ours` daría el árbol de HEAD aunque falte el trabajo.
+    [("HEAD", branch.as_str()), (branch.as_str(), "HEAD")]
+        .iter()
+        .all(|(ours, theirs)| {
+            git(repo, &["merge-tree", "--write-tree", ours, theirs])
+                .is_ok_and(|out| out.lines().next() == Some(head.as_str()))
+        })
 }
 
 /// Borra el worktree (con sus cambios sin guardar) y su rama, fusionada o no.
@@ -962,6 +983,35 @@ no-existe
         let (base, repo, wt) = repo_with_agent("integrated-no");
         commit_file(&wt, "b.txt", "hola\n");
         assert!(!integrated(&repo, "orion/a-1"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn integrated_is_false_on_conflict_detached_head_or_ours_driver() {
+        let (base, repo, wt) = repo_with_agent("integrated-trampas");
+        commit_file(&repo, "b.txt", "base\n");
+        let main = current_branch(&repo).unwrap();
+        git(&wt, &["merge", "-q", &main]).unwrap();
+        commit_file(&wt, "b.txt", "agente\n");
+        commit_file(&repo, "b.txt", "principal\n");
+        assert!(!integrated(&repo, "orion/a-1"));
+        git(&repo, &["config", "merge.ours.driver", "true"]).unwrap();
+        std::fs::write(repo.join(".git/info/attributes"), "b.txt merge=ours\n").unwrap();
+        assert!(!integrated(&repo, "orion/a-1"));
+        // Con HEAD suelto, ni siquiera sobre la propia punta de la rama.
+        git(&repo, &["checkout", "-q", "--detach", "orion/a-1"]).unwrap();
+        assert!(!integrated(&repo, "orion/a-1"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn remove_keeps_untracked_files_even_if_status_hides_them() {
+        let (base, repo, wt) = repo_with_agent("remove-ocultos");
+        git(&repo, &["config", "status.showUntrackedFiles", "no"]).unwrap();
+        std::fs::write(wt.join("nuevo.txt"), "sin commitear").unwrap();
+        assert!(is_dirty(&wt));
+        assert!(remove_worktree(&repo, &wt, "orion/a-1").is_err());
+        assert!(wt.join("nuevo.txt").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 

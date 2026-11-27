@@ -289,7 +289,8 @@ impl Orion {
         // Con un plan en camino, listo o en curso, se vuelve a él: es de su repo, no del de la pestaña actual.
         let o = &mut self.orchestrate;
         if !o.plan.is_empty() || matches!(o.step(), Step::Planning | Step::Ready(..)) {
-            o.open = true;
+            // Una confirmación que quedó de antes (se salió a una pestaña) ya no vale.
+            (o.open, o.cleanup) = (true, None);
             return;
         }
         let root = match self.session().and_then(|s| s.cwd.clone()) {
