@@ -788,7 +788,7 @@ impl Orion {
     }
 
     /// Borra los worktrees `orion/…` de los repos conocidos que ninguna pestaña usa. Los que tienen
-    /// cambios sin guardar se dejan; la rama solo se borra si ya está fusionada.
+    /// cambios sin guardar se dejan; la rama solo se borra si su trabajo ya está en la rama actual.
     /// ponytail: corre en el hilo de la ventana; con muchos worktrees convendría un hilo aparte.
     fn clean_worktrees(&mut self) {
         let mut repos: Vec<PathBuf> = self.saved.iter().map(|s| s.dir.clone()).collect();
@@ -823,10 +823,7 @@ impl Orion {
 
     /// Cierra una pestaña (y las shells de todos sus paneles). Si era la última, queda el inicio vacío.
     fn close_tab(&mut self, ctx: &egui::Context, index: usize) {
-        let mut tab = self.tabs.remove(index);
-        for session in tab.panes_mut().into_iter().flat_map(Split::leaves_mut) {
-            let _ = session.shell.child.kill();
-        }
+        let tab = self.remove_tab(ctx, index);
         // Un worktree sin trabajo (nada sin commitear ni commits propios) se borra sin preguntar.
         // ponytail: git en el hilo de la ventana (tarda poco).
         if let (Some(path), Some(repo)) = (&tab.worktree, &tab.repo) {
@@ -843,15 +840,30 @@ impl Orion {
                 ),
             }
         }
+    }
+
+    /// Quita una pestaña, mata sus shells y espera a que salgan. No toca su worktree ni avisa.
+    fn remove_tab(&mut self, ctx: &egui::Context, index: usize) -> Tab {
+        let mut tab = self.tabs.remove(index);
+        for session in tab.panes_mut().into_iter().flat_map(Split::leaves_mut) {
+            let child = &mut session.shell.child;
+            let _ = child.kill();
+            // Mientras viva, en Windows bloquea su carpeta. Con tope, para no colgar la ventana.
+            let start = Instant::now();
+            while matches!(child.try_wait(), Ok(None)) && start.elapsed() < Duration::from_secs(1) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
         if self.tabs.is_empty() {
             self.active = 0;
             if self.window_title != "Orion" {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title("Orion".into()));
                 self.window_title = "Orion".into();
             }
-            return;
+        } else {
+            self.active = active_after_close(self.active, index, self.tabs.len());
         }
-        self.active = active_after_close(self.active, index, self.tabs.len());
+        tab
     }
 
     /// Enfoca la pestaña Grafo del repo de la pestaña `i`, o abre una (queda activa: así carga).

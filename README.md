@@ -34,7 +34,9 @@ its own branch, and Orion tells you when one of them needs you.
   that window, pick a recent repo or one next to the current one, or paste a path; tick several
   agents to launch them at once, each in its own worktree and branch.
 - Worktrees are never deleted behind your back. Palette → "Limpiar worktrees de Orion" removes the
-  ones no tab uses, skipping any with unsaved changes; a branch is deleted only once merged.
+  ones no tab uses, skipping any with unsaved changes; a branch is deleted only once its work is in
+  the current branch (squash merges count). When a whole orchestrator plan has succeeded,
+  "Limpiar" asks for confirmation, then closes its tabs and cleans up the same way.
 - Split any pane to the right or downward, each with its own shell.
 - **Grafo tab**: the branch icon on a project header (or palette → "Ver grafo de ramas") shows the
   repo's branches and commits as a graph, with search (`Enter` jumps to the next match), ref chips

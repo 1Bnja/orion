@@ -3,6 +3,7 @@
 //! Las que dependen de otras (`after`) esperan: arrancan, desde las ramas de aquellas, cuando sus
 //! agentes terminan (los cierras con /exit después de revisar) y dejaron commits.
 
+mod cleanup;
 mod graph;
 mod view;
 
@@ -101,6 +102,16 @@ impl Run {
         }
     }
 
+    /// La rama de su worktree, si llegó a arrancar.
+    fn branch(&self) -> Option<&str> {
+        match self {
+            Run::Working { branch, .. } | Run::Done { branch, .. } | Run::Closed { branch, .. } => {
+                Some(branch)
+            }
+            Run::Waiting | Run::Blocked(_) => None,
+        }
+    }
+
     /// Lo que muestra la ventana, y si es un problema.
     fn label(&self, title: &str) -> (String, bool) {
         match self {
@@ -146,6 +157,8 @@ pub(super) struct Orchestrate {
     checked: Instant,
     /// Desde cuándo trabaja el agente de cada panel. No se guarda: un plan recuperado no la tiene.
     since: HashMap<u64, Instant>,
+    /// «Limpiar» pedido: lo que se va a hacer, a la espera de que confirmes.
+    cleanup: Option<cleanup::Cleanup>,
 }
 
 impl Default for Orchestrate {
@@ -167,6 +180,7 @@ impl Default for Orchestrate {
             checking: None,
             checked: Instant::now(),
             since: HashMap::new(),
+            cleanup: None,
         }
     }
 }
@@ -251,6 +265,13 @@ impl Orchestrate {
         self.step.lock().unwrap().clone()
     }
 
+    /// Deja de seguir el plan y cierra la ventana.
+    fn forget(&mut self) {
+        (self.plan, self.open, self.paused) = (Vec::new(), false, false);
+        self.cleanup = None;
+        self.persist();
+    }
+
     fn set(&mut self, step: Step) {
         self.step = Arc::new(Mutex::new(step));
     }
@@ -268,7 +289,8 @@ impl Orion {
         // Con un plan en camino, listo o en curso, se vuelve a él: es de su repo, no del de la pestaña actual.
         let o = &mut self.orchestrate;
         if !o.plan.is_empty() || matches!(o.step(), Step::Planning | Step::Ready(..)) {
-            o.open = true;
+            // Una confirmación que quedó de antes (se salió a una pestaña) ya no vale.
+            (o.open, o.cleanup) = (true, None);
             return;
         }
         let root = match self.session().and_then(|s| s.cwd.clone()) {
@@ -312,7 +334,10 @@ impl Orion {
         if !open {
             return None;
         }
-        if escape || shown.clicked_outside {
+        // Con la confirmación a la vista, Escape solo la cancela.
+        if escape && self.orchestrate.cleanup.is_some() {
+            intents.push(Intent::CancelClean);
+        } else if escape || shown.clicked_outside {
             intents.push(Intent::Close);
         }
 
@@ -324,19 +349,18 @@ impl Orion {
         for intent in intents {
             let o = &mut self.orchestrate;
             match intent {
-                Intent::Close => o.open = false,
+                Intent::Close => (o.open, o.cleanup) = (false, None),
                 Intent::Plan => self.start_planning(ctx),
                 Intent::Back => {
                     // Volver durante la planificación es cancelarla: se corta el proceso, no solo la vista.
                     crate::orchestrator::cancel(&o.planner);
                     o.set(Step::Writing);
                 }
-                Intent::Forget => {
-                    (o.plan, o.open, o.paused) = (Vec::new(), false, false);
-                    o.persist();
-                }
+                Intent::Forget => o.forget(),
                 Intent::Resume => o.paused = false,
-                Intent::Clean => self.clean_worktrees(),
+                Intent::Clean => self.ask_clean_plan(),
+                Intent::CancelClean => o.cleanup = None,
+                Intent::ConfirmClean => self.clean_plan(ctx),
                 Intent::Launch => {
                     // Se lee de nuevo: lo elegido en este mismo frame también cuenta.
                     if let Step::Ready(subtasks, ..) = o.step() {

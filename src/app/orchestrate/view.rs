@@ -31,7 +31,10 @@ pub(super) enum Intent {
     Back,
     Forget,
     Resume,
+    /// Pedir la limpieza del plan terminado (pide confirmación), y responderla.
     Clean,
+    CancelClean,
+    ConfirmClean,
     /// Elegiste otro ejecutor para una subtarea: (índice, id).
     Pick(usize, String),
     /// Diste por terminada a mano la subtarea con ese índice.
@@ -1255,6 +1258,10 @@ fn footer(ui: &mut Ui, o: &Orchestrate, step: &Step, team: &[Member], out: &mut 
         .inner_margin(egui::Margin::symmetric(PAD, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            if let Some(cleanup) = &o.cleanup {
+                confirm_clean(ui, &cleanup.summary(), out);
+                return;
+            }
             ui.horizontal(|ui| {
                 ui.set_height(34.0);
                 if !o.plan.is_empty() {
@@ -1262,8 +1269,12 @@ fn footer(ui: &mut Ui, o: &Orchestrate, step: &Step, team: &[Member], out: &mut 
                         out.push(Intent::Resume);
                     }
                     if o.plan.iter().all(|(_, run)| run.succeeded())
-                        && Button::new("Limpiar worktrees", Kind::Secondary)
+                        && Button::new("Limpiar", Kind::Secondary)
                             .show(ui)
+                            .on_hover_text(
+                                "Cierra las pestañas del plan, borra sus worktrees y las ramas ya \
+                                 integradas. Antes pide confirmación.",
+                            )
                             .clicked()
                     {
                         out.push(Intent::Clean);
@@ -1359,6 +1370,32 @@ fn footer(ui: &mut Ui, o: &Orchestrate, step: &Step, team: &[Member], out: &mut 
                 }
             });
         });
+}
+
+/// El pie mientras se confirma «Limpiar»: qué va a pasar, y sí o no.
+fn confirm_clean(ui: &mut Ui, summary: &str, out: &mut Vec<Intent>) {
+    let text = RichText::new(summary).size(12.5).color(theme().fg);
+    ui.add(egui::Label::new(text).wrap());
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.set_height(34.0);
+        if Button::new("Cancelar", Kind::Secondary)
+            .keys("Esc")
+            .show(ui)
+            .clicked()
+        {
+            out.push(Intent::CancelClean);
+        }
+        right(ui, |ui| {
+            if Button::new("Limpiar plan", Kind::Danger)
+                .icon(Icon::Trash)
+                .show(ui)
+                .clicked()
+            {
+                out.push(Intent::ConfirmClean);
+            }
+        });
+    });
 }
 
 fn right(ui: &mut Ui, content: impl FnOnce(&mut Ui)) {
