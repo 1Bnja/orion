@@ -430,6 +430,7 @@ mod tests {
     #[test]
     fn unix_shells_run_with_a_terminal_environment() {
         assert_eq!(find_shell("ZSH"), Some(0));
+        #[cfg(target_os = "macos")]
         assert!(installed_shells().contains(&0), "zsh viene con macOS");
         let shell =
             spawn_program(pty_size((80, 24)), "sh", &["-c", "echo orion-$TERM"], &[]).unwrap();
