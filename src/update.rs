@@ -397,6 +397,7 @@ mod tests {
     }
 
     /// Una "instalación" de mentira: el .exe en Windows; en macOS, una .app con su binario adentro.
+    #[cfg(any(windows, target_os = "macos"))]
     fn binary(install: &Path) -> PathBuf {
         if cfg!(windows) {
             install.to_path_buf()
@@ -405,12 +406,14 @@ mod tests {
         }
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
     fn fake_install(install: &Path, text: &str) {
         let file = binary(install);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, text).unwrap();
     }
 
+    #[cfg(any(windows, target_os = "macos"))] // en Linux no hay actualización automática
     #[test]
     fn replacing_keeps_the_old_version_aside() {
         let dir = test_dir("replace");

@@ -21,7 +21,7 @@ impl From<PathBuf> for FontFile {
 }
 
 /// Fuente por defecto: Cascadia Mono en Windows; en macOS SF Mono si está, si no Menlo
-/// (Menlo viene siempre con macOS).
+/// (Menlo viene siempre con macOS); en Linux la primera monoespaciada común que esté instalada.
 pub(crate) fn default_family() -> &'static str {
     #[cfg(target_os = "macos")]
     {
@@ -34,7 +34,22 @@ pub(crate) fn default_family() -> &'static str {
             }
         })
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        static FAMILY: std::sync::OnceLock<&str> = std::sync::OnceLock::new();
+        const COMMON: [&str; 4] = [
+            "DejaVu Sans Mono",
+            "Noto Sans Mono",
+            "Liberation Mono",
+            "Ubuntu Mono",
+        ];
+        FAMILY.get_or_init(|| {
+            (COMMON.iter().copied())
+                .find(|f| find_font(f).is_some())
+                .unwrap_or(COMMON[0])
+        })
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     "Cascadia Mono"
 }
 
@@ -43,7 +58,10 @@ pub(crate) fn default_family() -> &'static str {
 /// macOS: Apple Symbols para lo mismo y Apple Color Emoji para los emoji a color.
 #[cfg(target_os = "macos")]
 const FALLBACK_FONTS: &[&str] = &["Apple Symbols", "Apple Color Emoji"];
-#[cfg(not(target_os = "macos"))]
+/// Linux: DejaVu Sans trae flechas y figuras, y viene en casi todas las distribuciones.
+#[cfg(target_os = "linux")]
+const FALLBACK_FONTS: &[&str] = &["DejaVu Sans", "Noto Sans Symbols 2"];
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 const FALLBACK_FONTS: &[&str] = &["Segoe UI Symbol"];
 
 /// Familia de fuente para el texto en negrita.
@@ -86,18 +104,10 @@ pub(crate) fn face_weight(entry: &str, family: &str) -> Option<bool> {
     }
 }
 
-/// Todas las fuentes instaladas: (entrada del registro, archivo).
-/// HKCU = instaladas solo para tu usuario (guardan la ruta completa).
-/// HKLM = del sistema (guardan solo el nombre del archivo, dentro de C:\Windows\Fonts).
-#[cfg(not(any(windows, target_os = "macos")))]
-pub(crate) fn registry_fonts() -> Vec<(String, FontFile)> {
-    Vec::new()
-}
-
 /// Todas las fuentes instaladas: (entrada como "Menlo Bold", archivo).
-/// macOS no tiene registro: se recorren las carpetas de fuentes (primero las de tu usuario,
-/// como HKCU en Windows) y el nombre de cada una sale de la tabla `name` del archivo.
-#[cfg(target_os = "macos")]
+/// macOS y Linux no tienen registro: se recorren las carpetas de fuentes (primero las de tu
+/// usuario, como HKCU en Windows) y el nombre de cada una sale de la tabla `name` del archivo.
+#[cfg(not(windows))]
 pub(crate) fn registry_fonts() -> Vec<(String, FontFile)> {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -117,11 +127,24 @@ pub(crate) fn registry_fonts() -> Vec<(String, FontFile)> {
     fonts
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 fn scan_font_dirs() -> Vec<(String, FontFile)> {
-    let home = std::env::var_os("HOME").map(|home| Path::new(&home).join("Library/Fonts"));
-    let mut dirs: Vec<PathBuf> = home.into_iter().collect();
-    dirs.extend(["/Library/Fonts", "/System/Library/Fonts"].map(PathBuf::from));
+    #[cfg(target_os = "macos")]
+    let (user, system) = (
+        ["Library/Fonts"].as_slice(),
+        ["/Library/Fonts", "/System/Library/Fonts"].as_slice(),
+    );
+    // Las de fontconfig: la del usuario (y la vieja ~/.fonts) y las del sistema.
+    #[cfg(not(target_os = "macos"))]
+    let (user, system) = (
+        [".local/share/fonts", ".fonts"].as_slice(),
+        ["/usr/local/share/fonts", "/usr/share/fonts"].as_slice(),
+    );
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut dirs: Vec<PathBuf> = (home.iter())
+        .flat_map(|home| user.iter().map(|dir| home.join(dir)))
+        .collect();
+    dirs.extend(system.iter().map(PathBuf::from));
     dirs.reverse(); // se sacan del final: la del usuario queda primero
     let mut fonts = Vec::new();
     // Con subcarpetas: /System/Library/Fonts/Supplemental trae Arial, Courier New, Andale Mono…
@@ -255,7 +278,7 @@ fn read_u32(file: &mut impl Read) -> std::io::Result<u32> {
 
 /// Cuántas fuentes trae el archivo: las colecciones (.ttc) dicen cuántas en su cabecera
 /// ("ttcf" + versión + cantidad); un .ttf/.otf trae una.
-#[cfg(target_os = "macos")] // solo lo usa el recorrido de carpetas de macOS
+#[cfg(not(windows))] // solo lo usa el recorrido de carpetas de macOS y Linux
 fn face_count(path: &Path) -> u32 {
     let read = || -> std::io::Result<u32> {
         let mut file = std::fs::File::open(path)?;
@@ -317,7 +340,7 @@ pub(crate) fn is_monospace(path: &Path, index: u32) -> bool {
 
 /// (familia, estilo) de la fuente `index`, en inglés, leídos de su tabla `name`:
 /// ("Menlo", "Bold"), ("SF Mono", "Regular").
-#[cfg(target_os = "macos")] // solo lo usa el recorrido de carpetas de macOS
+#[cfg(not(windows))] // solo lo usa el recorrido de carpetas de macOS y Linux
 fn face_names(path: &Path, index: u32) -> Option<(String, String)> {
     let mut file = std::fs::File::open(path).ok()?;
     let (offset, len) = find_table(&mut file, index, b"name").ok()??;
@@ -333,7 +356,7 @@ fn face_names(path: &Path, index: u32) -> Option<(String, String)> {
 
 /// Lee la tabla `name`: cabecera (formato, cantidad, dónde empiezan los textos) y después
 /// un registro de 12 bytes por texto (plataforma, codificación, idioma, id, largo, posición).
-#[cfg(target_os = "macos")] // solo lo usa el recorrido de carpetas de macOS
+#[cfg(not(windows))] // solo lo usa el recorrido de carpetas de macOS y Linux
 fn parse_names(table: &[u8]) -> Option<(String, String)> {
     let u16_at = |at: usize| Some(u16::from_be_bytes(table.get(at..at + 2)?.try_into().ok()?));
     let count = u16_at(2)? as usize;
@@ -372,7 +395,7 @@ fn parse_names(table: &[u8]) -> Option<(String, String)> {
     Some((family, style))
 }
 
-#[cfg(target_os = "macos")] // solo lo usa el recorrido de carpetas de macOS
+#[cfg(not(windows))] // solo lo usa el recorrido de carpetas de macOS y Linux
 fn utf16(bytes: &[u8]) -> String {
     let units = bytes
         .as_chunks::<2>()
