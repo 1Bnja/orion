@@ -3,6 +3,9 @@
 //! Las que dependen de otras (`after`) esperan: arrancan, desde las ramas de aquellas, cuando sus
 //! agentes terminan (los cierras con /exit después de revisar) y dejaron commits.
 
+// ponytail: quitar el allow cuando view.rs dibuje el grafo.
+#[cfg_attr(not(test), allow(dead_code))]
+mod graph;
 mod view;
 
 use super::overlay;
