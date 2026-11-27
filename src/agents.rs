@@ -481,10 +481,49 @@ pub(crate) fn orion_worktrees(repo: &Path) -> Vec<(PathBuf, String)> {
 }
 
 /// Quita un worktree y su rama. Sin `--force`: si hay cambios sin guardar, falla y no toca nada.
-/// Devuelve si también se borró la rama (si tiene commits sin fusionar, se conserva).
+/// Devuelve si también se borró la rama (solo si está `integrated`; si no, se conserva).
+/// En Windows la carpeta puede seguir bloqueada un momento tras cerrar su shell: reintenta.
 pub(crate) fn remove_worktree(repo: &Path, path: &Path, branch: &str) -> Result<bool, String> {
-    git(repo, &["worktree", "remove", &path.to_string_lossy()])?;
-    Ok(git(repo, &["branch", "-d", branch]).is_ok())
+    let registered = || orion_worktrees(repo).iter().any(|(_, b)| b == branch);
+    let was_registered = registered();
+    let mut tries = 0;
+    while let Err(e) = git(repo, &["worktree", "remove", &path.to_string_lossy()]) {
+        // Si git ya lo dio de baja, pasó sus comprobaciones y solo falló al borrar la carpeta.
+        if was_registered && !registered() {
+            for _ in 0..5 {
+                if std::fs::remove_dir_all(path).is_ok() || !path.exists() {
+                    break;
+                }
+                std::thread::sleep(RETRY_PAUSE);
+            }
+            break;
+        }
+        tries += 1;
+        if tries == 5 || is_dirty(path) {
+            return Err(e);
+        }
+        std::thread::sleep(RETRY_PAUSE);
+    }
+    Ok(delete_if_integrated(repo, branch))
+}
+
+/// La pausa entre intentos de borrar una carpeta.
+const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Si el worktree tiene cambios sin commitear (o archivos sin seguimiento).
+pub(crate) fn is_dirty(worktree: &Path) -> bool {
+    git(worktree, &["status", "--porcelain"]).is_ok_and(|s| !s.is_empty())
+}
+
+/// Si la rama local `branch` existe.
+pub(crate) fn branch_exists(repo: &Path, branch: &str) -> bool {
+    let name = format!("refs/heads/{branch}");
+    git(repo, &["rev-parse", "--verify", "--quiet", &name]).is_ok()
+}
+
+/// Borra la rama solo si su trabajo ya está en la rama actual. Devuelve si la borró.
+pub(crate) fn delete_if_integrated(repo: &Path, branch: &str) -> bool {
+    integrated(repo, branch) && git(repo, &["branch", "-D", branch]).is_ok()
 }
 
 /// Lo que se escribe en la shell nueva: ir a `dir` (si hay) y lanzar el agente. Una línea por paso,
@@ -564,7 +603,6 @@ pub(crate) fn merge_branch(repo: &Path, branch: &str) -> Result<(), String> {
 
 /// Si el trabajo de `branch` ya está en la rama actual (HEAD) de `repo`, aunque haya entrado por
 /// squash merge: es ancestro, o fusionarla no cambiaría el árbol de HEAD.
-#[allow(dead_code)] // todavía ningún llamador; lo usará otra subtarea.
 pub(crate) fn integrated(repo: &Path, branch: &str) -> bool {
     if git(repo, &["merge-base", "--is-ancestor", branch, "HEAD"]).is_ok() {
         return true;
@@ -924,6 +962,23 @@ no-existe
         let (base, repo, wt) = repo_with_agent("integrated-no");
         commit_file(&wt, "b.txt", "hola\n");
         assert!(!integrated(&repo, "orion/a-1"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn remove_deletes_only_integrated_branches() {
+        let (base, repo, wt) = repo_with_agent("remove-squash");
+        commit_file(&wt, "b.txt", "hola\n");
+        git(&repo, &["merge", "--squash", "orion/a-1"]).unwrap();
+        git(&repo, &["commit", "-q", "-m", "squash"]).unwrap();
+        assert_eq!(remove_worktree(&repo, &wt, "orion/a-1"), Ok(true));
+        assert!(!branch_exists(&repo, "orion/a-1"));
+
+        let other = create_worktree(&repo, "b", None).unwrap();
+        commit_file(&other, "c.txt", "sin fusionar\n");
+        assert_eq!(remove_worktree(&repo, &other, "orion/b-1"), Ok(false));
+        assert!(!other.exists());
+        assert!(branch_exists(&repo, "orion/b-1"));
         let _ = std::fs::remove_dir_all(&base);
     }
 
