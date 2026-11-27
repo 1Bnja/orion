@@ -5,6 +5,7 @@ use super::super::chrome::{Icon, draw_icon_size, medium};
 use super::super::overlay::{
     self, Button, Kind, border, dim_text, faint_text, mix, panel_fill, tint,
 };
+use super::graph::{self, Edge};
 use super::{Orchestrate, Run, Step};
 use crate::colors::theme;
 use crate::config::Executor;
@@ -602,8 +603,8 @@ fn spinner(ui: &Ui, center: Pos2, radius: f32, color: Color32, time: f64) {
         .add(egui::Shape::line(points, Stroke::new(2.0, color)));
 }
 
-/// El número de una subtarea en su círculo.
-fn number(ui: &mut Ui, n: usize) {
+/// El número de una subtarea en su círculo. Devuelve dónde quedó.
+fn number(ui: &mut Ui, n: usize) -> Rect {
     let (rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
     ui.painter().circle(
         rect.center(),
@@ -618,6 +619,147 @@ fn number(ui: &mut Ui, n: usize) {
         medium(11.0),
         theme().fg,
     );
+    rect
+}
+
+/// Ancho de cada carril del grafo, y lo que queda entre el último y las tarjetas.
+const LANE: f32 = 12.0;
+const LANE_GAP: f32 = 6.0;
+
+/// Cómo se dibuja una línea del grafo.
+enum Line {
+    Solid(Color32),
+    /// Punteada y en movimiento: la dependencia sigue trabajando.
+    Moving(Color32),
+}
+
+/// La línea que sale de una subtarea lanzada, según cómo va.
+fn line(run: &Run, title: &str) -> Line {
+    let (_, color, why) = status(run, title);
+    match run {
+        _ if why.is_some() => Line::Solid(color),
+        Run::Working { .. } => Line::Moving(color),
+        Run::Waiting => Line::Solid(color.gamma_multiply(0.5)),
+        _ => Line::Solid(color),
+    }
+}
+
+/// El grafo de dependencias (al estilo `git log --graph`) en el margen izquierdo de las tarjetas.
+/// Mientras se pintan se anota dónde quedó cada una; las líneas van al final, encima.
+struct Graph {
+    edges: Vec<Edge>,
+    lanes: usize,
+    len: usize,
+}
+
+/// La `Ui` de las tarjetas (corrida a la derecha del margen) y, por subtarea, el centro de su
+/// círculo y el rect de su tarjeta.
+type Cards = (Ui, Vec<(Pos2, Rect)>);
+
+/// El rect de la tarjeta que se acaba de pintar, que empezó en `top`.
+fn card_rect(ui: &Ui, top: f32) -> Rect {
+    Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.min_rect().max.y)
+}
+
+impl Graph {
+    fn new(subtasks: &[&Subtask], rounds: &[usize]) -> Self {
+        let (edges, lanes) = graph::edges(subtasks, &graph::screen_order(rounds));
+        let len = subtasks.len();
+        Self { edges, lanes, len }
+    }
+
+    /// Reserva el margen: las tarjetas se pintan en la `Ui` que devuelve.
+    fn margin(&self, ui: &mut Ui) -> Cards {
+        let margin = if self.lanes == 0 {
+            0.0
+        } else {
+            self.lanes as f32 * LANE + LANE_GAP
+        };
+        let mut rect = ui.available_rect_before_wrap();
+        rect.min.x += margin;
+        let cards = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+        (cards, vec![(Pos2::ZERO, Rect::NOTHING); self.len])
+    }
+
+    /// Da por pintadas las tarjetas y dibuja las líneas; `style(origen)` dice cómo va cada una.
+    fn finish(&self, ui: &mut Ui, (cards, at): Cards, style: impl Fn(usize) -> Line) {
+        ui.advance_cursor_after_rect(cards.min_rect());
+        // Al pasar el mouse por una tarjeta se destacan ella, sus vecinas y las líneas entre ellas.
+        let hovered = at.iter().position(|(_, r)| ui.rect_contains_pointer(*r));
+        let near = |i: usize| {
+            hovered.is_none_or(|h| {
+                i == h
+                    || (self.edges.iter())
+                        .any(|e| (e.from, e.to) == (h, i) || (e.to, e.from) == (h, i))
+            })
+        };
+        let painter = ui.painter();
+        for (i, (_, rect)) in at.iter().enumerate() {
+            if !near(i) {
+                painter.rect_filled(*rect, 10.0, panel_fill().gamma_multiply(0.55));
+            }
+        }
+
+        let time = ui.input(|i| i.time) as f32;
+        let mut moving = false;
+        let left = cards.max_rect().min.x;
+        for e in &self.edges {
+            let (Some(&(a, _)), Some(&(b, _))) = (at.get(e.from), at.get(e.to)) else {
+                continue;
+            };
+            let lit = hovered.is_some_and(|h| h == e.from || h == e.to);
+            let (color, dashed) = match style(e.from) {
+                Line::Solid(c) => (c, false),
+                Line::Moving(c) => (c, true),
+            };
+            let (color, width) = match hovered {
+                None => (color, 1.5),
+                Some(_) if lit => (color, 2.0),
+                Some(_) => (color.gamma_multiply(0.25), 1.5),
+            };
+            let stroke = Stroke::new(width, color);
+            let points = path(a, b, left - LANE_GAP - LANE / 2.0 - e.lane as f32 * LANE);
+            if dashed {
+                moving = true;
+                let offset = (time * 16.0).rem_euclid(8.0);
+                painter.extend(egui::Shape::dashed_line_with_offset(
+                    &points,
+                    stroke,
+                    &[4.0],
+                    &[4.0],
+                    offset,
+                ));
+            } else {
+                painter.add(egui::Shape::line(points, stroke));
+            }
+        }
+        if moving {
+            ui.ctx().request_repaint_after(SPINNER_FRAME);
+        }
+    }
+}
+
+/// El trazo de una línea del grafo: sale del círculo `a` hacia la izquierda, baja (o sube) por el
+/// carril en `x` con las esquinas curvas y entra al círculo `b`.
+fn path(a: Pos2, b: Pos2, x: f32) -> Vec<Pos2> {
+    // Del borde de cada círculo, no de su centro.
+    let (a, b) = (a - vec2(11.0, 0.0), b - vec2(11.0, 0.0));
+    let r = 7.0_f32.min((b.y - a.y).abs() / 2.0);
+    let dy = r * (b.y - a.y).signum();
+    let corner = |from: Pos2, at: Pos2, to: Pos2| {
+        egui::epaint::QuadraticBezierShape::from_points_stroke(
+            [from, at, to],
+            false,
+            Color32::TRANSPARENT,
+            Stroke::NONE,
+        )
+        .flatten(Some(0.2))
+    };
+    let mut points = vec![a];
+    points.extend(corner(pos2(x + r, a.y), pos2(x, a.y), pos2(x, a.y + dy)));
+    points.extend(corner(pos2(x, b.y - dy), pos2(x, b.y), pos2(x + r, b.y)));
+    points.push(b);
+    points
 }
 
 /// El botón que muestra el ejecutor de una subtarea y deja cambiarlo.
@@ -731,6 +873,7 @@ fn review(
     let refs: Vec<&Subtask> = subtasks.iter().collect();
     let rounds = rounds(&refs);
     let total = rounds.iter().copied().max().unwrap_or(1);
+    let graph = Graph::new(&refs, &rounds);
     let plural =
         |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     ui.label(
@@ -748,6 +891,8 @@ fn review(
          lanzar.",
     );
 
+    let mut cards = graph.margin(ui);
+    let (parent, ui) = (ui, &mut cards.0);
     for round in 1..=total {
         let members: Vec<usize> = (0..subtasks.len())
             .filter(|&i| rounds[i] == round)
@@ -762,11 +907,12 @@ fn review(
         section(ui, &title, hint);
         for i in members {
             let s = &subtasks[i];
+            let top = ui.cursor().min.y;
             card(ui, None, |ui| {
                 let open = o.expanded == Some(i);
                 ui.horizontal(|ui| {
                     ui.set_height(28.0);
-                    number(ui, i + 1);
+                    cards.1[i].0 = number(ui, i + 1).center();
                     ui.add_space(2.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         executor_menu(ui, i, &s.executor, offered, team, out);
@@ -797,8 +943,11 @@ fn review(
                         });
                 }
             });
+            cards.1[i].1 = card_rect(ui, top);
         }
     }
+    graph.finish(parent, cards, |_| Line::Solid(dim_text()));
+    let ui = parent;
     ui.add_space(4.0);
     note(
         ui,
@@ -925,6 +1074,9 @@ fn running(ui: &mut Ui, o: &Orchestrate, activity: &HashMap<u64, String>, out: &
     let runs: Vec<&Run> = o.plan.iter().map(|(_, run)| run).collect();
     let rounds = rounds(&refs);
     let active = active_round(&rounds, &runs);
+    let graph = Graph::new(&refs, &rounds);
+    let mut cards = graph.margin(ui);
+    let (parent, ui) = (ui, &mut cards.0);
 
     let mut working = false;
     for round in 1..=rounds.iter().copied().max().unwrap_or(0) {
@@ -940,6 +1092,7 @@ fn running(ui: &mut Ui, o: &Orchestrate, activity: &HashMap<u64, String>, out: &
             }
             let (label, color, why) = status(run, &s.title);
             let accent = why.is_some().then_some(color);
+            let top = ui.cursor().min.y;
             card(ui, accent, |ui| {
                 ui.horizontal(|ui| {
                     ui.set_height(28.0);
@@ -947,8 +1100,9 @@ fn running(ui: &mut Ui, o: &Orchestrate, activity: &HashMap<u64, String>, out: &
                         working = true;
                         let (rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
                         spinner(ui, rect.center(), 8.0, color, time);
+                        cards.1[i].0 = rect.center();
                     } else {
-                        number(ui, i + 1);
+                        cards.1[i].0 = number(ui, i + 1).center();
                     }
                     ui.add_space(2.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1050,10 +1204,12 @@ fn running(ui: &mut Ui, o: &Orchestrate, activity: &HashMap<u64, String>, out: &
                     });
                 }
             });
+            cards.1[i].1 = card_rect(ui, top);
         }
     }
+    graph.finish(parent, cards, |from| line(runs[from], &refs[from].title));
     if working {
-        ui.ctx().request_repaint_after(SPINNER_FRAME);
+        parent.ctx().request_repaint_after(SPINNER_FRAME);
     }
 }
 
@@ -1194,6 +1350,17 @@ mod tests {
         let plan = [task(&[]), task(&[]), task(&[0]), task(&[1, 2])];
         let refs: Vec<&Subtask> = plan.iter().collect();
         assert_eq!(rounds(&refs), [1, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_graph_line_goes_from_circle_to_circle_through_its_lane() {
+        let points = path(pos2(100.0, 10.0), pos2(100.0, 90.0), 40.0);
+        assert_eq!(points.first(), Some(&pos2(89.0, 10.0)));
+        assert_eq!(points.last(), Some(&pos2(89.0, 90.0)));
+        // Llega al carril y nunca se pasa de él, ni vuelve hacia arriba.
+        assert!(points.iter().any(|p| p.x == 40.0));
+        assert!(points.iter().all(|p| p.x >= 40.0));
+        assert!(points.windows(2).all(|w| w[0].y <= w[1].y));
     }
 
     #[test]
